@@ -58,6 +58,8 @@ fn main() {
             let log_dir: PathBuf = data_dir.join("logs");
             init_logging(&log_dir);
             tracing::info!(version = env!("CARGO_PKG_VERSION"), data_dir = %data_dir.display(), "流界启动");
+            // 后台运行时不被系统降速，否则跨屏会卡顿。
+            flow_platform::keep_responsive();
 
             let open = MenuItem::with_id(app, "open", "打开流界", true, None::<&str>)?;
             let pause =

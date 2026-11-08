@@ -74,6 +74,17 @@ pub fn refresh_display_names() {
     macos::refresh_display_names();
 }
 
+/// 告诉系统流界是延迟敏感的后台程序，不要降速（启动时调用一次）。
+///
+/// 流界大部分时间窗口隐藏、在后台运行；macOS 的 App Nap 和 Windows 11 的电源节流（EcoQoS）
+/// 会降低后台程序的调度优先级、合并定时器，注入键鼠就会卡顿、有延迟。
+pub fn keep_responsive() {
+    #[cfg(target_os = "macos")]
+    macos::keep_responsive();
+    #[cfg(windows)]
+    windows::keep_responsive();
+}
+
 /// 当前系统的权限检测实现。
 pub fn permissions() -> Box<dyn Permissions> {
     #[cfg(target_os = "macos")]

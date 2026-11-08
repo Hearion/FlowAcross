@@ -22,6 +22,20 @@ use crate::{DisplayProvider, Permission, PermissionState, Permissions, PlatformE
 /// 名称只能通过 AppKit 的 NSScreen 在主线程读取，后台线程枚举显示器时使用缓存。
 static NAMES: Mutex<Option<HashMap<u32, String>>> = Mutex::new(None);
 
+/// 登记一个贯穿整个进程的"用户发起、延迟敏感"活动，系统就不会对流界启用 App Nap
+/// （后台降速、合并定时器会让注入的键鼠卡顿）。Info.plist 里也声明了 LSAppNapIsDisabled。
+pub fn keep_responsive() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo};
+    let reason = NSString::from_str("流界在电脑之间实时传递键盘和鼠标");
+    let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
+            | NSActivityOptions::LatencyCritical,
+        &reason,
+    );
+    // 活动在 token 释放时结束，进程存活期间一直保留。
+    std::mem::forget(token);
+}
+
 /// 在主线程刷新显示器名称缓存；不在主线程时什么也不做。
 /// 应用启动时和定期（经由主线程调度）调用。
 pub fn refresh_display_names() {

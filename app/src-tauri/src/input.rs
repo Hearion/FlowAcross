@@ -181,7 +181,7 @@ impl Controller {
                     self.local_move(x, y, dx, dy);
                 }
                 // 控制远端期间的移动一律拦截，包括触发切回本机的这一次：
-                // 它的坐标是光标锁定时的位置（Windows 上是屏幕中央）加上位移，
+                // 它的坐标是光标锁定时的位置（Windows 上是离开处往屏幕内收一点）加上位移，
                 // 放行会把刚放到边缘的光标又拉回去。
                 if was_remote || self.active.is_some() {
                     Verdict::Suppress

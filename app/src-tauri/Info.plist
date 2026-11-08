@@ -11,5 +11,8 @@
   <array>
     <string>_flowacross._udp</string>
   </array>
+  <!-- 不参与 App Nap：流界大部分时间在后台运行，被系统降速后注入键鼠会卡顿、延迟。 -->
+  <key>LSAppNapIsDisabled</key>
+  <true/>
 </dict>
 </plist>
