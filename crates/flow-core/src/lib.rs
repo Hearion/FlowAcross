@@ -10,6 +10,7 @@
 //! - [`protocol`]：设备间消息与帧编解码。
 //! - [`pairing`]：设备指纹与 6 位配对码。
 //! - [`clipboard`]：剪贴板同步防回环。
+//! - [`throttle`]：鼠标位置发送节流。
 
 pub mod clipboard;
 pub mod cursor;
@@ -19,6 +20,7 @@ pub mod layout;
 pub mod pairing;
 pub mod protocol;
 pub mod switching;
+pub mod throttle;
 
 pub use geometry::{Edge, Point, Rect};
 pub use layout::{DeviceId, Display, DisplayId, EdgeMapping, Layout};

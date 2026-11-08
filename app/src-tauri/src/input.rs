@@ -58,6 +58,9 @@ struct Active {
     last_beat: Instant,
     /// 这次控制转发的按键数（写进日志，便于排查"键盘没过去"）。
     keys_sent: u32,
+    /// 这次控制收到的本机鼠标移动事件数和开始时间（写进日志，便于排查卡顿：看鼠标回报率）。
+    moves: u32,
+    started: Instant,
 }
 
 pub struct Controller {
@@ -290,6 +293,7 @@ impl Controller {
         let Some(a) = self.active.as_mut() else {
             return;
         };
+        a.moves += 1;
         let Ok(contact) = a.cursor.apply_delta(&self.cfg.layout, dx, dy, mapping) else {
             // 远端显示器已不在布局中。
             self.leave_to_local(None);
@@ -353,13 +357,21 @@ impl Controller {
             session,
             last_beat: Instant::now(),
             keys_sent: 0,
+            moves: 0,
+            started: Instant::now(),
         });
         let _ = self.events.send(ControlEvent::Changed);
     }
 
     /// 释放远端所有按键并通知对方结束控制。
     fn release_remote(&mut self, old: &Active) {
-        info!(keys = old.keys_sent, "结束控制远端");
+        let secs = old.started.elapsed().as_secs_f64();
+        info!(
+            keys = old.keys_sent,
+            moves = old.moves,
+            secs = format!("{secs:.1}"),
+            "结束控制远端"
+        );
         for ev in self.router.leave_remote() {
             let _ = old.tx.send(input_message(ev));
         }

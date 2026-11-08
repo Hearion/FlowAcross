@@ -17,6 +17,7 @@ use flow_core::layout::{DeviceId, Display, DisplayId, Layout};
 use flow_core::pairing::{PairingCode, device_id, pairing_code};
 use flow_core::protocol::{ByeReason, DisplayInfo, Message, Os, PROTOCOL_VERSION};
 use flow_core::switching::SwitchPolicy;
+use flow_core::throttle::MoveThrottle;
 use flow_net::discovery::{Advert, Discovery, DiscoveryEvent, Found};
 use flow_net::quinn;
 use flow_net::{Identity, Link, peer_fingerprint};
@@ -38,6 +39,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_AUTO_ATTEMPTS: u32 = 5;
 /// 被控制期间超过这么久没收到对方任何消息（含心跳），就自行释放按键、结束被控制。
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
+/// 两次发送鼠标位置的最小间隔（毫秒），即最多 250 次/秒，高于常见屏幕刷新率。
+const MOUSE_SEND_INTERVAL_MS: u64 = 4;
 const INPUT_TICK: Duration = Duration::from_millis(40);
 const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
@@ -1373,10 +1376,32 @@ impl Engine {
         self.emit();
         self.ensure_capture();
 
+        // 发送端节流鼠标位置：高回报率鼠标每秒上千个事件，全发出去会让网络排队、远端注入跟不上。
         let writer = tokio::spawn(async move {
-            while let Some(m) = rx.recv().await {
-                if sender.send(&m).await.is_err() {
-                    break;
+            let epoch = Instant::now();
+            let now = || epoch.elapsed().as_millis() as u64;
+            let mut throttle = MoveThrottle::new(MOUSE_SEND_INTERVAL_MS);
+            loop {
+                let out = match throttle.deadline() {
+                    Some(due) => {
+                        let wait = Duration::from_millis(due.saturating_sub(now()));
+                        tokio::select! {
+                            m = rx.recv() => match m {
+                                Some(m) => throttle.push(m, now()),
+                                None => break,
+                            },
+                            _ = tokio::time::sleep(wait) => throttle.flush(now()).into_iter().collect(),
+                        }
+                    }
+                    None => match rx.recv().await {
+                        Some(m) => throttle.push(m, now()),
+                        None => break,
+                    },
+                };
+                for m in out {
+                    if sender.send(&m).await.is_err() {
+                        return;
+                    }
                 }
             }
         });
