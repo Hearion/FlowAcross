@@ -9,7 +9,7 @@
 - [x] `flow-core`：布局空间、跨边映射、切换判定、按键状态跟踪、协议编解码、配对码
 - [x] `flow-core` 单元测试
 - [x] `flow-platform` trait 定义
-- [ ] CI：macOS + Windows 上跑 fmt / clippy / test（`.github/workflows/ci.yml` 已写，待推到远端验证）
+- [x] CI：macOS + Windows 上跑 fmt / clippy / test（`.github/workflows/ci.yml`，已在 GitHub 上通过）
 - [x] 界面视觉设计（布局图、跨屏边、设置面板）
 
 ## M1 本机输入（平台层）
@@ -58,8 +58,8 @@
 - [x] 跨设备文本复制粘贴，防回环，可独立关闭（每 0.5 秒检查剪贴板变化；待真机验证）
 - [ ] 休眠 / 唤醒 / 锁屏处理
 - [ ] 开机启动、单实例
-- [ ] 打包：macOS 签名 + 公证，Windows 签名安装包（推标签自动打包发布已完成，见 `docs/release.md`；macOS 目前用自签名证书，Windows 未签名）
-- [x] 自动更新：发布到公开仓库 FlowAcross-releases，App 定期检查、提示后下载验签安装（待第一次正式发版验证）
+- [ ] 打包：macOS 签名 + 公证，Windows 签名安装包（推标签自动打包发布已完成，v0.1.0 已发布，见 `docs/release.md`；macOS 目前用自签名证书，Windows 未签名）
+- [x] 自动更新：发布到公开仓库 FlowAcross-releases，App 定期检查、提示后下载验签安装（待下一个版本验证从 v0.1.0 升级）
 
 ## 后续版本
 
