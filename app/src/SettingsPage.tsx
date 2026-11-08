@@ -4,6 +4,7 @@ import { PermissionList } from "./Dialogs";
 import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
 import { Logo, Toggle } from "./ui";
+import { ProgressBar, type Updater } from "./Updater";
 
 export type SettingsSection = "general" | "permissions" | "crossing" | "clipboard" | "updates" | "account" | "about";
 
@@ -19,12 +20,13 @@ const NAV: { id: SettingsSection; label: string }[] = [
 
 interface Props {
   state: StateView;
+  updater: Updater;
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
   onClose: () => void;
 }
 
-export function SettingsPage({ state, section, onSection, onClose }: Props) {
+export function SettingsPage({ state, updater, section, onSection, onClose }: Props) {
   const update = (patch: Partial<Settings>) => api.updateSettings({ ...state.settings, ...patch });
   const missing = state.permissions.filter((p) => p.state !== "granted" && p.state !== "not_applicable").length;
 
@@ -90,23 +92,22 @@ export function SettingsPage({ state, section, onSection, onClose }: Props) {
         {section === "updates" && (
           <Section title="软件更新">
             <Panel>
+              <UpdateStatus version={state.about.version} updater={updater} />
               <div className="setting inline">
                 <div className="setting-text">
-                  <span>当前版本</span>
-                  <small>流界 {state.about.version}（开发版）</small>
+                  <span>自动检查更新</span>
+                  <small>启动时和之后每隔 6 小时检查一次，有新版本时提示你，不会自动安装</small>
                 </div>
-                <button className="btn small" disabled title="正式版提供">
-                  检查更新
-                </button>
-              </div>
-              <div className="setting inline">
-                <div className="setting-text">
-                  <span>自动下载并安装更新</span>
-                  <small>正式发布后开启。两台电脑版本不一致时，流界会提示升级</small>
-                </div>
-                <Toggle label="自动更新" checked={false} onChange={() => {}} disabled />
+                <Toggle
+                  label="自动检查更新"
+                  checked={state.settings.auto_check_updates}
+                  onChange={(v) => update({ auto_check_updates: v })}
+                />
               </div>
             </Panel>
+            <p className="settings-note">
+              更新时流界会先断开与其他电脑的键鼠共享，安装完成后自动重新打开并重新连接。两台电脑请尽量保持相同版本。
+            </p>
           </Section>
         )}
 
@@ -183,6 +184,72 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
         <span>{label}</span>
       </div>
       <span className={`row-value ${mono ? "mono" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+function UpdateStatus({ version, updater }: { version: string; updater: Updater }) {
+  const { phase, info, progress, error, needsRestart, installFailed } = updater;
+  const busy = phase === "checking" || phase === "downloading" || phase === "installing";
+
+  let status: string;
+  switch (phase) {
+    case "checking":
+      status = "正在检查更新…";
+      break;
+    case "latest":
+      status = "已是最新版本";
+      break;
+    case "available":
+      status = `新版本 ${info?.version} 可以安装${info?.date ? `（${info.date} 发布）` : ""}`;
+      break;
+    case "downloading":
+      status = `正在下载 ${info?.version}${progress !== null ? `（${Math.round(progress * 100)}%）` : "…"}`;
+      break;
+    case "installing":
+      status = "正在安装，完成后流界会自动重新打开";
+      break;
+    case "error":
+      status = error ?? "更新失败";
+      break;
+    default:
+      status = import.meta.env.DEV ? "开发版" : "";
+  }
+
+  let action = (
+    <button className="btn small" onClick={updater.check} disabled={busy}>
+      {phase === "checking" ? "检查中…" : "检查更新"}
+    </button>
+  );
+  if (phase === "available" || (phase === "error" && installFailed && !needsRestart)) {
+    action = (
+      <button className="btn small primary" onClick={updater.install}>
+        {phase === "error" ? "重试" : "立即更新"}
+      </button>
+    );
+  } else if (needsRestart) {
+    action = (
+      <button className="btn small primary" onClick={updater.restart}>
+        重新打开流界
+      </button>
+    );
+  }
+
+  return (
+    <div className="setting">
+      <div className="update-row">
+        <div className="setting-text">
+          <span>当前版本 {version}</span>
+          {status && <small className={phase === "error" ? "text-danger" : undefined}>{status}</small>}
+        </div>
+        {action}
+      </div>
+      {(phase === "downloading" || phase === "installing") && (
+        <ProgressBar value={phase === "installing" ? null : progress} />
+      )}
+      {info?.notes && (phase === "available" || phase === "downloading") && (
+        <pre className="update-notes">{info.notes}</pre>
+      )}
     </div>
   );
 }

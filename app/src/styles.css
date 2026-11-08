@@ -931,6 +931,79 @@ kbd {
   font-size: 13px;
 }
 
+.banner.info {
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: var(--accent-soft);
+}
+
+.banner-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.banner-progress {
+  display: grid;
+  flex: 1;
+  gap: 6px;
+  padding: 2px 6px 2px 0;
+}
+
+/* ============ 软件更新 ============ */
+.progress {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+.progress.indeterminate .progress-fill {
+  width: 30%;
+  animation: progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-notes {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.setting-text small.text-danger {
+  color: var(--danger);
+}
+
 .map-empty {
   position: absolute;
   right: 0;

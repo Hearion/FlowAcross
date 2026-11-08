@@ -6,6 +6,7 @@ import { Onboarding } from "./Onboarding";
 import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import type { DeviceView, Settings, StateView } from "./types";
+import { UpdateBanner, useUpdater } from "./Updater";
 import { ComputerIcon, CursorIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, hueOf, isMac, resolution } from "./ui";
 
 function statusChip(d: DeviceView) {
@@ -31,6 +32,7 @@ export default function App() {
   const [removing, setRemoving] = useState<DeviceView | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const toastId = useRef(0);
+  const updater = useUpdater();
 
   const toast = useCallback((text: string) => {
     const id = ++toastId.current;
@@ -124,6 +126,7 @@ export default function App() {
       {settingsSection ? (
         <SettingsPage
           state={state}
+          updater={updater}
           section={settingsSection}
           onSection={setSettingsSection}
           onClose={() => setSettingsSection(null)}
@@ -146,6 +149,8 @@ export default function App() {
               </button>
             </div>
           )}
+
+          <UpdateBanner updater={updater} />
 
           <LayoutMap
             layout={state.layout}

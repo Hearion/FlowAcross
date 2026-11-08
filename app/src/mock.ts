@@ -1,7 +1,7 @@
 // 浏览器预览用的内存模拟后端：不在 Tauri 窗口里时使用，方便调样式。行为尽量贴近真实引擎。
 
 import type { Api } from "./api";
-import type { StateView } from "./types";
+import type { StateView, UpdateProgress } from "./types";
 
 export function createMock(): Api {
   let state: StateView = {
@@ -21,7 +21,7 @@ export function createMock(): Api {
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, sharing_paused: false },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, sharing_paused: false, auto_check_updates: true },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -38,6 +38,8 @@ export function createMock(): Api {
     stateListeners.forEach((cb) => cb(structuredClone(state)));
   };
   const notice = (m: string) => noticeListeners.forEach((cb) => cb(m));
+  const progressListeners = new Set<(p: UpdateProgress) => void>();
+  const mockUpdate = { version: "0.2.0", current: "0.1.0", notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
 
   return {
     getState: async () => structuredClone(state),
@@ -103,6 +105,21 @@ export function createMock(): Api {
     openPermissionSettings: async () => notice("（浏览器预览）这里会打开系统设置"),
     openLogs: async () => notice("（浏览器预览）这里会打开日志文件夹"),
     openDataDir: async () => notice("（浏览器预览）这里会打开数据目录"),
+    checkUpdate: () => new Promise((resolve) => setTimeout(() => resolve(mockUpdate), 600)),
+    installUpdate: () =>
+      new Promise((_, reject) => {
+        const total = 12_000_000;
+        let downloaded = 0;
+        const timer = setInterval(() => {
+          downloaded = Math.min(total, downloaded + 1_500_000);
+          progressListeners.forEach((cb) => cb({ downloaded, total }));
+          if (downloaded >= total) {
+            clearInterval(timer);
+            reject({ message: "（浏览器预览）这里会安装更新并重新打开流界", restart: false });
+          }
+        }, 250);
+      }),
+    restartApp: async () => notice("（浏览器预览）这里会重新打开流界"),
     // 每次订阅包一层新函数：React 开发模式会"订阅-退订-再订阅"同一个回调，直接存回调会被误删。
     onState: async (cb) => {
       const h = (st: StateView) => cb(st);
@@ -113,6 +130,13 @@ export function createMock(): Api {
       const h = (m: string) => cb(m);
       noticeListeners.add(h);
       return () => noticeListeners.delete(h);
+    },
+    // 浏览器预览里不会自动推送新版本，在设置页点「检查更新」即可看到示例。
+    onUpdateAvailable: async () => () => {},
+    onUpdateProgress: async (cb) => {
+      const h = (p: UpdateProgress) => cb(p);
+      progressListeners.add(h);
+      return () => progressListeners.delete(h);
     },
   };
 }

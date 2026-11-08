@@ -1,10 +1,9 @@
-name: Windows 安装包
+name: Windows 测试包
 
-# 在 GitHub 仓库的 Actions 页面手动运行，或推送 v* 标签时自动运行。
+# 在 GitHub 仓库的 Actions 页面手动运行，安装包作为 Actions 附件下载（不发布、不触发自动更新）。
+# 正式发版走 release.yml（推送 v* 标签）。
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
 
 jobs:
   build:

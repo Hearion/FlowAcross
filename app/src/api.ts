@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { PermissionKind, Settings, StateView } from "./types";
+import type { PermissionKind, Settings, StateView, UpdateInfo, UpdateProgress } from "./types";
 import { createMock } from "./mock";
 
 /** 是否运行在 Tauri 窗口里。直接用浏览器打开 Vite 页面时为 false，改用内存中的演示数据。 */
@@ -27,8 +27,15 @@ export interface Api {
   openPermissionSettings(kind: PermissionKind): Promise<void>;
   openLogs(): Promise<void>;
   openDataDir(): Promise<void>;
+  /** 没有新版本时返回 null；失败时以字符串原因 reject。 */
+  checkUpdate(): Promise<UpdateInfo | null>;
+  /** 下载并安装最近一次检查到的版本，成功后程序会重新打开。失败时以 `UpdateError` reject。 */
+  installUpdate(): Promise<void>;
+  restartApp(): Promise<void>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
+  onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
+  onUpdateProgress(cb: (p: UpdateProgress) => void): Promise<Unlisten>;
 }
 
 const tauriApi: Api = {
@@ -47,8 +54,13 @@ const tauriApi: Api = {
   openPermissionSettings: (kind) => invoke("open_permission_settings", { kind }),
   openLogs: () => invoke("open_logs"),
   openDataDir: () => invoke("open_data_dir"),
+  checkUpdate: () => invoke("check_update"),
+  installUpdate: () => invoke("install_update"),
+  restartApp: () => invoke("restart_app"),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
+  onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
+  onUpdateProgress: (cb) => listen<UpdateProgress>("update-progress", (e) => cb(e.payload)),
 };
 
 export const api: Api = inTauri ? tauriApi : createMock();

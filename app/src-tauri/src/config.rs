@@ -35,6 +35,8 @@ pub struct Settings {
     pub clipboard: bool,
     /// 暂停共享（键鼠不再流转到其他设备，连接保持）。
     pub sharing_paused: bool,
+    /// 启动时和之后每隔几小时检查一次新版本（只提示，不自动安装）。
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -46,6 +48,7 @@ impl Default for Settings {
             mapping: EdgeMapping::Continuous,
             clipboard: true,
             sharing_paused: false,
+            auto_check_updates: true,
         }
     }
 }
@@ -142,7 +145,7 @@ mod tests {
         // 旧版本配置缺字段时用默认值补齐
         fs::write(dir.join(FILE), br#"{"onboarded":true}"#).unwrap();
         let old = Config::load(&dir);
-        assert!(old.onboarded && old.settings.clipboard);
+        assert!(old.onboarded && old.settings.clipboard && old.settings.auto_check_updates);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

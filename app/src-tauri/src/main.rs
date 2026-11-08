@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod engine;
 mod input;
+mod updater;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +44,8 @@ fn show_main_window(app: &AppHandle) {
 
 fn main() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::PendingUpdate::default())
         .setup(|app| {
             // 开发调试：FLOWACROSS_PROFILE=b 可以在同一台电脑上再开一个独立身份的实例。
             let profile = std::env::var("FLOWACROSS_PROFILE")
@@ -129,6 +132,7 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            updater::spawn_auto_check(app.handle().clone());
             Ok(())
         })
         // 关闭窗口时收起到托盘 / 菜单栏，而不是退出。
@@ -154,6 +158,9 @@ fn main() {
             commands::open_permission_settings,
             commands::open_logs,
             commands::open_data_dir,
+            updater::check_update,
+            updater::install_update,
+            updater::restart_app,
         ])
         .build(tauri::generate_context!())
         .expect("流界启动失败");

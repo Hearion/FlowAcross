@@ -67,6 +67,8 @@ cd app && npm run tauri dev
 scripts/build-mac.sh
 ```
 
+发布正式版本（自动打包 Windows + macOS 并推送应用内更新）：改版本号、打 `v*` 标签推送即可，一次性配置和步骤见 [docs/release.md](docs/release.md)。
+
 ## macOS 系统权限（开发时必读）
 
 macOS 按"负责启动的应用"记录辅助功能、输入监控权限：

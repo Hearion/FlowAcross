@@ -1,0 +1,217 @@
+name: 发布新版本
+
+# 推送 v* 标签时运行：校验版本号 → 打包 Windows 和 macOS → 发布到公开的发布仓库。
+# 已安装的流界从发布仓库的 latest.json 检查更新。一次性配置和发版步骤见 docs/release.md。
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # 安装包和 latest.json 发布到这个公开仓库（源码仓库是私有的，App 无法从私有仓库下载更新）。
+  RELEASE_OWNER: ${{ github.repository_owner }}
+  RELEASE_REPO: FlowAcross-releases
+
+jobs:
+  prepare:
+    name: 校验版本并创建草稿
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查密钥配置
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          missing=0
+          if [ -z "$RELEASES_TOKEN" ]; then
+            echo "::error::缺少 RELEASES_TOKEN：需要一个能写入 $RELEASE_OWNER/$RELEASE_REPO 的令牌，配置方法见 docs/release.md。"
+            missing=1
+          fi
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY：没有它无法给更新包签名，配置方法见 docs/release.md。"
+            missing=1
+          fi
+          exit $missing
+
+      - name: 校验版本号
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          cargo=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          tauri=$(jq -r .version app/src-tauri/tauri.conf.json)
+          npm=$(jq -r .version app/package.json)
+          echo "标签 $tag / Cargo.toml $cargo / tauri.conf.json $tauri / package.json $npm"
+          if [ "$tag" != "$cargo" ] || [ "$tag" != "$tauri" ] || [ "$tag" != "$npm" ]; then
+            echo "::error::标签和版本号不一致。先运行 node scripts/bump-version.mjs $tag，提交后重新打标签。"
+            exit 1
+          fi
+
+      - name: 读取更新说明
+        id: notes
+        run: |
+          git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed '/-----BEGIN/,$d')
+          [ -z "$notes" ] && notes="流界 $GITHUB_REF_NAME"
+          {
+            echo "notes<<EOF_NOTES"
+            echo "$notes"
+            echo "EOF_NOTES"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 创建草稿发布
+        id: release
+        uses: actions/github-script@v7
+        env:
+          NOTES: ${{ steps.notes.outputs.notes }}
+        with:
+          github-token: ${{ secrets.RELEASES_TOKEN }}
+          script: |
+            const owner = process.env.RELEASE_OWNER;
+            const repo = process.env.RELEASE_REPO;
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data: info } = await github.rest.repos.get({ owner, repo });
+            // 重新运行时复用同一个草稿。
+            const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo });
+            const existing = releases.find((r) => r.tag_name === tag);
+            if (existing && !existing.draft) {
+              core.setFailed(`${owner}/${repo} 已经发布过 ${tag}。请改用新的版本号。`);
+              return;
+            }
+            const release = existing ?? (await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              name: `流界 ${tag}`,
+              body: process.env.NOTES,
+              draft: true,
+              target_commitish: info.default_branch,
+            })).data;
+            core.setOutput('id', release.id);
+
+  build:
+    name: 打包 ${{ matrix.name }}
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            args: --bundles nsis
+          - name: macOS
+            os: macos-latest
+            args: --target universal-apple-darwin --bundles app,dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装前端依赖
+        working-directory: app
+        run: npm ci
+
+      # 只在发布时生成更新包（需要签名私钥），本地打包不受影响。
+      - name: 开启更新包
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const f = "app/src-tauri/tauri.conf.json";
+            const c = JSON.parse(fs.readFileSync(f, "utf8"));
+            c.bundle.createUpdaterArtifacts = true;
+            fs.writeFileSync(f, JSON.stringify(c, null, 2) + "\n");
+          '
+
+      # macOS 按签名记住「辅助功能」「输入监控」授权。用固定证书签名，用户更新后不用重新授权。
+      - name: 准备 macOS 签名证书
+        if: runner.os == 'macOS'
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$CERT" ]; then
+            {
+              echo "APPLE_CERTIFICATE<<EOF_CERT"
+              echo "$CERT"
+              echo "EOF_CERT"
+              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=${IDENTITY:-FlowAcross Dev}"
+            } >> "$GITHUB_ENV"
+            echo "使用证书「${IDENTITY:-FlowAcross Dev}」签名。"
+          else
+            echo "::warning::没有配置 APPLE_CERTIFICATE，macOS 包使用 ad-hoc 签名：用户每次更新后都要重新授权辅助功能和输入监控。配置方法见 docs/release.md。"
+          fi
+
+      - name: 打包并上传
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          owner: ${{ env.RELEASE_OWNER }}
+          repo: ${{ env.RELEASE_REPO }}
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          releaseBody: ${{ needs.prepare.outputs.notes }}
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}
+
+  publish:
+    name: 检查并正式发布
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检查 latest.json 后发布
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        with:
+          github-token: ${{ secrets.RELEASES_TOKEN }}
+          script: |
+            const owner = process.env.RELEASE_OWNER;
+            const repo = process.env.RELEASE_REPO;
+            const release_id = Number(process.env.RELEASE_ID);
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id });
+            const asset = assets.find((a) => a.name === 'latest.json');
+            if (!asset) {
+              core.setFailed('草稿里没有 latest.json，已安装的流界收不到这次更新。请检查打包日志。');
+              return;
+            }
+            const { data } = await github.request('GET /repos/{owner}/{repo}/releases/assets/{asset_id}', {
+              owner, repo, asset_id: asset.id, headers: { accept: 'application/octet-stream' },
+            });
+            const latest = JSON.parse(Buffer.from(data).toString('utf8'));
+            const platforms = Object.keys(latest.platforms ?? {});
+            core.info(`latest.json：版本 ${latest.version}，平台 ${platforms.join(', ')}`);
+            // 两个打包任务同时写 latest.json 时可能互相覆盖，缺平台就不发布，重新运行失败的任务即可。
+            const required = ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64'];
+            const missing = required.filter((p) => !platforms.includes(p));
+            if (missing.length) {
+              core.setFailed(`latest.json 缺少 ${missing.join(', ')}，草稿未发布。在 Actions 页面重新运行全部任务即可。`);
+              return;
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id, draft: false, make_latest: 'true' });
+            core.notice(`已发布 ${latest.version}：https://github.com/${owner}/${repo}/releases/latest`);

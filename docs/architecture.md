@@ -114,7 +114,16 @@
 2. 源侧立即停止拦截，本机恢复可用，光标回到离开时的边缘；
 3. 界面和托盘显示明确原因 + 处理建议（如"对方电脑已休眠，唤醒后会自动重连"）。
 
-## 10. 仓库结构
+## 10. 打包与自动更新
+
+- **打包**：推送 `v*` 标签后由 GitHub Actions（`release.yml`）用 tauri-action 打包 Windows NSIS 安装包和 macOS 通用版（.dmg + `.app.tar.gz`），发布到公开仓库 `Hearion/FlowAcross-releases`。源码仓库私有，App 无法匿名下载其中的文件，所以安装包单独发布。
+- **更新清单**：每次发布带一个 `latest.json`（版本号、更新说明、各平台下载地址和签名）。App 读取 `releases/latest/download/latest.json`。
+- **签名**：更新包用 minisign 私钥签名（私钥只在 GitHub Secrets 和开发者本机），公钥写在 `tauri.conf.json`，App 下载后先验签再安装。本地打包不生成更新包，不需要私钥（CI 打包前才打开 `createUpdaterArtifacts`）。
+- **App 端**（`app/src-tauri/src/updater.rs`，`tauri-plugin-updater`）：发布版启动 15 秒后、之后每 6 小时检查一次（设置里可关），只提示不自动安装。用户确认后：下载（引擎照常工作，失败不影响使用）→ `Engine::shutdown()` 释放远端按键、恢复本机输入、断开连接 → 安装 → 重新打开。安装失败时提示原因并提供「重新打开流界」。
+- **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。
+- 发版步骤和一次性配置见 `docs/release.md`。
+
+## 11. 仓库结构
 
 ```
 FlowAcross/
@@ -126,7 +135,10 @@ FlowAcross/
 ├── app/
 │   ├── src/                # React 界面
 │   └── src-tauri/          # Tauri 外壳 + Engine
+├── scripts/                # 打包、签名、改版本号脚本
+├── .github/workflows/      # CI、发版（release.yml）、Windows 测试包
 └── docs/
     ├── architecture.md     # 本文档
-    └── roadmap.md          # 里程碑
+    ├── roadmap.md          # 里程碑
+    └── release.md          # 发版与自动更新配置
 ```

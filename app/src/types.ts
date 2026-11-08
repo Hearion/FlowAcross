@@ -76,6 +76,26 @@ export interface Settings {
   mapping: EdgeMapping;
   clipboard: boolean;
   sharing_paused: boolean;
+  auto_check_updates: boolean;
+}
+
+/** 检查到的新版本（src-tauri/src/updater.rs）。 */
+export interface UpdateInfo {
+  version: string;
+  current: string;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}
+
+/** 安装更新失败。`restart` 为 true 表示键鼠共享已停止，需要重新打开流界。 */
+export interface UpdateError {
+  message: string;
+  restart: boolean;
 }
 
 export interface StateView {
