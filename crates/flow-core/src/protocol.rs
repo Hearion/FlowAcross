@@ -1,7 +1,9 @@
 //! 设备之间的消息与帧编解码。
 //!
 //! - 可靠流（控制流、剪贴板流）：每帧 = 4 字节大端长度 + postcard 编码的 [`Message`]。
-//! - 不可靠数据报（鼠标绝对坐标）：直接是 postcard 编码的 [`Message`]，不带长度前缀。
+//! - 不可靠数据报（鼠标绝对坐标）：4 字节大端序号 + postcard 编码的 [`Message`]。
+//!   数据报可能丢失或乱序，接收方按序号丢弃比已收到的更旧的位置。网络短暂停顿后
+//!   直接跳到最新位置，而不是像可靠流那样把积压的旧位置逐个重放。
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -185,6 +187,40 @@ pub fn encode_frame(msg: &Message) -> Result<Vec<u8>, ProtocolError> {
     Ok(out)
 }
 
+/// 从这个版本起，流界能接收数据报里的鼠标位置。对方版本更旧时只能走可靠流。
+pub const DATAGRAM_MOVES_SINCE: (u32, u32, u32) = (0, 1, 3);
+
+/// 编码数据报：4 字节大端序号 + 消息载荷。
+pub fn encode_datagram(seq: u32, msg: &Message) -> Result<Vec<u8>, ProtocolError> {
+    let payload = encode_payload(msg)?;
+    let mut out = Vec::with_capacity(4 + payload.len());
+    out.extend_from_slice(&seq.to_be_bytes());
+    out.extend_from_slice(&payload);
+    Ok(out)
+}
+
+/// 解码数据报，返回序号和消息；不足 4 字节或载荷损坏时返回 `None`。
+pub fn decode_datagram(bytes: &[u8]) -> Option<(u32, Message)> {
+    let (head, payload) = bytes.split_first_chunk::<4>()?;
+    let msg = decode_payload(payload).ok()?;
+    Some((u32::from_be_bytes(*head), msg))
+}
+
+/// 序号 `a` 是否比 `b` 新（按回绕比较：相差不到 2^31 时，大的更新）。
+pub fn seq_newer(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
+}
+
+/// 版本号 `version`（如 "0.1.3"、"1.2.0-beta"）是否不低于 `min`；无法解析时视为不满足。
+pub fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let mut parts = core.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c) >= min,
+        _ => false,
+    }
+}
+
 /// 从字节流中切出完整帧。网络数据可能被任意拆分或粘连，逐段 `push` 后循环调用 `next_message`。
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
@@ -258,6 +294,41 @@ mod tests {
                 reason: ByeReason::Paused,
             },
         ]
+    }
+
+    #[test]
+    fn datagram_roundtrip_and_rejects_garbage() {
+        let m = Message::MouseMove {
+            session: 3,
+            display: "1".into(),
+            x: 10.5,
+            y: 20.0,
+        };
+        let bytes = encode_datagram(0xFFFF_FFFE, &m).unwrap();
+        assert_eq!(decode_datagram(&bytes), Some((0xFFFF_FFFE, m)));
+        assert_eq!(decode_datagram(&[1, 2, 3]), None);
+        assert_eq!(decode_datagram(&[0, 0, 0, 1, 0xFF, 0xFF, 0xFF]), None);
+    }
+
+    #[test]
+    fn seq_comparison_handles_wraparound() {
+        assert!(seq_newer(2, 1));
+        assert!(!seq_newer(1, 2));
+        assert!(!seq_newer(5, 5));
+        assert!(seq_newer(0, u32::MAX));
+        assert!(seq_newer(3, u32::MAX - 2));
+        assert!(!seq_newer(u32::MAX, 0));
+    }
+
+    #[test]
+    fn version_gate() {
+        let min = DATAGRAM_MOVES_SINCE;
+        assert!(version_at_least("0.1.3", min));
+        assert!(version_at_least("0.2.0", min));
+        assert!(version_at_least("1.0.0-beta.1", min));
+        assert!(!version_at_least("0.1.2", min));
+        assert!(!version_at_least("0.1", min));
+        assert!(!version_at_least("", min));
     }
 
     #[test]

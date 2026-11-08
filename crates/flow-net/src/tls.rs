@@ -122,6 +122,8 @@ fn transport() -> Arc<quinn::TransportConfig> {
     t.max_idle_timeout(Some(
         Duration::from_secs(8).try_into().expect("8s 在范围内"),
     ));
+    // 数据报只用来发鼠标位置，过时的没有意义：发送缓冲放小，网络卡住时 quinn 会丢掉最旧的。
+    t.datagram_send_buffer_size(16 * 1024);
     Arc::new(t)
 }
 

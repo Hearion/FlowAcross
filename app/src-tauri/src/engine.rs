@@ -20,7 +20,7 @@ use flow_core::switching::SwitchPolicy;
 use flow_core::throttle::MoveThrottle;
 use flow_net::discovery::{Advert, Discovery, DiscoveryEvent, Found};
 use flow_net::quinn;
-use flow_net::{Identity, Link, peer_fingerprint};
+use flow_net::{Identity, Link, MoveReceiver, MoveSender, peer_fingerprint};
 use flow_platform::{InputCapture, InputInjector, Permission, PermissionState, PlatformError};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -41,6 +41,16 @@ const MAX_AUTO_ATTEMPTS: u32 = 5;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 /// 两次发送鼠标位置的最小间隔（毫秒），即最多 250 次/秒，高于常见屏幕刷新率。
 const MOUSE_SEND_INTERVAL_MS: u64 = 4;
+
+/// 握手时得到的对方信息。
+#[derive(Debug, Clone)]
+struct PeerInfo {
+    id: DeviceId,
+    name: String,
+    os: Os,
+    /// 对方的程序版本，用来判断它支持哪些功能（例如数据报鼠标位置）。
+    version: String,
+}
 const INPUT_TICK: Duration = Duration::from_millis(40);
 const CLIPBOARD_POLL: Duration = Duration::from_millis(500);
 
@@ -1157,8 +1167,8 @@ impl Engine {
             device,
             name,
             os,
+            app_version,
             trusts_you,
-            ..
         }) = first
         else {
             link.conn.close(0u32.into(), b"bad hello");
@@ -1183,12 +1193,19 @@ impl Engine {
         }
         self.lock().connecting.remove(&peer);
 
-        info!(device = %short(&peer), %name, we_trust, trusts_you, initiator, "握手完成");
+        info!(device = %short(&peer), %name, version = %app_version, we_trust, trusts_you, initiator, "握手完成");
+        let peer_info = PeerInfo {
+            id: peer,
+            name,
+            os,
+            version: app_version,
+        };
+        let name = peer_info.name.clone();
         if we_trust && trusts_you {
-            self.run_session(link, peer, name, os, initiator).await;
+            self.run_session(link, peer_info, initiator).await;
         } else if initiator && pair {
             if link.sender.send(&Message::PairRequest).await.is_ok() {
-                self.run_pairing(link, peer, name, os, true).await;
+                self.run_pairing(link, peer_info, true).await;
             }
         } else if initiator {
             // 自动重连时发现对方已不信任本机。
@@ -1205,7 +1222,7 @@ impl Engine {
         } else {
             match tokio::time::timeout(Duration::from_secs(30), link.receiver.recv()).await {
                 Ok(Ok(Some(Message::PairRequest))) => {
-                    self.run_pairing(link, peer, name, os, false).await
+                    self.run_pairing(link, peer_info, false).await
                 }
                 Ok(Ok(Some(Message::Bye {
                     reason: ByeReason::Unpaired,
@@ -1218,14 +1235,10 @@ impl Engine {
         Ok(())
     }
 
-    async fn run_pairing(
-        &self,
-        mut link: Link,
-        peer: DeviceId,
-        name: String,
-        os: Os,
-        outgoing: bool,
-    ) {
+    async fn run_pairing(&self, mut link: Link, info: PeerInfo, outgoing: bool) {
+        let PeerInfo {
+            id: peer, name, os, ..
+        } = info.clone();
         let code = pairing_code(&self.inner.identity.fingerprint, &link.peer_fingerprint);
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         {
@@ -1316,7 +1329,7 @@ impl Engine {
                 }
                 info!(device = %short(&peer), %name, "配对成功");
                 self.notice(format!("已与「{name}」配对，之后两台电脑会自动连接。"));
-                self.run_session(link, peer, name, os, outgoing).await;
+                self.run_session(link, info, outgoing).await;
             }
             Err(msg) => {
                 info!(device = %short(&peer), reason = %msg, "配对结束（未成功）");
@@ -1329,13 +1342,22 @@ impl Engine {
         }
     }
 
-    async fn run_session(&self, link: Link, peer: DeviceId, name: String, os: Os, initiator: bool) {
+    async fn run_session(&self, link: Link, info: PeerInfo, initiator: bool) {
+        let PeerInfo {
+            id: peer,
+            name,
+            os,
+            version,
+        } = info;
         let Link {
             conn,
             mut sender,
             mut receiver,
             ..
         } = link;
+        // 对方支持时，鼠标位置走数据报（网络停顿后直接跳到最新位置），其余消息走可靠流。
+        let mut moves = MoveSender::new(conn.clone(), &version);
+        info!(device = %short(&peer), datagram = moves.enabled(), "鼠标位置发送方式");
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let initiator_id = if initiator {
             self.local_id().clone()
@@ -1399,12 +1421,26 @@ impl Engine {
                     },
                 };
                 for m in out {
-                    if sender.send(&m).await.is_err() {
+                    if !moves.try_send(&m) && sender.send(&m).await.is_err() {
                         return;
                     }
                 }
             }
         });
+
+        // 数据报里的鼠标位置：每批只处理最新的一个。
+        let datagrams = {
+            let engine = self.clone();
+            let peer = peer.clone();
+            let mut rx = MoveReceiver::new(conn.clone());
+            tokio::spawn(async move {
+                while let Ok(m) = rx.recv_latest().await {
+                    if let Some(m) = m {
+                        engine.on_remote_input(&peer, os, m);
+                    }
+                }
+            })
+        };
 
         loop {
             match receiver.recv().await {
@@ -1462,6 +1498,7 @@ impl Engine {
         }
 
         writer.abort();
+        datagrams.abort();
         self.release_controlled(Some(&peer));
         info!(device = %short(&peer), reason = ?conn.close_reason(), "会话结束");
         {

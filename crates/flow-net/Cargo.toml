@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 flow-core.workspace = true
 thiserror.workspace = true
+bytes = "1"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rcgen = "0.14"

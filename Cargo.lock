@@ -904,6 +904,7 @@ dependencies = [
 name = "flow-net"
 version = "0.1.2"
 dependencies = [
+ "bytes",
  "flow-core",
  "mdns-sd",
  "quinn",

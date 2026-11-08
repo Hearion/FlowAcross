@@ -3,11 +3,13 @@
 //! - [`identity`]：设备长期身份（自签名证书 + 私钥），指纹即设备 ID。
 //! - [`tls`]：QUIC 的 TLS 配置。双向证书认证，证书不走 CA 校验，而是在应用层按指纹判断是否可信。
 //! - [`link`]：在 QUIC 连接上收发 [`flow_core::protocol::Message`]。
+//! - [`moves`]：用 QUIC 数据报收发鼠标位置（停顿后直接跳到最新位置）。
 //! - [`discovery`]：mDNS 广播本机、发现局域网内的其他流界设备。
 
 pub mod discovery;
 pub mod identity;
 pub mod link;
+pub mod moves;
 pub mod tls;
 
 use thiserror::Error;
@@ -47,5 +49,6 @@ pub enum NetError {
 
 pub use identity::Identity;
 pub use link::{Link, LinkReceiver, LinkSender};
+pub use moves::{MoveReceiver, MoveSender};
 pub use quinn;
 pub use tls::{bind_endpoint, peer_fingerprint};
