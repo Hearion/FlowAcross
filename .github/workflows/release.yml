@@ -26,7 +26,7 @@ jobs:
       release_id: ${{ steps.release.outputs.id }}
       notes: ${{ steps.notes.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: 检查密钥配置
         env:
@@ -70,7 +70,7 @@ jobs:
 
       - name: 创建草稿发布
         id: release
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           NOTES: ${{ steps.notes.outputs.notes }}
         with:
@@ -102,7 +102,8 @@ jobs:
     name: 打包 ${{ matrix.name }}
     needs: prepare
     strategy:
-      fail-fast: true
+      # 一个平台失败时另一个继续打完，方便一次看到所有问题（缺平台时 publish 不会发布）。
+      fail-fast: false
       matrix:
         include:
           - name: Windows
@@ -113,9 +114,9 @@ jobs:
             args: --target universal-apple-darwin --bundles app,dmg
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -151,18 +152,46 @@ jobs:
           CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
-          if [ -n "$CERT" ]; then
-            {
-              echo "APPLE_CERTIFICATE<<EOF_CERT"
-              echo "$CERT"
-              echo "EOF_CERT"
-              echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
-              echo "APPLE_SIGNING_IDENTITY=${IDENTITY:-FlowAcross Dev}"
-            } >> "$GITHUB_ENV"
-            echo "使用证书「${IDENTITY:-FlowAcross Dev}」签名。"
-          else
+          if [ -z "$CERT" ]; then
             echo "::warning::没有配置 APPLE_CERTIFICATE，macOS 包使用 ad-hoc 签名：用户每次更新后都要重新授权辅助功能和输入监控。配置方法见 docs/release.md。"
+            exit 0
           fi
+          IDENTITY="${IDENTITY:-FlowAcross Dev}"
+          work="$RUNNER_TEMP/cert-check"
+          mkdir -p "$work"
+          trap 'security delete-keychain "$work/check.keychain-db" 2>/dev/null; rm -rf "$work"' EXIT
+
+          # 去掉粘贴时混进来的换行和空格。
+          clean=$(printf '%s' "$CERT" | tr -d ' \t\r\n')
+          echo "::add-mask::$clean"
+          if ! printf '%s' "$clean" | base64 --decode > "$work/cert.p12" 2>/dev/null || [ ! -s "$work/cert.p12" ]; then
+            echo "::error::APPLE_CERTIFICATE 不是有效的 base64。在 Mac 上运行 base64 -i FlowAcross-Dev.p12 | pbcopy，把剪贴板内容重新粘贴到这个 Secret。"
+            exit 1
+          fi
+          echo "证书文件 $(wc -c < "$work/cert.p12" | tr -d ' ') 字节：$(file -b "$work/cert.p12")"
+
+          # 先在临时钥匙串里试导入，出错时给出明确原因。
+          security create-keychain -p check "$work/check.keychain-db"
+          if ! security import "$work/cert.p12" -k "$work/check.keychain-db" -f pkcs12 -P "$CERT_PASSWORD" > "$work/import.log" 2>&1; then
+            cat "$work/import.log"
+            if grep -qi "MAC verification\|passphrase\|password" "$work/import.log"; then
+              echo "::error::APPLE_CERTIFICATE_PASSWORD 和导出 .p12 时设置的密码不一致。"
+            else
+              echo "::error::APPLE_CERTIFICATE 解码后不是有效的 .p12 证书。请在「钥匙串访问 → 我的证书」里右键「$IDENTITY」导出为 .p12（要带私钥），再用 base64 -i 文件名 | pbcopy 复制。"
+            fi
+            exit 1
+          fi
+          if ! security find-certificate -c "$IDENTITY" "$work/check.keychain-db" > /dev/null 2>&1; then
+            echo "::error::证书里找不到名为「$IDENTITY」的签名身份。确认导出的是这张证书，或用 APPLE_SIGNING_IDENTITY 填写证书名称。"
+            exit 1
+          fi
+
+          {
+            echo "APPLE_CERTIFICATE=$clean"
+            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
+          } >> "$GITHUB_ENV"
+          echo "证书检查通过，使用「$IDENTITY」签名。"
 
       - name: 打包并上传
         uses: tauri-apps/tauri-action@v0
@@ -185,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 检查 latest.json 后发布
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
         with:
