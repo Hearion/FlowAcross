@@ -75,7 +75,7 @@ Mac 上需要授予「辅助功能」和「输入监控」：开发模式下要�
 | 断网不卡键 | 在对方电脑上按住 Shift，同时断开 Wi‑Fi | 本机立即恢复可用；对方 3 秒内自动松开 Shift |
 
 已知限制：
-- 控制 Mac 期间，Windows 的光标会停在主屏中央（暂不隐藏），回到 Windows 后恢复。
+- 控制 Mac 期间，Windows 的光标会停在离开处附近（暂不隐藏），回到 Windows 后恢复。
 - Windows 上无法操作「以管理员身份运行」的窗口和 UAC 弹窗，除非流界也以管理员身份运行；Ctrl+Alt+Del 无法传递。
 - macOS 上输入密码时（安全输入模式）系统会屏蔽键盘捕获。
 
@@ -131,4 +131,4 @@ npm run build:win
 
 安装程序在 `target\release\bundle\nsis\` 下。目前没有代码签名，安装时 SmartScreen 会提示「未知发布者」，点「更多信息 › 仍要运行」即可。
 
-项目推到 GitHub 后，也可以在仓库的 Actions 页面手动运行「Windows 安装包」工作流，自动构建并下载安装程序。
+也可以在 GitHub 仓库的 Actions 页面手动运行「Windows 测试包」工作流，构建好后从运行结果的附件下载安装程序。正式发版见 [release.md](release.md)。
