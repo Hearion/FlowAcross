@@ -74,7 +74,18 @@ pub struct StateView {
     pub permission_hint: Option<String>,
     /// 本机正在被哪台设备控制。
     pub controlled_by: Option<DeviceId>,
+    pub low_latency: LowLatencyView,
     pub about: AboutView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LowLatencyView {
+    /// 本机系统是否支持（只有 macOS）。
+    pub supported: bool,
+    /// 后台服务是否已安装。
+    pub installed: bool,
+    /// 现在是否正在关闭 AWDL（开启了且有设备连着）。
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +207,8 @@ struct Inner {
     injector: Mutex<Option<Box<dyn InputInjector>>>,
     accessibility_warned: AtomicBool,
     clipboard: Mutex<ClipboardState>,
+    /// 低延迟模式当前是否在生效（已通知后台服务关闭 AWDL）；`None` 表示还没同步过。
+    low_latency_active: Mutex<Option<bool>>,
 }
 
 /// 剪贴板同步状态。系统剪贴板没有变化通知，按变化计数轮询。
@@ -323,6 +336,14 @@ fn permission_kind(p: Permission) -> &'static str {
 
 /// macOS 按"负责进程"记录权限：没有打包成 .app 运行时（`npm run tauri dev`），
 /// 权限会算在启动它的终端或编辑器上，系统设置的列表里看不到流界。
+/// 平台错误里给用户看的部分（去掉"系统调用失败："之类的前缀）。
+fn platform_reason(e: &PlatformError) -> String {
+    match e {
+        PlatformError::Os(m) => m.clone(),
+        other => other.to_string(),
+    }
+}
+
 fn permission_hint() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
@@ -491,6 +512,7 @@ impl Engine {
                     access: None,
                     last_count: None,
                 }),
+                low_latency_active: Mutex::new(None),
             }),
         };
 
@@ -526,6 +548,10 @@ impl Engine {
             c.stop();
         }
         self.release_controlled(None);
+        if self.inner.input {
+            // 退出前恢复 AWDL。
+            flow_platform::low_latency::set_active(false);
+        }
         self.inner.endpoint.close(0u32.into(), b"shutdown");
     }
 
@@ -562,8 +588,66 @@ impl Engine {
 
     fn emit(&self) {
         self.sync_input();
+        self.sync_low_latency();
         let view = self.view();
         (self.inner.notify)(EngineEvent::State(Box::new(view)));
+    }
+
+    /// 低延迟模式：开启了且有设备连着时通知后台服务关闭 AWDL，否则恢复。状态变化时才动作。
+    fn sync_low_latency(&self) {
+        if !self.inner.input || !flow_platform::low_latency::supported() {
+            return;
+        }
+        let want = {
+            let st = self.lock();
+            st.config.settings.low_latency && !st.sessions.is_empty()
+        };
+        let mut cur = self.inner.low_latency_active.lock().expect("low latency");
+        if *cur != Some(want) {
+            flow_platform::low_latency::set_active(want);
+            info!(active = want, "低延迟模式");
+            *cur = Some(want);
+        }
+    }
+
+    /// 开启或关闭低延迟模式。第一次开启时安装后台服务，会弹出系统的管理员授权窗口并阻塞到用户操作完，
+    /// 所以不要在主线程或异步任务里直接调用。失败时返回给用户看的原因。
+    pub fn set_low_latency(&self, enabled: bool) -> Result<(), String> {
+        use flow_platform::low_latency;
+        if enabled {
+            if !low_latency::supported() {
+                return Err("低延迟模式只在 Mac 上需要。".into());
+            }
+            if !low_latency::installed() {
+                low_latency::install().map_err(|e| {
+                    format!(
+                        "没有开启低延迟模式：{}。关闭 AWDL 需要管理员授权，可以再试一次。",
+                        platform_reason(&e)
+                    )
+                })?;
+            }
+        }
+        let mut st = self.lock();
+        st.config.settings.low_latency = enabled;
+        self.save(&st);
+        drop(st);
+        self.emit();
+        Ok(())
+    }
+
+    /// 关闭低延迟模式并移除后台服务（弹出管理员授权窗口，同样会阻塞）。
+    pub fn remove_low_latency(&self) -> Result<(), String> {
+        self.set_low_latency(false)?;
+        if flow_platform::low_latency::installed() {
+            flow_platform::low_latency::uninstall().map_err(|e| {
+                format!(
+                    "没有移除后台服务：{}。低延迟模式已关闭，不影响使用。",
+                    platform_reason(&e)
+                )
+            })?;
+        }
+        self.emit();
+        Ok(())
     }
 
     /// 把当前可控制的设备、布局和防误触设置同步给跨屏控制器。
@@ -690,6 +774,16 @@ impl Engine {
                 .collect(),
             permission_hint: permission_hint(),
             controlled_by,
+            low_latency: LowLatencyView {
+                supported: flow_platform::low_latency::supported(),
+                installed: flow_platform::low_latency::installed(),
+                active: self
+                    .inner
+                    .low_latency_active
+                    .lock()
+                    .expect("low latency")
+                    .unwrap_or(false),
+            },
             about: AboutView {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: PROTOCOL_VERSION,

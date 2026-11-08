@@ -8,6 +8,8 @@ pub mod keymap;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
+mod macos_awdl;
+#[cfg(target_os = "macos")]
 mod macos_input;
 #[cfg(windows)]
 mod windows;
@@ -84,6 +86,48 @@ pub fn keep_responsive() {
     macos::keep_responsive();
     #[cfg(windows)]
     windows::keep_responsive();
+}
+
+/// 低延迟模式：跨屏期间关闭 Mac 的 AWDL，消除 Wi‑Fi 周期性停顿造成的卡顿。只有 macOS 支持。
+pub mod low_latency {
+    use crate::PlatformError;
+
+    /// 当前系统是否支持。
+    pub fn supported() -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    /// 后台服务是否已安装。
+    pub fn installed() -> bool {
+        #[cfg(target_os = "macos")]
+        return crate::macos_awdl::installed();
+        #[cfg(not(target_os = "macos"))]
+        return false;
+    }
+
+    /// 安装后台服务（会弹出管理员授权窗口，阻塞到用户操作完）。
+    pub fn install() -> Result<(), PlatformError> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_awdl::install();
+        #[cfg(not(target_os = "macos"))]
+        return Err(PlatformError::Unsupported("低延迟模式"));
+    }
+
+    /// 移除后台服务并恢复 AWDL（会弹出管理员授权窗口）。
+    pub fn uninstall() -> Result<(), PlatformError> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_awdl::uninstall();
+        #[cfg(not(target_os = "macos"))]
+        return Err(PlatformError::Unsupported("低延迟模式"));
+    }
+
+    /// 通知后台服务现在是否需要关闭 AWDL。
+    pub fn set_active(active: bool) {
+        #[cfg(target_os = "macos")]
+        crate::macos_awdl::set_active(active);
+        #[cfg(not(target_os = "macos"))]
+        let _ = active;
+    }
 }
 
 /// 当前系统的权限检测实现。

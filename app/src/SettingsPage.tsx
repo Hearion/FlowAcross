@@ -78,6 +78,7 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <Panel>
               <CrossScreenSettings settings={state.settings} update={update} />
             </Panel>
+            {state.low_latency.supported && <LowLatencySetting state={state} />}
           </Section>
         )}
 
@@ -185,6 +186,56 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
       </div>
       <span className={`row-value ${mono ? "mono" : ""}`}>{value}</span>
     </div>
+  );
+}
+
+function LowLatencySetting({ state }: { state: StateView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const ll = state.low_latency;
+  const on = state.settings.low_latency;
+
+  const run = (p: Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    p.catch((e) => setError(String(e))).finally(() => setBusy(false));
+  };
+
+  let status = "Mac 用 Wi‑Fi 时，跨屏如果每秒卡一下，打开这个开关";
+  if (busy) status = "正在等待系统授权…";
+  else if (on && ll.active) status = "生效中：已关闭 AWDL，断开所有设备后自动恢复";
+  else if (on) status = "已开启：有设备连上后关闭 AWDL";
+
+  return (
+    <>
+      <Panel>
+        <div className="setting">
+          <div className="update-row">
+            <div className="setting-text">
+              <span>低延迟模式</span>
+              <small className={error ? "text-danger" : undefined}>{error ?? status}</small>
+            </div>
+            <Toggle label="低延迟模式" checked={on} disabled={busy} onChange={(v) => run(api.setLowLatency(v))} />
+          </div>
+        </div>
+        {ll.installed && (
+          <div className="setting inline">
+            <div className="setting-text">
+              <span>后台服务</span>
+              <small>已安装。不用低延迟模式时可以移除，需要管理员授权</small>
+            </div>
+            <button className="btn small" disabled={busy} onClick={() => run(api.removeLowLatency())}>
+              移除
+            </button>
+          </div>
+        )}
+      </Panel>
+      <p className="settings-note">
+        Mac 的 AWDL（隔空投送、接力、通用控制、随航用的点对点 Wi‑Fi）大约每半秒切换一次信道，网络会停顿几十到上百毫秒。
+        开启后，有电脑连着时流界会关闭 AWDL，这期间上述功能不可用；全部断开、关闭开关或退出流界后自动恢复。
+        第一次开启需要输入一次 Mac 的密码，用来安装一个很小的后台服务。Mac 接有线网络时不需要开启。
+      </p>
+    </>
   );
 }
 

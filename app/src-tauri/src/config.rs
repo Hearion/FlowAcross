@@ -37,6 +37,8 @@ pub struct Settings {
     pub sharing_paused: bool,
     /// 启动时和之后每隔几小时检查一次新版本（只提示，不自动安装）。
     pub auto_check_updates: bool,
+    /// 低延迟模式（仅 macOS）：有设备连着时关闭 AWDL，消除 Wi‑Fi 周期性停顿。
+    pub low_latency: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +51,7 @@ impl Default for Settings {
             clipboard: true,
             sharing_paused: false,
             auto_check_updates: true,
+            low_latency: false,
         }
     }
 }

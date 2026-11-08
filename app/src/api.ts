@@ -32,6 +32,10 @@ export interface Api {
   /** 下载并安装最近一次检查到的版本，成功后程序会重新打开。失败时以 `UpdateError` reject。 */
   installUpdate(): Promise<void>;
   restartApp(): Promise<void>;
+  /** 开启 / 关闭低延迟模式；第一次开启会弹出系统管理员授权。失败时以字符串原因 reject。 */
+  setLowLatency(enabled: boolean): Promise<void>;
+  /** 关闭低延迟模式并移除后台服务。失败时以字符串原因 reject。 */
+  removeLowLatency(): Promise<void>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
   onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
@@ -57,6 +61,8 @@ const tauriApi: Api = {
   checkUpdate: () => invoke("check_update"),
   installUpdate: () => invoke("install_update"),
   restartApp: () => invoke("restart_app"),
+  setLowLatency: (enabled) => invoke("set_low_latency", { enabled }),
+  removeLowLatency: () => invoke("remove_low_latency"),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
   onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),

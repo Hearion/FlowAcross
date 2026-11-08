@@ -108,6 +108,24 @@ pub fn open_data_dir(engine: State<'_, Engine>) {
     reveal(engine.data_dir());
 }
 
+/// 开启或关闭低延迟模式（仅 macOS）。第一次开启会弹出管理员授权窗口，放到阻塞线程里等。
+#[tauri::command]
+pub async fn set_low_latency(engine: State<'_, Engine>, enabled: bool) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.set_low_latency(enabled))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 关闭低延迟模式并移除后台服务（弹出管理员授权窗口）。
+#[tauri::command]
+pub async fn remove_low_latency(engine: State<'_, Engine>) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || engine.remove_low_latency())
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn open_permission_settings(kind: String) -> Result<(), String> {
     let p = parse_permission(&kind).ok_or("未知的权限类型")?;

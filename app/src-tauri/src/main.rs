@@ -163,6 +163,8 @@ fn main() {
             commands::open_permission_settings,
             commands::open_logs,
             commands::open_data_dir,
+            commands::set_low_latency,
+            commands::remove_low_latency,
             updater::check_update,
             updater::install_update,
             updater::restart_app,

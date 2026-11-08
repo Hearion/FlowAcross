@@ -63,7 +63,8 @@
 - 流界自己注入的事件带标记（macOS 事件 user data，Windows dwExtraInfo），捕获时直接放行，不会被当成本机输入。
 - 鼠标坐标走 QUIC 数据报（`flow-net::moves`）：每条带递增序号；接收方一次读完已到达的数据报，只注入最新的一个，过时和乱序的丢掉。网络短暂停顿后光标直接跳到当前位置，不会像可靠流那样把积压的位置逐个重放。只有对方版本 ≥ 0.1.3（`DATAGRAM_MOVES_SINCE`）时才发数据报，否则仍走可靠流；点击、按键、进入/离开等其他消息始终走可靠流。数据报发送缓冲只有 16 KB，拥塞时 quinn 丢弃最旧的。
 - 发送端对鼠标位置节流（`flow-core::throttle`）：两次发送至少间隔 4 毫秒，间隔内只保留最新位置，其他消息到来时先把待发位置发出。高回报率鼠标每秒上千个事件，逐条发送会让网络排队、远端注入跟不上而卡顿。「结束控制远端」日志记录这次的按键数、鼠标事件数和时长，可据此估算回报率。
-- 已知网络问题：Mac 用 Wi‑Fi 时，AWDL 大约每 0.5 秒造成一次 60–100ms 的网络停顿（实测，关掉 awdl0 后消失），表现为跨屏每秒卡一下。鼠标位置改走数据报后，停顿后直接跳到最新位置，但停顿本身仍在；彻底解决需要关闭 AWDL 或让 Mac 走有线网络。
+- 已知网络问题：Mac 用 Wi‑Fi 时，AWDL 大约每 0.5 秒造成一次 60–100ms 的网络停顿（实测，关掉 awdl0 后消失），表现为跨屏每秒卡一下。鼠标位置改走数据报后，停顿后直接跳到最新位置，但停顿本身仍在；实测仍能感到卡顿，所以提供低延迟模式。
+- **低延迟模式**（仅 macOS，`flow-platform::low_latency`，默认关闭）：第一次开启时通过 `osascript … with administrator privileges` 安装一个 launchd 守护进程（`/Library/LaunchDaemons/app.flowacross.awdl-guard.plist`，脚本在 `/Library/Application Support/FlowAcross/`，root 所有）。守护进程每 0.5 秒检查：标志文件 `/tmp/app.flowacross.lowlatency` 存在且流界在运行时保持 `awdl0` 关闭，否则恢复它关掉的 AWDL。引擎在"开启了且有设备连着"时创建标志文件，断开、关闭开关、退出时删除；标志在 /tmp，重启自动清除；流界异常退出时守护进程也会恢复。设置里可以移除后台服务。
 - 流界大部分时间在后台运行，启动时调用 `flow_platform::keep_responsive()` 关闭系统对后台程序的降速：macOS 登记延迟敏感活动并在 Info.plist 声明 `LSAppNapIsDisabled`（关闭 App Nap），Windows 关闭本进程的电源节流（EcoQoS）。否则打包后的正式版跨屏会卡顿。
 - Windows 上进程注册了键盘 Raw Input 时，只要它自己的窗口在前台，系统就不再调用它的低级键盘钩子（实测）。Tauri 的窗口库 tao 默认会注册，所以外壳用 `DeviceEventFilter::Always` 关掉设备事件，否则流界窗口在前台时键盘到不了远端。
 

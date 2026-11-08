@@ -21,7 +21,7 @@ export function createMock(): Api {
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, sharing_paused: false, auto_check_updates: true },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, sharing_paused: false, auto_check_updates: true, low_latency: false },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -29,6 +29,7 @@ export function createMock(): Api {
     ],
     permission_hint: null,
     controlled_by: null,
+    low_latency: { supported: true, installed: false, active: false },
     about: { version: "0.1.0", protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
   };
   const stateListeners = new Set<(s: StateView) => void>();
@@ -120,6 +121,16 @@ export function createMock(): Api {
         }, 250);
       }),
     restartApp: async () => notice("（浏览器预览）这里会重新打开流界"),
+    setLowLatency: async (enabled) => {
+      await new Promise((r) => setTimeout(r, 500));
+      const connected = state.devices.some((d) => d.status === "connected");
+      set({
+        settings: { ...state.settings, low_latency: enabled },
+        low_latency: { supported: true, installed: state.low_latency.installed || enabled, active: enabled && connected },
+      });
+    },
+    removeLowLatency: async () =>
+      set({ settings: { ...state.settings, low_latency: false }, low_latency: { supported: true, installed: false, active: false } }),
     // 每次订阅包一层新函数：React 开发模式会"订阅-退订-再订阅"同一个回调，直接存回调会被误删。
     onState: async (cb) => {
       const h = (st: StateView) => cb(st);

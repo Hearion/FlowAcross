@@ -77,6 +77,17 @@ export interface Settings {
   clipboard: boolean;
   sharing_paused: boolean;
   auto_check_updates: boolean;
+  /** 低延迟模式（仅 macOS）：有设备连着时关闭 AWDL。 */
+  low_latency: boolean;
+}
+
+export interface LowLatencyView {
+  /** 本机系统是否支持（只有 macOS）。 */
+  supported: boolean;
+  /** 后台服务是否已安装。 */
+  installed: boolean;
+  /** 现在是否正在关闭 AWDL。 */
+  active: boolean;
 }
 
 /** 检查到的新版本（src-tauri/src/updater.rs）。 */
@@ -113,6 +124,7 @@ export interface StateView {
   permission_hint: string | null;
   /** 本机正在被哪台设备控制。 */
   controlled_by: string | null;
+  low_latency: LowLatencyView;
   about: {
     version: string;
     protocol: number;
