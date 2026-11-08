@@ -1,0 +1,21 @@
+# Rust
+/target/
+
+# Node / 前端
+node_modules/
+app/dist/
+
+# Tauri 生成文件
+app/src-tauri/gen/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log
+*.tsbuildinfo
+
+# 打包给其他电脑的源码压缩包
+share/

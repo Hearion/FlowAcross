@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Tauri 打包时会合并到 FlowAcross.app 的 Info.plist。 -->
+<plist version="1.0">
+<dict>
+  <!-- macOS 15+ 访问局域网（mDNS 发现、连接其他电脑）前，系统会用这段文字向用户说明用途。 -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>流界需要访问本地网络，用来发现并连接同一网络中运行流界的其他电脑。</string>
+  <!-- 必须声明要浏览/广播的 Bonjour 服务类型，否则系统会拦截 mDNS。 -->
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_flowacross._udp</string>
+  </array>
+</dict>
+</plist>

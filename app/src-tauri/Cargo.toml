@@ -1,0 +1,27 @@
+[package]
+name = "flowacross"
+description = "流界 FlowAcross 桌面应用"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+flow-core.workspace = true
+flow-platform.workspace = true
+flow-net.workspace = true
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+gethostname = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
