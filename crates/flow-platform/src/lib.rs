@@ -47,8 +47,9 @@ pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     return Err(PlatformError::Unsupported("剪贴板"));
 }
 
-/// 控制远端期间隐藏并固定本机光标（捕获仍持续上报相对位移）；
-/// 结束时把光标放到 `restore_at`（本机系统坐标，逻辑点）并恢复显示。
+/// 控制远端期间隐藏并固定本机光标（捕获仍持续上报相对位移）；结束时恢复显示。
+/// `restore_at`（本机系统坐标，逻辑点）：开始时是离开处（Windows 把光标锁在这里，macOS 忽略），
+/// 结束时是光标要放回的位置。
 pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     #[cfg(target_os = "macos")]
     macos_input::set_cursor_captured(captured, restore_at);

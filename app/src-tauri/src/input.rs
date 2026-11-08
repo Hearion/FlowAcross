@@ -277,7 +277,9 @@ impl Controller {
         let held = self.held();
         let now = self.now_ms();
         if let Decision::Switch(c) = self.switcher.update(contact.as_ref(), held, now) {
-            self.switch_to(c);
+            // 本机光标停在离开处：移动方向上屏幕边缘的那个点。
+            let exit = d.rect.clamp(Point::new(p.x + dx, p.y + dy));
+            self.switch_to(c, Some(exit));
         }
     }
 
@@ -303,19 +305,21 @@ impl Controller {
             });
         }
         if let Decision::Switch(c) = self.switcher.update(contact.as_ref(), held, now) {
-            self.switch_to(c);
+            self.switch_to(c, None);
         }
     }
 
-    fn switch_to(&mut self, c: Crossing) {
+    /// `exit`：从本机离开时本机光标应停的位置（布局坐标）。
+    fn switch_to(&mut self, c: Crossing, exit: Option<Point>) {
         if c.display.device == self.local {
             self.leave_to_local(Some(c.point));
         } else {
-            self.enter(c.display, c.point);
+            self.enter(c.display, c.point, exit);
         }
     }
 
-    fn enter(&mut self, target: DisplayId, point: Point) {
+    /// 开始控制 `target`。从本机进入时，本机光标锁定在 `exit`（布局坐标），`None` 表示留在原处。
+    fn enter(&mut self, target: DisplayId, point: Point, exit: Option<Point>) {
         let Some(tx) = self.cfg.outputs.get(&target.device).cloned() else {
             return;
         };
@@ -327,7 +331,8 @@ impl Controller {
             Some(old) => self.release_remote(&old),
             None => {
                 self.return_to = self.last_local;
-                (self.cursor)(true, None);
+                let (ox, oy) = self.cfg.local_offset;
+                (self.cursor)(true, exit.map(|p| (p.x - ox, p.y - oy)));
             }
         }
         self.next_session = self.next_session.wrapping_add(1);
@@ -421,7 +426,7 @@ impl Controller {
             d.rect.y + d.rect.height / 2.0,
         );
         let id = d.id.clone();
-        self.enter(id, center);
+        self.enter(id, center, None);
         true
     }
 
@@ -439,7 +444,8 @@ impl Controller {
         let held = self.held();
         let now = self.now_ms();
         if let Decision::Switch(c) = self.switcher.poll(held, now) {
-            self.switch_to(c);
+            // 贴边停留触发：光标本来就停在边上，留在原处即可。
+            self.switch_to(c, None);
         }
     }
 }
@@ -552,7 +558,12 @@ mod tests {
             }
             other => panic!("期望 Enter，实际 {other:?}"),
         }
-        assert_eq!(r.cursor.lock().unwrap().as_slice(), &[(true, None)]);
+        // 本机光标锁定在离开处：右边缘、同一高度（本机系统坐标）。
+        let calls = r.cursor.lock().unwrap().clone();
+        let [(true, Some((ex, ey)))] = calls.as_slice() else {
+            panic!("期望锁定光标并给出离开处，实际 {calls:?}");
+        };
+        assert!(*ex >= 1439.0 && *ex <= 1440.0 && *ey == 400.0);
         assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
 
         // 在 PC 上移动：发绝对坐标

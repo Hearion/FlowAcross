@@ -44,6 +44,9 @@ fn show_main_window(app: &AppHandle) {
 
 fn main() {
     let app = tauri::Builder::default()
+        // 不注册设备级输入（Raw Input）。Windows 上进程注册了键盘 Raw Input 后，只要流界窗口在前台，
+        // 系统就不再调用本进程的低级键盘钩子，跨屏时键盘就到不了远端。流界不需要这些设备事件。
+        .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updater::PendingUpdate::default())
         .setup(|app| {

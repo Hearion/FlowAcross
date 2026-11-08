@@ -3,10 +3,12 @@
 //! - 钩子装在专用线程上，靠该线程的消息循环驱动；回调必须很快返回，
 //!   否则系统会跳过钩子（默认超时约 300 毫秒）。
 //! - 钩子里的坐标是物理像素，换算成和 `DisplayInfo` 一致的逻辑坐标后再上报。
-//! - 控制远端时把光标停在离开处附近（离屏幕边缘留一点余量），并拦截所有鼠标移动，只上报相对位移。
-//! - 低级钩子按"后装先调用"的顺序执行，排在前面的钩子吃掉按键后我们就收不到了。
-//!   流界窗口获得焦点时 WebView2 等组件会装自己的键盘钩子，所以开始控制远端时、
-//!   前台窗口切换后、以及控制远端期间每 250 毫秒，都把钩子重新装一次，保持在最前面。
+//! - 控制远端时把光标停在离开处（屏幕边上），并拦截所有鼠标移动，只上报相对位移。
+//! - 低级钩子按"后装先调用"的顺序执行，排在前面的钩子吃掉按键后我们就收不到了，
+//!   所以开始控制远端时、以及前台窗口切换后，都把钩子重新装一次，保持在最前面。
+//! - 进程注册了键盘 Raw Input 时，只要它自己的窗口在前台，Windows 就不再调用它的低级键盘钩子
+//!   （实测）。Tauri 的窗口库 tao 默认会注册，所以外壳必须用 `DeviceEventFilter::Always` 关掉，
+//!   否则流界窗口在前台时键盘到不了远端。
 //! - 无法控制以管理员身份运行的窗口（系统的 UIPI 限制），除非流界也以管理员身份运行。
 
 use std::collections::HashSet;
@@ -56,9 +58,6 @@ static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 const WM_REINSTALL: u32 = WM_APP + 1;
 /// 前台窗口切换后延迟再装一次钩子的定时器（等新窗口的组件装好它们的钩子）。
 const REINSTALL_DELAY_MS: u32 = 300;
-/// 控制远端期间定期重装钩子的间隔。流界窗口在前台时，WebView2 会在窗口内焦点变化等时机
-/// 装上自己的键盘钩子并排到我们前面，按键就到不了远端；定期重装保证我们始终排在最前面。
-const KEEPALIVE_MS: u32 = 250;
 
 /// 请求钩子线程重新安装钩子（异步，回调返回后才执行）。
 fn request_reinstall() {
@@ -343,15 +342,10 @@ fn run_hooks(ready: mpsc::Sender<Result<u32, PlatformError>>) {
         );
         let thread = GetCurrentThreadId();
         HOOK_THREAD.store(thread, Ordering::Relaxed);
-        // 常驻定时器：只在控制远端期间触发重装。
-        let keepalive = SetTimer(std::ptr::null_mut(), 0, KEEPALIVE_MS, None);
         let _ = ready.send(Ok(thread));
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             let reinstall = match msg.message {
                 WM_REINSTALL => true,
-                WM_TIMER if msg.hwnd.is_null() && keepalive != 0 && msg.wParam == keepalive => {
-                    CAPTURED.load(Ordering::Relaxed)
-                }
                 WM_TIMER if msg.hwnd.is_null() => {
                     KillTimer(std::ptr::null_mut(), msg.wParam);
                     true
@@ -367,9 +361,6 @@ fn run_hooks(ready: mpsc::Sender<Result<u32, PlatformError>>) {
             }
         }
         HOOK_THREAD.store(0, Ordering::Relaxed);
-        if keepalive != 0 {
-            KillTimer(std::ptr::null_mut(), keepalive);
-        }
         if !foreground.is_null() {
             UnhookWinEvent(foreground);
         }
@@ -381,47 +372,38 @@ fn run_hooks(ready: mpsc::Sender<Result<u32, PlatformError>>) {
 // 光标锁定
 // ---------------------------------------------------------------------------
 
-/// 光标锁定点离屏幕边缘至少保留的距离（逻辑点）。
-///
-/// 低级钩子上报的坐标会被限制在屏幕内，锁定点贴着边缘时，往外的位移就测不到了。
-/// 每次移动事件的位移都是相对锁定点计算的（移动被拦截，光标不会真的动），
-/// 单个事件的位移远小于这个距离，所以留出这段余量就够了。
-const ANCHOR_MARGIN: f64 = 120.0;
-
-/// 在显示器 `phys`（左、上、右、下，物理像素，右下不含）内找离 `(x, y)` 最近、
-/// 且离四边至少 `margin` 像素的点；显示器太小时取该方向的中点。
-fn anchor_near(phys: (i32, i32, i32, i32), x: i32, y: i32, margin: i32) -> (i32, i32) {
-    let axis = |lo: i32, hi: i32, v: i32| {
-        let (min, max) = (lo + margin, hi - 1 - margin);
-        if min > max {
-            (lo + hi) / 2
-        } else {
-            v.clamp(min, max)
-        }
-    };
-    (axis(phys.0, phys.2, x), axis(phys.1, phys.3, y))
+/// 本机逻辑坐标 → 物理像素。落在显示器边界上时 contains 可能不成立，
+/// 取距离最近的显示器（logical_to_phys 会夹到屏幕内）。
+fn logical_to_phys_nearest(x: f64, y: f64) -> Option<(i32, i32)> {
+    with_monitors(|list| {
+        let p = flow_core::Point::new(x, y);
+        list.iter()
+            .find(|m| m.logical.contains(p))
+            .or_else(|| {
+                list.iter().min_by(|a, b| {
+                    let da = a.logical.clamp(p);
+                    let db = b.logical.clamp(p);
+                    let d = |q: flow_core::Point| (q.x - x).abs() + (q.y - y).abs();
+                    d(da).total_cmp(&d(db))
+                })
+            })
+            .map(|m| m.logical_to_phys(x, y))
+    })
 }
 
-pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
+/// `captured` 为 true 时 `at` 是离开处（光标锁定在那里，`None` 表示留在原处）；
+/// 为 false 时 `at` 是回到本机时光标要放的位置。都是本机逻辑坐标。
+pub fn set_cursor_captured(captured: bool, at: Option<(f64, f64)>) {
     if captured {
-        // 停在光标离开时的位置附近（往屏幕内收一点），而不是跳到屏幕中央。
+        // 光标停在离开处（屏幕边上）。低级钩子上报的坐标不会被限制在屏幕内（实测：光标停在右边缘时
+        // 继续往右推，钩子里的 x 会超出屏幕），所以停在边上也能测到往外的位移。
         let mut cur = POINT { x: 0, y: 0 };
-        // SAFETY: 输出指针指向本地变量。
-        let have_cursor = unsafe { GetCursorPos(&mut cur) } != 0;
-        let anchor = with_monitors(|list| {
-            let m = if have_cursor {
-                monitor_at(list, cur.x, cur.y)
-            } else {
-                list.iter().find(|m| m.primary).or(list.first())
-            }?;
-            let (x, y) = if have_cursor {
-                (cur.x, cur.y)
-            } else {
-                ((m.phys.0 + m.phys.2) / 2, (m.phys.1 + m.phys.3) / 2)
-            };
-            let margin = (ANCHOR_MARGIN * m.scale).round() as i32;
-            Some(anchor_near(m.phys, x, y, margin))
-        });
+        let anchor = at
+            .and_then(|(x, y)| logical_to_phys_nearest(x, y))
+            .or_else(|| {
+                // SAFETY: 输出指针指向本地变量。
+                (unsafe { GetCursorPos(&mut cur) } != 0).then_some((cur.x, cur.y))
+            });
         if let Some((x, y)) = anchor {
             *ANCHOR.lock().unwrap_or_else(|e| e.into_inner()) = (x, y);
             CAPTURED.store(true, Ordering::Relaxed);
@@ -432,26 +414,9 @@ pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
         }
     } else {
         CAPTURED.store(false, Ordering::Relaxed);
-        if let Some((x, y)) = restore_at {
-            let target = with_monitors(|list| {
-                let p = flow_core::Point::new(x, y);
-                // 落在显示器边界上时 contains 可能不成立，取距离最近的显示器（logical_to_phys 会夹到屏幕内）。
-                list.iter()
-                    .find(|m| m.logical.contains(p))
-                    .or_else(|| {
-                        list.iter().min_by(|a, b| {
-                            let da = a.logical.clamp(p);
-                            let db = b.logical.clamp(p);
-                            let d = |q: flow_core::Point| (q.x - x).abs() + (q.y - y).abs();
-                            d(da).total_cmp(&d(db))
-                        })
-                    })
-                    .map(|m| m.logical_to_phys(x, y))
-            });
-            if let Some((px, py)) = target {
-                // SAFETY: 简单的系统调用。
-                unsafe { SetCursorPos(px, py) };
-            }
+        if let Some((px, py)) = at.and_then(|(x, y)| logical_to_phys_nearest(x, y)) {
+            // SAFETY: 简单的系统调用。
+            unsafe { SetCursorPos(px, py) };
         }
     }
 }
@@ -685,35 +650,5 @@ impl crate::ClipboardAccess for WinClipboard {
     fn change_count(&self) -> u64 {
         // SAFETY: 无参数的系统查询。
         unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() as u64 }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::anchor_near;
-
-    const SCREEN: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
-
-    #[test]
-    fn anchor_stays_where_cursor_left_but_off_the_edge() {
-        // 从右边缘离开：横向收回 120，纵向不动。
-        assert_eq!(anchor_near(SCREEN, 1919, 500, 120), (1799, 500));
-        // 从左上角离开：两个方向都收回。
-        assert_eq!(anchor_near(SCREEN, 0, 0, 120), (120, 120));
-        // 本来就离边缘够远：原地不动。
-        assert_eq!(anchor_near(SCREEN, 800, 400, 120), (800, 400));
-    }
-
-    #[test]
-    fn anchor_respects_monitor_offset() {
-        // 主屏左侧的副屏，坐标为负。
-        let left = (-2560, -200, 0, 1240);
-        assert_eq!(anchor_near(left, -2560, 600, 180), (-2380, 600));
-        assert_eq!(anchor_near(left, -1, 1239, 180), (-181, 1059));
-    }
-
-    #[test]
-    fn tiny_monitor_falls_back_to_center() {
-        assert_eq!(anchor_near((0, 0, 200, 1080), 0, 500, 120), (100, 500));
     }
 }
