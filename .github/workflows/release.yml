@@ -159,7 +159,7 @@ jobs:
           IDENTITY="${IDENTITY:-FlowAcross Dev}"
           work="$RUNNER_TEMP/cert-check"
           mkdir -p "$work"
-          trap 'security delete-keychain "$work/check.keychain-db" 2>/dev/null; rm -rf "$work"' EXIT
+          trap 'rm -rf "$work"' EXIT
 
           # 去掉粘贴时混进来的换行和空格。
           clean=$(printf '%s' "$CERT" | tr -d ' \t\r\n')
@@ -170,9 +170,15 @@ jobs:
           fi
           echo "证书文件 $(wc -c < "$work/cert.p12" | tr -d ' ') 字节：$(file -b "$work/cert.p12")"
 
-          # 先在临时钥匙串里试导入，出错时给出明确原因。
-          security create-keychain -p check "$work/check.keychain-db"
-          if ! security import "$work/cert.p12" -k "$work/check.keychain-db" -f pkcs12 -P "$CERT_PASSWORD" > "$work/import.log" 2>&1; then
+          # 自签名证书不受系统信任，Tauri 自己导入证书时会找不到签名身份（failed to resolve signing identity）。
+          # 所以和本机 build-mac.sh 一样：证书放进钥匙串，只把证书名称交给 Tauri，由 codesign 直接签名。
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          kc_pass=$(openssl rand -hex 16)
+          security create-keychain -p "$kc_pass" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$kc_pass" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          if ! security import "$work/cert.p12" -k "$keychain" -f pkcs12 -P "$CERT_PASSWORD" -T /usr/bin/codesign > "$work/import.log" 2>&1; then
             cat "$work/import.log"
             if grep -qi "MAC verification\|passphrase\|password" "$work/import.log"; then
               echo "::error::APPLE_CERTIFICATE_PASSWORD 和导出 .p12 时设置的密码不一致。"
@@ -181,17 +187,23 @@ jobs:
             fi
             exit 1
           fi
-          if ! security find-certificate -c "$IDENTITY" "$work/check.keychain-db" > /dev/null 2>&1; then
+          # 允许 codesign 在无界面的 CI 上使用私钥，不弹授权窗口。
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pass" "$keychain" > /dev/null
+          if ! security find-certificate -c "$IDENTITY" "$keychain" > /dev/null 2>&1; then
             echo "::error::证书里找不到名为「$IDENTITY」的签名身份。确认导出的是这张证书，或用 APPLE_SIGNING_IDENTITY 填写证书名称。"
             exit 1
           fi
 
-          {
-            echo "APPLE_CERTIFICATE=$clean"
-            echo "APPLE_CERTIFICATE_PASSWORD=$CERT_PASSWORD"
-            echo "APPLE_SIGNING_IDENTITY=$IDENTITY"
-          } >> "$GITHUB_ENV"
-          echo "证书检查通过，使用「$IDENTITY」签名。"
+          # 先签一个测试文件，确认证书能用，免得编译十分钟后才失败。
+          cp /bin/ls "$work/sign-test"
+          if ! codesign --force --sign "$IDENTITY" "$work/sign-test" > "$work/sign.log" 2>&1; then
+            cat "$work/sign.log"
+            echo "::error::证书已导入，但无法用「$IDENTITY」签名。确认导出的 .p12 带有私钥。"
+            exit 1
+          fi
+
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "证书检查通过，将使用该证书签名。"
 
       - name: 打包并上传
         uses: tauri-apps/tauri-action@v0
