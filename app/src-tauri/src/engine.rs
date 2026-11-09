@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use flow_core::Rect;
 use flow_core::clipboard::ClipboardSync;
 use flow_core::files::{FileOffer, OfferBook, peer_supports_files};
-use flow_core::keys::{InputEvent, KeyCode, Modifiers, PressedState};
+use flow_core::keys::{InputEvent, KeyCode, Modifiers, PressedState, WinToMacKeys};
 use flow_core::layout::{DeviceId, Display, DisplayId, Layout};
 use flow_core::pairing::{PairingCode, device_id, pairing_code};
 use flow_core::protocol::{ByeReason, DisplayInfo, Message, Os, PROTOCOL_VERSION};
@@ -226,6 +226,8 @@ struct Inner {
     /// 被控制方：当前控制本机的设备，以及它按下的键（失败时据此释放）。
     controlled: Mutex<Option<Controlled>>,
     injector: Mutex<Option<Box<dyn InputInjector>>>,
+    /// 被 PC 键盘控制时的修饰键对应（设置的副本）。注入按键时只拿这把锁，不碰 `state`。
+    win_keys: Mutex<WinToMacKeys>,
     accessibility_warned: AtomicBool,
     /// 锁顺序：`state` → `clipboard` → `files`，持有后两者时不再拿 `state`。
     clipboard: Mutex<ClipboardState>,
@@ -269,10 +271,14 @@ struct Controlled {
     last_seen: Instant,
 }
 
-/// Mac 与 Windows 之间互相控制时，⌘ 与 Ctrl 互换：在 Mac 上按 ⌘C，Windows 收到 Ctrl+C，反之亦然。
-fn map_key(from: Os, code: KeyCode) -> KeyCode {
-    let local = Os::current();
-    if from != local && (from == Os::MacOs || local == Os::MacOs) {
+/// 被控制方换算对方的修饰键。PC 键盘控制 Mac 时按设置里的键位（默认 Ctrl → ⌘）；
+/// Mac 控制 PC 时 ⌘ 与 Ctrl 互换：在 Mac 上按 ⌘C，Windows 收到 Ctrl+C。
+fn map_key(from: Os, local: Os, win_keys: WinToMacKeys, code: KeyCode) -> KeyCode {
+    if from == local {
+        code
+    } else if local == Os::MacOs {
+        win_keys.apply(code)
+    } else if from == Os::MacOs {
         code.swap_meta_ctrl()
     } else {
         code
@@ -523,6 +529,7 @@ impl Engine {
     pub async fn start(opts: EngineOptions, notify: Notify) -> Result<Engine, String> {
         let identity = Identity::load_or_create(&opts.data_dir).map_err(|e| e.to_string())?;
         let config = Config::load(&opts.data_dir);
+        let win_keys = config.settings.win_to_mac_keys();
         let endpoint = flow_net::bind_endpoint(&identity, opts.port).map_err(|e| e.to_string())?;
         let port = endpoint.local_addr().map_err(|e| e.to_string())?.port();
         let local_displays = flow_platform::display_provider()
@@ -559,6 +566,7 @@ impl Engine {
                 capture_retry_at: Mutex::new(None),
                 controlled: Mutex::new(None),
                 injector: Mutex::new(None),
+                win_keys: Mutex::new(win_keys),
                 accessibility_warned: AtomicBool::new(false),
                 clipboard: Mutex::new(ClipboardState {
                     sync: clipboard_sync,
@@ -923,6 +931,7 @@ impl Engine {
     }
 
     pub fn update_settings(&self, settings: Settings) {
+        *self.inner.win_keys.lock().expect("win_keys") = settings.win_to_mac_keys();
         let mut st = self.lock();
         st.config.settings = settings;
         self.save(&st);
@@ -1798,6 +1807,11 @@ impl Engine {
                 self.notice(format!("与「{name}」的连接中断，键鼠已回到本机。"));
             }
             let remote = self.controller().active_device().is_some();
+            if remote {
+                // 本机正被别的设备控制时，用户直接用本机键鼠切到了其他设备：本机已经不归对方控制了，
+                // 释放对方按下的键并不再注入它的输入。对方收到本机的 Enter 后也会交出控制权。
+                self.release_controlled(None);
+            }
             if was_remote && !remote {
                 // 控制远端后回到本机：在那边复制的文件可能要在这里粘贴。
                 self.on_arrive();
@@ -2360,7 +2374,8 @@ impl Engine {
                 }
                 Message::Wheel { dx, dy } => Some(Remote::Wheel(dx, dy)),
                 Message::Key { code, down, repeat } => {
-                    let code = map_key(c.by_os, code);
+                    let win_keys = *self.inner.win_keys.lock().expect("win_keys");
+                    let code = map_key(c.by_os, Os::current(), win_keys, code);
                     c.pressed.on_key(code, down);
                     Some(Remote::Key(code, down, repeat))
                 }
@@ -2393,6 +2408,11 @@ impl Engine {
     fn on_enter(&self, peer: &DeviceId, peer_os: Os, session: u32, display: &str, x: f64, y: f64) {
         // 换了一台设备来控制：先把上一台按下的键释放掉。
         self.release_controlled(None);
+        // 本机正在控制别的设备时被接管（用户拿起了那台电脑自己的鼠标推过来）：
+        // 先释放远端按键、解锁本机光标，再接受对方的控制，否则两边都以为自己是控制方。
+        if self.controller().yield_control() {
+            info!(device = %short(peer), "本机被接管");
+        }
         if self.inner.input
             && flow_platform::permissions().state(Permission::Accessibility)
                 == PermissionState::Denied
@@ -2503,6 +2523,43 @@ mod tests {
             notices,
             dir,
         }
+    }
+
+    #[test]
+    fn map_key_uses_win_keys_only_when_mac_is_controlled() {
+        let pos = WinToMacKeys::MAC_POSITION;
+        // PC 键盘控制 Mac：按设置换算。
+        assert_eq!(
+            map_key(Os::Windows, Os::MacOs, pos, KeyCode::LEFT_ALT),
+            KeyCode::LEFT_META
+        );
+        assert_eq!(
+            map_key(
+                Os::Windows,
+                Os::MacOs,
+                WinToMacKeys::WINDOWS,
+                KeyCode::LEFT_CTRL
+            ),
+            KeyCode::LEFT_META
+        );
+        // Mac 控制 PC：不受这项设置影响，仍是 ⌘ ↔ Ctrl。
+        assert_eq!(
+            map_key(Os::MacOs, Os::Windows, pos, KeyCode::LEFT_META),
+            KeyCode::LEFT_CTRL
+        );
+        assert_eq!(
+            map_key(Os::MacOs, Os::Windows, pos, KeyCode::LEFT_ALT),
+            KeyCode::LEFT_ALT
+        );
+        // 同系统之间不换算。
+        assert_eq!(
+            map_key(Os::MacOs, Os::MacOs, pos, KeyCode::LEFT_ALT),
+            KeyCode::LEFT_ALT
+        );
+        assert_eq!(
+            map_key(Os::Windows, Os::Windows, pos, KeyCode::LEFT_CTRL),
+            KeyCode::LEFT_CTRL
+        );
     }
 
     fn addr(e: &Engine) -> SocketAddr {

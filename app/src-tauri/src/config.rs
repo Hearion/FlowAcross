@@ -4,6 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use flow_core::keys::WinToMacKeys;
 use flow_core::layout::{DeviceId, EdgeMapping};
 use flow_core::protocol::{DisplayInfo, Os};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,21 @@ pub enum HoldKey {
     Ctrl,
     Alt,
     Shift,
+}
+
+/// PC（Windows）键盘控制本机（Mac）时修饰键怎么对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WinKeysPreset {
+    /// Ctrl → ⌘（Ctrl+C 复制），和以前的版本一致。
+    #[default]
+    Windows,
+    /// 按 Mac 键盘位置：Alt → ⌘、Win → ⌥。
+    MacPosition,
+    /// 原样直通：Win → ⌘。
+    Direct,
+    /// 使用 `Settings::win_keys_custom`。
+    Custom,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +57,23 @@ pub struct Settings {
     pub auto_check_updates: bool,
     /// 低延迟模式（仅 macOS）：有设备连着时关闭 AWDL，消除 Wi‑Fi 周期性停顿。
     pub low_latency: bool,
+    /// 被 PC 键盘控制时（本机是 Mac）Ctrl、Win、Alt 对应哪个键。按键由被控制的一方换算，
+    /// 所以这项设置在 Mac 上生效。
+    pub win_keys: WinKeysPreset,
+    /// `win_keys` 为 `Custom` 时的对应关系。
+    pub win_keys_custom: WinToMacKeys,
+}
+
+impl Settings {
+    /// 当前生效的 PC 键盘 → Mac 修饰键对应关系。
+    pub fn win_to_mac_keys(&self) -> WinToMacKeys {
+        match self.win_keys {
+            WinKeysPreset::Windows => WinToMacKeys::WINDOWS,
+            WinKeysPreset::MacPosition => WinToMacKeys::MAC_POSITION,
+            WinKeysPreset::Direct => WinToMacKeys::DIRECT,
+            WinKeysPreset::Custom => self.win_keys_custom,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -55,6 +88,8 @@ impl Default for Settings {
             sharing_paused: false,
             auto_check_updates: true,
             low_latency: false,
+            win_keys: WinKeysPreset::Windows,
+            win_keys_custom: WinToMacKeys::WINDOWS,
         }
     }
 }
@@ -152,6 +187,34 @@ mod tests {
         fs::write(dir.join(FILE), br#"{"onboarded":true}"#).unwrap();
         let old = Config::load(&dir);
         assert!(old.onboarded && old.settings.clipboard && old.settings.auto_check_updates);
+        // 旧配置没有键位设置：保持以前的 Ctrl → ⌘。
+        assert_eq!(old.settings.win_to_mac_keys(), WinToMacKeys::WINDOWS);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn win_keys_json_and_custom() {
+        use flow_core::keys::MacModifier;
+        let s: Settings = serde_json::from_str(
+            r#"{"win_keys":"custom","win_keys_custom":{"ctrl":"command","win":"option","alt":"control"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            s.win_to_mac_keys(),
+            WinToMacKeys {
+                ctrl: MacModifier::Command,
+                win: MacModifier::Option,
+                alt: MacModifier::Control,
+            }
+        );
+        // 选了预设时忽略自定义内容。
+        let s = Settings {
+            win_keys: WinKeysPreset::MacPosition,
+            ..s
+        };
+        assert_eq!(s.win_to_mac_keys(), WinToMacKeys::MAC_POSITION);
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["win_keys"], "mac_position");
+        assert_eq!(json["win_keys_custom"]["ctrl"], "command");
     }
 }

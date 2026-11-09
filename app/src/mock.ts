@@ -23,7 +23,7 @@ export function createMock(): Api {
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" } },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },

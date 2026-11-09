@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { PermissionList } from "./Dialogs";
-import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
+import { ClipboardSetting, CrossScreenSettings, WinKeysSetting } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
 import { ChevronLeftIcon, Logo, SETTINGS_ICONS, Toggle } from "./ui";
 import { ProgressBar, type Updater } from "./Updater";
@@ -86,6 +86,20 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <Panel>
               <CrossScreenSettings settings={state.settings} update={update} />
             </Panel>
+            {state.local.os === "MacOs" ? (
+              <>
+                <Panel>
+                  <WinKeysSetting settings={state.settings} update={update} />
+                </Panel>
+                <p className="settings-note">
+                  用 Windows 电脑的键盘控制这台 Mac 时生效，改完立即生效。Mac 控制 Windows 时不受影响，⌘ 始终对应 Ctrl。
+                </p>
+              </>
+            ) : (
+              <p className="settings-note">
+                用这台电脑的键盘控制 Mac 时，Ctrl、Win、Alt 对应 Mac 的哪个键，在 Mac 上的流界里设置（设置 › 跨屏与键鼠）。
+              </p>
+            )}
             {state.low_latency.supported && <LowLatencySetting state={state} />}
           </Section>
         )}

@@ -1896,6 +1896,11 @@ kbd {
   flex: none;
 }
 
+/* 文字长短不一时按内容撑开，不把长的挤出按钮 */
+.settings-panel .segmented button {
+  flex: 1 0 auto;
+}
+
 .settings-note {
   max-width: 40em;
   color: var(--fg-3);

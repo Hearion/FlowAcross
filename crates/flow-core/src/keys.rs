@@ -59,6 +59,82 @@ impl KeyCode {
     }
 }
 
+/// Mac 上的一个修饰键。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacModifier {
+    /// ⌃ Control
+    Control,
+    /// ⌥ Option
+    Option,
+    /// ⌘ Command
+    Command,
+}
+
+impl MacModifier {
+    fn key(self, right: bool) -> KeyCode {
+        match (self, right) {
+            (Self::Control, false) => KeyCode::LEFT_CTRL,
+            (Self::Control, true) => KeyCode::RIGHT_CTRL,
+            (Self::Option, false) => KeyCode::LEFT_ALT,
+            (Self::Option, true) => KeyCode::RIGHT_ALT,
+            (Self::Command, false) => KeyCode::LEFT_META,
+            (Self::Command, true) => KeyCode::RIGHT_META,
+        }
+    }
+}
+
+/// PC（Windows）键盘控制 Mac 时，Ctrl、徽标键（Win）、Alt 分别当作 Mac 的哪个键。左右键各自对应。
+///
+/// 可以把两个键对应到同一个 Mac 键；此时同时按住再松开其中一个，Mac 会认为它已经松开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WinToMacKeys {
+    pub ctrl: MacModifier,
+    pub win: MacModifier,
+    pub alt: MacModifier,
+}
+
+impl Default for WinToMacKeys {
+    fn default() -> Self {
+        Self::WINDOWS
+    }
+}
+
+impl WinToMacKeys {
+    /// Windows 习惯（默认）：Ctrl → ⌘、Win → ⌃，Ctrl+C 在 Mac 上就是复制。
+    pub const WINDOWS: Self = Self {
+        ctrl: MacModifier::Command,
+        win: MacModifier::Control,
+        alt: MacModifier::Option,
+    };
+    /// 按 Mac 键盘的位置：空格旁边的 Alt → ⌘、Win → ⌥、Ctrl → ⌃。
+    pub const MAC_POSITION: Self = Self {
+        ctrl: MacModifier::Control,
+        win: MacModifier::Option,
+        alt: MacModifier::Command,
+    };
+    /// 原样直通：和把 PC 键盘直接插在 Mac 上一样，Win → ⌘、Alt → ⌥。
+    pub const DIRECT: Self = Self {
+        ctrl: MacModifier::Control,
+        win: MacModifier::Command,
+        alt: MacModifier::Option,
+    };
+
+    /// 把 PC 键盘的键码换算成 Mac 上要注入的键码；不是 Ctrl/Win/Alt 的键原样返回。
+    pub fn apply(self, code: KeyCode) -> KeyCode {
+        let (m, right) = match code {
+            KeyCode::LEFT_CTRL => (self.ctrl, false),
+            KeyCode::RIGHT_CTRL => (self.ctrl, true),
+            KeyCode::LEFT_META => (self.win, false),
+            KeyCode::RIGHT_META => (self.win, true),
+            KeyCode::LEFT_ALT => (self.alt, false),
+            KeyCode::RIGHT_ALT => (self.alt, true),
+            other => return other,
+        };
+        m.key(right)
+    }
+}
+
 /// 修饰键集合（位掩码）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Modifiers(pub u8);
@@ -376,6 +452,50 @@ mod tests {
         assert!(!r.any_button_held());
         // 之后到来的物理抬起事件交给本机（本机没见过按下，抬起无副作用）
         assert_eq!(r.route_key(KeyCode::LEFT_META, false, false), Route::Local);
+    }
+
+    #[test]
+    fn win_to_mac_presets() {
+        let all = [
+            KeyCode::LEFT_CTRL,
+            KeyCode::RIGHT_CTRL,
+            KeyCode::LEFT_META,
+            KeyCode::RIGHT_META,
+            KeyCode::LEFT_ALT,
+            KeyCode::RIGHT_ALT,
+            KeyCode::A,
+            KeyCode::LEFT_SHIFT,
+        ];
+        // Windows 习惯与原来的 ⌘/Ctrl 互换完全一致，老用户升级后手感不变。
+        assert_eq!(WinToMacKeys::default(), WinToMacKeys::WINDOWS);
+        for k in all {
+            assert_eq!(WinToMacKeys::WINDOWS.apply(k), k.swap_meta_ctrl());
+            assert_eq!(WinToMacKeys::DIRECT.apply(k), k);
+        }
+        // 按 Mac 位置：空格旁的 Alt 是 ⌘，左右分别对应。
+        let m = WinToMacKeys::MAC_POSITION;
+        assert_eq!(m.apply(KeyCode::LEFT_ALT), KeyCode::LEFT_META);
+        assert_eq!(m.apply(KeyCode::RIGHT_ALT), KeyCode::RIGHT_META);
+        assert_eq!(m.apply(KeyCode::LEFT_META), KeyCode::LEFT_ALT);
+        assert_eq!(m.apply(KeyCode::LEFT_CTRL), KeyCode::LEFT_CTRL);
+        assert_eq!(m.apply(KeyCode::C), KeyCode::C);
+    }
+
+    #[test]
+    fn win_to_mac_custom() {
+        let custom = WinToMacKeys {
+            ctrl: MacModifier::Command,
+            win: MacModifier::Option,
+            alt: MacModifier::Command,
+        };
+        assert_eq!(custom.apply(KeyCode::RIGHT_CTRL), KeyCode::RIGHT_META);
+        assert_eq!(custom.apply(KeyCode::LEFT_ALT), KeyCode::LEFT_META);
+        assert_eq!(custom.apply(KeyCode::RIGHT_META), KeyCode::RIGHT_ALT);
+        let bytes = postcard::to_allocvec(&custom).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<WinToMacKeys>(&bytes).unwrap(),
+            custom
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // 跨屏与剪贴板的设置控件：主界面侧栏和设置页共用同一套。
 
-import type { HoldKey, Settings } from "./types";
+import type { HoldKey, MacModifier, Settings, WinKeysPreset, WinToMacKeys } from "./types";
 import { Segmented, Toggle, isMac } from "./ui";
 
 const HOLD_OPTIONS: { value: HoldKey; label: string }[] = [
@@ -75,6 +75,77 @@ export function CrossScreenSettings({ settings: s, update }: Props) {
           <kbd>→</kbd>
         </span>
       </div>
+    </>
+  );
+}
+
+const WIN_KEY_PRESETS: { value: WinKeysPreset; label: string }[] = [
+  { value: "windows", label: "Windows" },
+  { value: "mac_position", label: "Mac 键位" },
+  { value: "direct", label: "直通" },
+  { value: "custom", label: "自定义" },
+];
+
+const PRESET_MAPS: Record<Exclude<WinKeysPreset, "custom">, WinToMacKeys> = {
+  windows: { ctrl: "command", win: "control", alt: "option" },
+  mac_position: { ctrl: "control", win: "option", alt: "command" },
+  direct: { ctrl: "control", win: "command", alt: "option" },
+};
+
+const PRESET_DESC: Record<WinKeysPreset, string> = {
+  windows: "Ctrl+C 复制、Ctrl+V 粘贴，和在 Windows 上一样",
+  mac_position: "按 Mac 键盘的位置：空格旁边的 Alt 当 ⌘ 用",
+  direct: "不做转换，和把 PC 键盘直接插在 Mac 上一样",
+  custom: "分别指定 Ctrl、Win、Alt 对应 Mac 的哪个键",
+};
+
+const MAC_KEYS: { value: MacModifier; label: string }[] = [
+  { value: "control", label: "⌃ Control" },
+  { value: "option", label: "⌥ Option" },
+  { value: "command", label: "⌘ Command" },
+];
+
+const PC_KEYS: { key: keyof WinToMacKeys; label: string }[] = [
+  { key: "ctrl", label: "Ctrl" },
+  { key: "win", label: "Win" },
+  { key: "alt", label: "Alt" },
+];
+
+/** 被 PC 键盘控制时修饰键的对应。按键由被控制的 Mac 换算，所以只在 Mac 上显示。 */
+export function WinKeysSetting({ settings: s, update }: Props) {
+  const preset = s.win_keys;
+  const custom = preset === "custom";
+  const current = preset === "custom" ? s.win_keys_custom : PRESET_MAPS[preset];
+  const pick = (v: WinKeysPreset) =>
+    // 切到自定义时从当前预设开始改，不会突然变成别的键位。
+    v === "custom" && !custom ? update({ win_keys: v, win_keys_custom: current }) : update({ win_keys: v });
+
+  return (
+    <>
+      <div className="setting">
+        <div className="setting-text">
+          <span>Windows 键盘的修饰键</span>
+          <small>{PRESET_DESC[s.win_keys]}</small>
+        </div>
+        <Segmented label="Windows 键盘的修饰键" value={s.win_keys} options={WIN_KEY_PRESETS} onChange={pick} />
+      </div>
+      {PC_KEYS.map(({ key, label }) => (
+        <div className="setting inline" key={key}>
+          <span className="keys">
+            <kbd>{label}</kbd>
+          </span>
+          {custom ? (
+            <Segmented
+              label={`${label} 对应 Mac 的`}
+              value={current[key]}
+              options={MAC_KEYS}
+              onChange={(v) => update({ win_keys_custom: { ...current, [key]: v } })}
+            />
+          ) : (
+            <span className="row-value">{MAC_KEYS.find((k) => k.value === current[key])?.label}</span>
+          )}
+        </div>
+      ))}
     </>
   );
 }

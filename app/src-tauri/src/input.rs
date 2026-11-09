@@ -156,6 +156,24 @@ impl Controller {
         self.leave_to_local(None);
     }
 
+    /// 本机被其他设备接管（对方开始控制本机）：结束控制远端、解锁本机光标，但不挪动光标，
+    /// 光标由接管方随后注入的位置决定。返回是否确实结束了一次控制。
+    ///
+    /// 典型场景：Win 控制着 Mac 时，用户直接拿起 Mac 的鼠标推回 Win。Mac 会开始控制 Win，
+    /// Win 必须同时退出"控制 Mac"，否则两边都以为自己是控制方：Win 的光标仍被锁住、
+    /// 本机键鼠仍被拦截转发，表现为流转异常且切不回来。
+    pub fn yield_control(&mut self) -> bool {
+        let Some(old) = self.active.take() else {
+            return false;
+        };
+        self.release_remote(&old);
+        self.switcher.reset();
+        (self.cursor)(false, None);
+        info!("本机被其他设备接管，结束控制远端");
+        let _ = self.events.send(ControlEvent::Changed);
+        true
+    }
+
     fn now_ms(&self) -> u64 {
         self.epoch.elapsed().as_millis() as u64
     }
@@ -682,6 +700,42 @@ mod tests {
         assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
         assert_eq!(r.events.try_recv(), Ok(ControlEvent::Lost(dev("p"))));
         assert!(!r.cursor.lock().unwrap().last().unwrap().0);
+    }
+
+    #[test]
+    fn yielding_to_a_takeover_releases_remote_without_moving_cursor() {
+        let mut r = rig(SwitchPolicy::default());
+        // 本机没有在控制远端时，被接管什么也不用做。
+        assert!(!r.ctl.yield_control());
+        assert!(r.cursor.lock().unwrap().is_empty());
+
+        // 本机控制 PC，按住 A 时 PC 那边的人接管了本机。
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        r.ctl.handle(key(KeyCode::A, true));
+        drain(&mut r.pc_rx);
+        while r.events.try_recv().is_ok() {}
+
+        assert!(r.ctl.yield_control());
+        assert_eq!(r.ctl.active_device(), None);
+        // PC 收到 A 的抬起和 Leave。
+        let msgs = drain(&mut r.pc_rx);
+        assert!(msgs.contains(&Message::Key {
+            code: KeyCode::A,
+            down: false,
+            repeat: false
+        }));
+        assert!(matches!(msgs.last(), Some(Message::Leave { .. })));
+        // 光标解锁但不挪动：位置由接管方注入。
+        assert_eq!(*r.cursor.lock().unwrap().last().unwrap(), (false, None));
+        assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
+
+        // 之后本机键鼠照常留在本机，A 的抬起不再发给 PC。
+        assert_eq!(r.ctl.handle(key(KeyCode::A, false)), Verdict::Pass);
+        assert_eq!(r.ctl.handle(mv(500.0, 400.0, 5.0, 0.0)), Verdict::Pass);
+        assert!(drain(&mut r.pc_rx).is_empty());
+        // 再推过边缘可以重新控制 PC。
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
     }
 
     #[test]

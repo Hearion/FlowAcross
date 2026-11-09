@@ -81,6 +81,20 @@ export interface Settings {
   auto_check_updates: boolean;
   /** 低延迟模式（仅 macOS）：有设备连着时关闭 AWDL。 */
   low_latency: boolean;
+  /** 被 PC 键盘控制时（本机是 Mac）Ctrl、Win、Alt 怎么对应。 */
+  win_keys: WinKeysPreset;
+  /** `win_keys` 为 "custom" 时的对应关系。 */
+  win_keys_custom: WinToMacKeys;
+}
+
+export type MacModifier = "control" | "option" | "command";
+export type WinKeysPreset = "windows" | "mac_position" | "direct" | "custom";
+
+/** PC 键盘的 Ctrl、Win、Alt 分别当作 Mac 的哪个键（flow-core keys::WinToMacKeys）。 */
+export interface WinToMacKeys {
+  ctrl: MacModifier;
+  win: MacModifier;
+  alt: MacModifier;
 }
 
 export interface LowLatencyView {
