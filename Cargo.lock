@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "flow-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "postcard",
  "serde",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "flow-net"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bytes",
  "flow-core",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "flow-platform"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "flowacross"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "flow-core",
  "flow-net",
