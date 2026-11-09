@@ -51,4 +51,4 @@ pub use identity::Identity;
 pub use link::{Link, LinkReceiver, LinkSender};
 pub use moves::{MoveReceiver, MoveSender};
 pub use quinn;
-pub use tls::{bind_endpoint, peer_fingerprint};
+pub use tls::{bind_endpoint, channel_binding, peer_fingerprint, random_bytes};

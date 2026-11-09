@@ -128,12 +128,52 @@ pub struct Config {
     pub local_offset: (f64, f64),
 }
 
+/// 配置文件存在但读不了或解析不了。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadProblem {
+    /// 读取或解析失败的原因。
+    pub reason: String,
+    /// 原文件改名后的备份；`None` 表示连改名都失败了，这时不能再写配置，否则会覆盖原文件。
+    pub backup: Option<PathBuf>,
+}
+
+impl LoadProblem {
+    /// 给用户看的说明（原因 + 处理建议）。
+    pub fn message(&self) -> String {
+        match &self.backup {
+            Some(b) => format!(
+                "配置文件损坏，无法读取（{}）。已把原文件备份为 {}，配对的设备和布局需要重新设置。",
+                self.reason,
+                b.display()
+            ),
+            None => format!(
+                "配置文件无法读取（{}），也无法备份。为了不覆盖原文件，这次运行的设置不会保存。请检查流界数据文件夹的权限后重新打开流界。",
+                self.reason
+            ),
+        }
+    }
+}
+
 impl Config {
-    pub fn load(dir: &Path) -> Config {
-        fs::read(dir.join(FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    /// 读取配置。文件不存在时返回默认配置；文件损坏时先把它改名备份，再返回默认配置和问题说明，
+    /// 而不是静默丢弃——否则下次保存就会用空配置覆盖掉所有配对。
+    pub fn load(dir: &Path) -> Result<Config, LoadProblem> {
+        let path = dir.join(FILE);
+        let reason = match fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(c) => return Ok(c),
+                Err(e) => e.to_string(),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => e.to_string(),
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = dir.join(format!("{FILE}.bad-{stamp}"));
+        let backup = fs::rename(&path, &backup).ok().map(|()| backup);
+        Err(LoadProblem { reason, backup })
     }
 
     /// 先写临时文件再改名，避免写到一半断电导致配置损坏。
@@ -181,14 +221,36 @@ mod tests {
             paused: false,
         });
         c.save(&dir).unwrap();
-        assert_eq!(Config::load(&dir), c);
+        assert_eq!(Config::load(&dir), Ok(c));
 
         // 旧版本配置缺字段时用默认值补齐
         fs::write(dir.join(FILE), br#"{"onboarded":true}"#).unwrap();
-        let old = Config::load(&dir);
+        let old = Config::load(&dir).unwrap();
         assert!(old.onboarded && old.settings.clipboard && old.settings.auto_check_updates);
         // 旧配置没有键位设置：保持以前的 Ctrl → ⌘。
         assert_eq!(old.settings.win_to_mac_keys(), WinToMacKeys::WINDOWS);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_is_default_and_corrupt_is_backed_up() {
+        let dir = std::env::temp_dir().join(format!("flowacross-cfg-bad-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // 第一次启动：没有配置文件，不算问题。
+        assert_eq!(Config::load(&dir), Ok(Config::default()));
+
+        // 写坏的配置：改名备份，内容原样保留，不再占着 config.json。
+        let broken = br#"{"onboarded":true,"peers":[{"id":"ab""#;
+        fs::write(dir.join(FILE), broken).unwrap();
+        let problem = Config::load(&dir).unwrap_err();
+        let backup = problem.backup.clone().expect("应当备份");
+        assert_eq!(fs::read(&backup).unwrap(), broken);
+        assert!(!dir.join(FILE).exists());
+        assert!(problem.message().contains("已把原文件备份"));
+        // 之后保存的新配置不会覆盖备份。
+        Config::default().save(&dir).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), broken);
         fs::remove_dir_all(&dir).unwrap();
     }
 

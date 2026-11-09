@@ -18,8 +18,8 @@ export function createMock(): Api {
       ],
     },
     devices: [
-      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, paused: false },
-      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, paused: false },
+      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, paused: false, remote_paused: false },
+      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, paused: false, remote_paused: false },
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
@@ -36,8 +36,13 @@ export function createMock(): Api {
     transfers: [],
     file_offer: null,
     receive_dir: "~/Downloads/流界",
+    config_warning: null,
   };
   if (params.has("onboarding")) state.onboarded = false;
+  // ?config-error：看配置文件损坏的提示。
+  if (params.has("config-error"))
+    state.config_warning =
+      "配置文件损坏，无法读取（expected value at line 1 column 1）。已把原文件备份为 ~/Library/Application Support/app.flowacross.desktop/config.json.bad-1794235000，配对的设备和布局需要重新设置。";
   // ?files：看跨设备复制文件的各种状态。
   if (params.has("files")) {
     state.file_offer = { peer: "pc", peer_name: "书房台式机", label: "项目素材 等 3 项", files: 214, bytes: 3_480_000_000 };
@@ -100,7 +105,7 @@ export function createMock(): Api {
         set({
           pairings: [],
           nearby: state.nearby.filter((d) => d.id !== device),
-          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, paused: false }],
+          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, paused: false, remote_paused: false }],
           layout: {
             displays: [
               ...state.layout.displays,
@@ -177,6 +182,7 @@ export function createMock(): Api {
       set({ transfers: state.transfers.map((t) => (t.id === id && t.status === "running" ? { ...t, status: "canceled" } : t)) }),
     dismissTransfer: async (id) => set({ transfers: state.transfers.filter((t) => t.id !== id || t.status === "running") }),
     openReceivedFiles: async () => notice("（浏览器预览）这里会打开下载文件夹里的「流界」"),
+    dismissConfigWarning: async () => set({ config_warning: null }),
     // 每次订阅包一层新函数：React 开发模式会"订阅-退订-再订阅"同一个回调，直接存回调会被误删。
     onState: async (cb) => {
       const h = (st: StateView) => cb(st);

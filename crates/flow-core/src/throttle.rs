@@ -132,3 +132,57 @@ mod tests {
         assert!(sent >= 240, "sent {sent}");
     }
 }
+
+/// 滑动窗口限流：`window_ms` 内最多允许 `max` 次。用来限制未主动发起的配对请求等
+/// 可以被局域网里任何人触发的操作。时间由调用方以毫秒传入。
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    window_ms: u64,
+    max: usize,
+    hits: std::collections::VecDeque<u64>,
+}
+
+impl RateLimit {
+    pub fn new(max: usize, window_ms: u64) -> Self {
+        Self {
+            window_ms,
+            max,
+            hits: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 记录一次并返回是否允许。被拒绝的不计入。
+    pub fn allow(&mut self, now_ms: u64) -> bool {
+        while self
+            .hits
+            .front()
+            .is_some_and(|&t| now_ms.saturating_sub(t) >= self.window_ms)
+        {
+            self.hits.pop_front();
+        }
+        if self.hits.len() >= self.max {
+            return false;
+        }
+        self.hits.push_back(now_ms);
+        true
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::RateLimit;
+
+    #[test]
+    fn allows_max_per_window_then_recovers() {
+        let mut r = RateLimit::new(3, 60_000);
+        assert!(r.allow(0));
+        assert!(r.allow(10));
+        assert!(r.allow(20));
+        assert!(!r.allow(30));
+        assert!(!r.allow(59_999));
+        // 第一次过了窗口，空出一个名额。
+        assert!(r.allow(60_000));
+        assert!(!r.allow(60_005));
+        assert!(r.allow(60_010));
+    }
+}

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
 use flow_core::layout::DeviceId;
+use flow_core::protocol::clean_name;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -42,7 +43,12 @@ pub struct Discovery {
 }
 
 fn instance_name(device: &DeviceId) -> String {
-    format!("flowacross-{}", &device.0[..device.0.len().min(16)])
+    let end = device
+        .0
+        .char_indices()
+        .nth(16)
+        .map_or(device.0.len(), |(i, _)| i);
+    format!("flowacross-{}", &device.0[..end])
 }
 
 fn service_info(a: &Advert) -> Result<ServiceInfo, NetError> {
@@ -88,7 +94,8 @@ impl Discovery {
                                 continue;
                             };
                             let device = DeviceId(id.to_owned());
-                            if device == me {
+                            // mDNS 可以被任何人伪造：ID 不是合法指纹的直接丢弃。
+                            if device == me || !device.is_well_formed() {
                                 continue;
                             }
                             let mut addrs: Vec<SocketAddr> = s
@@ -107,16 +114,14 @@ impl Discovery {
                             by_fullname.insert(s.fullname.clone(), device.clone());
                             DiscoveryEvent::Found(Found {
                                 device,
-                                name: s
-                                    .txt_properties
-                                    .get_property_val_str("name")
-                                    .unwrap_or("未命名设备")
-                                    .to_owned(),
-                                os: s
-                                    .txt_properties
-                                    .get_property_val_str("os")
-                                    .unwrap_or("")
-                                    .to_owned(),
+                                name: Some(clean_name(
+                                    s.txt_properties.get_property_val_str("name").unwrap_or(""),
+                                ))
+                                .filter(|n| !n.is_empty())
+                                .unwrap_or_else(|| "未命名设备".to_owned()),
+                                os: clean_name(
+                                    s.txt_properties.get_property_val_str("os").unwrap_or(""),
+                                ),
                                 addrs,
                             })
                         }

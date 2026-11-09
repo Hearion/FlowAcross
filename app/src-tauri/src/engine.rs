@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -15,13 +15,17 @@ use flow_core::clipboard::ClipboardSync;
 use flow_core::files::{FileOffer, OfferBook, peer_supports_files};
 use flow_core::keys::{InputEvent, KeyCode, Modifiers, PressedState, WinToMacKeys};
 use flow_core::layout::{DeviceId, Display, DisplayId, Layout};
-use flow_core::pairing::{PairingCode, device_id, pairing_code};
-use flow_core::protocol::{ByeReason, DisplayInfo, Message, Os, PROTOCOL_VERSION};
-use flow_core::switching::SwitchPolicy;
-use flow_core::throttle::MoveThrottle;
+use flow_core::pairing::{Nonce, PairingCode, commitment, device_id, sas_code, verify_commitment};
+use flow_core::protocol::{
+    ByeReason, DisplayInfo, Message, Os, PROTOCOL_VERSION, clean_name, peer_supports_secure,
+};
+use flow_core::switching::{SwitchPolicy, accepts_control};
+use flow_core::throttle::{MoveThrottle, RateLimit};
 use flow_net::discovery::{Advert, Discovery, DiscoveryEvent, Found};
 use flow_net::quinn;
-use flow_net::{Identity, Link, MoveReceiver, MoveSender, peer_fingerprint};
+use flow_net::{
+    Identity, Link, MoveReceiver, MoveSender, channel_binding, peer_fingerprint, random_bytes,
+};
 use flow_platform::{InputCapture, InputInjector, Permission, PermissionState, PlatformError};
 use serde::Serialize;
 use tokio::sync::mpsc;
@@ -86,6 +90,8 @@ pub struct StateView {
     pub file_offer: Option<FileOfferView>,
     /// 收到的文件保存在这里；`None` 表示找不到下载文件夹，无法接收文件。
     pub receive_dir: Option<String>,
+    /// 启动时配置文件损坏的说明（原因和备份位置），用户点「知道了」前一直显示。
+    pub config_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +149,8 @@ pub struct DeviceView {
     /// 本机的键鼠当前是否在这台设备上。
     pub active: bool,
     pub paused: bool,
+    /// 对方暂停了共享、暂停了本机或锁定了键鼠，暂时不能切过去。
+    pub remote_paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +247,30 @@ struct Inner {
     progress_emitted: Mutex<Instant>,
     /// 低延迟模式当前是否在生效（已通知后台服务关闭 AWDL）；`None` 表示还没同步过。
     low_latency_active: Mutex<Option<bool>>,
+    /// 正处在握手 / 配对阶段（对方还没通过认证）的入站连接数，见 [`HandshakeSlot`]。
+    unauthenticated: Arc<AtomicUsize>,
+    /// 别人发来的配对请求（本机没有发起）的频率限制。
+    pair_requests: Mutex<RateLimit>,
+}
+
+/// 同时处在握手 / 配对阶段的入站连接上限。正常情况下同一时刻最多一两个。
+const MAX_UNAUTHENTICATED: usize = 8;
+
+/// 占用一个"未认证入站连接"名额，丢弃时归还。进入会话（双方互信）时就归还。
+struct HandshakeSlot(Arc<AtomicUsize>);
+
+impl HandshakeSlot {
+    fn take(count: &Arc<AtomicUsize>) -> Option<Self> {
+        // 先占再判断：超了就由丢弃的 slot 归还名额。
+        let slot = Self(count.clone());
+        (count.fetch_add(1, Ordering::SeqCst) < MAX_UNAUTHENTICATED).then_some(slot)
+    }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// 剪贴板同步状态。系统剪贴板没有变化通知，按变化计数轮询。
@@ -311,6 +343,12 @@ struct State {
     /// 自动重连次数已用完、等待手动连接的设备。
     manual: HashSet<DeviceId>,
     locked: bool,
+    /// 启动时配置文件损坏的说明，用户确认前一直显示。
+    config_warning: Option<String>,
+    /// 配置文件读不了也备份不了：这次运行不写配置，避免覆盖原文件。
+    config_readonly: bool,
+    /// 告诉本机"现在不接受控制"的设备（对方暂停了共享、暂停了本机或锁定了），不往它那边切。
+    remote_blocked: HashSet<DeviceId>,
 }
 
 struct Session {
@@ -320,6 +358,10 @@ struct Session {
     initiator: DeviceId,
     /// 对方支持跨设备复制文件（看版本）。
     files: bool,
+    /// 对方支持 0.1.7 新增的消息：心跳回执、`Availability`（看版本）。
+    acks: bool,
+    /// 上次告诉对方的"本机是否接受它控制"；`None` 表示还没发过。
+    accepting_sent: Option<bool>,
 }
 
 struct Pairing {
@@ -425,9 +467,9 @@ async fn linger_close(conn: &quinn::Connection, reason: &'static [u8]) {
     conn.close(0u32.into(), reason);
 }
 
-/// 日志里只打印设备 ID 前 8 位。
+/// 日志里只打印设备 ID 前 8 位（按字符截断：ID 可能来自伪造的 mDNS 广播）。
 fn short(id: &DeviceId) -> &str {
-    &id.0[..id.0.len().min(8)]
+    id.short()
 }
 
 fn timed_out(what: &'static str) -> impl FnOnce(tokio::time::error::Elapsed) -> String {
@@ -528,7 +570,17 @@ impl State {
 impl Engine {
     pub async fn start(opts: EngineOptions, notify: Notify) -> Result<Engine, String> {
         let identity = Identity::load_or_create(&opts.data_dir).map_err(|e| e.to_string())?;
-        let config = Config::load(&opts.data_dir);
+        // 配置损坏时已备份原文件，用默认配置继续运行，并在界面上一直提示到用户点「知道了」。
+        // 连备份都失败时不再写配置，避免覆盖原文件。
+        let (config, config_problem) = match Config::load(&opts.data_dir) {
+            Ok(c) => (c, None),
+            Err(p) => {
+                warn!(reason = %p.reason, backup = ?p.backup, "配置文件损坏");
+                (Config::default(), Some(p))
+            }
+        };
+        let config_readonly = config_problem.as_ref().is_some_and(|p| p.backup.is_none());
+        let config_warning = config_problem.map(|p| p.message());
         let win_keys = config.settings.win_to_mac_keys();
         let endpoint = flow_net::bind_endpoint(&identity, opts.port).map_err(|e| e.to_string())?;
         let port = endpoint.local_addr().map_err(|e| e.to_string())?.port();
@@ -557,6 +609,8 @@ impl Engine {
                 state: Mutex::new(State {
                     config,
                     local_displays,
+                    config_warning,
+                    config_readonly,
                     ..Default::default()
                 }),
                 input: opts.input,
@@ -578,6 +632,9 @@ impl Engine {
                 started: Instant::now(),
                 progress_emitted: Mutex::new(Instant::now()),
                 low_latency_active: Mutex::new(None),
+                unauthenticated: Arc::new(AtomicUsize::new(0)),
+                // 每分钟最多弹 3 次别人发起的配对。
+                pair_requests: Mutex::new(RateLimit::new(3, 60_000)),
             }),
         };
         if let Some(dir) = &engine.inner.receive_dir {
@@ -640,8 +697,9 @@ impl Engine {
         &self.inner.data_dir
     }
 
+    /// 某个任务持锁时 panic 不应让整个引擎从此瘫痪：锁中毒时照常使用里面的状态。
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.inner.state.lock().expect("engine state poisoned")
+        self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn local_id(&self) -> &DeviceId {
@@ -661,10 +719,62 @@ impl Engine {
     }
 
     fn emit(&self) {
+        self.sync_availability();
         self.sync_input();
         self.sync_low_latency();
         let view = self.view();
         (self.inner.notify)(EngineEvent::State(Box::new(view)));
+    }
+
+    /// 本机现在是否接受 `peer` 的控制（见 [`accepts_control`]）。
+    fn accepting(st: &State, peer: &DeviceId, controlled_by: Option<&DeviceId>) -> bool {
+        accepts_control(
+            st.config.settings.sharing_paused,
+            st.locked,
+            st.config.peer(peer).is_some_and(|p| p.paused),
+            controlled_by == Some(peer),
+        )
+    }
+
+    fn controlled_by(&self) -> Option<DeviceId> {
+        self.inner
+            .controlled
+            .lock()
+            .expect("controlled")
+            .as_ref()
+            .map(|c| c.by.clone())
+    }
+
+    /// 暂停、锁定状态变化后：告诉支持的设备本机是否还接受它控制；正在控制本机、但已不被接受的
+    /// （暂停了共享或暂停了它）立即结束，释放它按下的键。只在变化时发送。
+    fn sync_availability(&self) {
+        let controlled_by = self.controlled_by();
+        let mut kick = None;
+        {
+            let mut st = self.lock();
+            let decisions: Vec<(DeviceId, bool)> = st
+                .sessions
+                .keys()
+                .map(|id| (id.clone(), Self::accepting(&st, id, controlled_by.as_ref())))
+                .collect();
+            for (id, ok) in decisions {
+                if !ok && controlled_by.as_ref() == Some(&id) {
+                    kick = Some(id.clone());
+                }
+                if let Some(s) = st.sessions.get_mut(&id)
+                    && s.acks
+                    && s.accepting_sent != Some(ok)
+                {
+                    let _ = s.tx.send(Message::Availability { accepting: ok });
+                    s.accepting_sent = Some(ok);
+                }
+            }
+        }
+        if let Some(by) = kick {
+            info!(device = %short(&by), "本机已暂停共享，结束被控制");
+            // release_controlled 会再次 emit，此时已不再被它控制，不会重复处理。
+            self.release_controlled(Some(&by));
+        }
     }
 
     /// 低延迟模式：开启了且有设备连着时通知后台服务关闭 AWDL，否则恢复。状态变化时才动作。
@@ -731,7 +841,9 @@ impl Engine {
         let outputs: HashMap<DeviceId, mpsc::UnboundedSender<Message>> = st
             .sessions
             .iter()
-            .filter(|(id, _)| st.config.peer(id).is_some_and(|p| !p.paused))
+            .filter(|(id, _)| {
+                st.config.peer(id).is_some_and(|p| !p.paused) && !st.remote_blocked.contains(*id)
+            })
             .map(|(id, s)| (id.clone(), s.tx.clone()))
             .collect();
         let mut layout = st.layout(&local);
@@ -745,6 +857,12 @@ impl Engine {
             policy: switch_policy(&st.config.settings, st.locked),
             mapping: st.config.settings.mapping,
             enabled: !st.config.settings.sharing_paused,
+            acks: st
+                .sessions
+                .iter()
+                .filter(|(_, s)| s.acks)
+                .map(|(id, _)| id.clone())
+                .collect(),
         };
         self.controller().configure(cfg);
     }
@@ -754,6 +872,10 @@ impl Engine {
     }
 
     fn save(&self, st: &State) {
+        if st.config_readonly {
+            // 原配置文件读不了也备份不了，写入会把它覆盖掉。
+            return;
+        }
         if let Err(e) = st.config.save(&self.inner.data_dir) {
             self.notice(format!("保存设置失败：{e}"));
         }
@@ -779,6 +901,7 @@ impl Engine {
             manual: false,
             active: active.is_none(),
             paused: false,
+            remote_paused: false,
         }];
         devices.extend(st.config.peers.iter().map(|p| DeviceView {
             id: p.id.clone(),
@@ -794,6 +917,7 @@ impl Engine {
             manual: st.manual.contains(&p.id) && !st.sessions.contains_key(&p.id),
             active: active.as_ref() == Some(&p.id),
             paused: p.paused,
+            remote_paused: st.remote_blocked.contains(&p.id),
         }));
         let mut nearby: Vec<NearbyView> = st
             .nearby
@@ -897,7 +1021,14 @@ impl Engine {
                 .receive_dir
                 .as_ref()
                 .map(|d| d.display().to_string()),
+            config_warning: st.config_warning.clone(),
         }
+    }
+
+    /// 用户看过配置损坏的提示了。
+    pub fn dismiss_config_warning(&self) {
+        self.lock().config_warning = None;
+        self.emit();
     }
 
     // -----------------------------------------------------------------------
@@ -1113,13 +1244,20 @@ impl Engine {
 
     async fn accept_loop(self) {
         while let Some(incoming) = self.inner.endpoint.accept().await {
+            // 任何人都能连进来：限制同时处在握手 / 配对阶段的入站连接数，防止耗尽内存。
+            let slot = HandshakeSlot::take(&self.inner.unauthenticated);
+            let Some(slot) = slot else {
+                debug!(from = %incoming.remote_address(), "未认证的连接过多，拒绝");
+                incoming.refuse();
+                continue;
+            };
             let engine = self.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
                         let from = conn.remote_address();
                         debug!(%from, "收到连接");
-                        if let Err(e) = engine.run_link(conn, false, false).await {
+                        if let Err(e) = engine.run_link(conn, false, false, Some(slot)).await {
                             warn!(%from, error = %e, "入站连接握手失败");
                         }
                     }
@@ -1292,7 +1430,7 @@ impl Engine {
                     // mDNS 广播可以被伪造，必须核对证书指纹就是我们要连的那台设备。
                     match peer_fingerprint(&conn) {
                         Ok(fp) if &device_id(&fp) == peer => {
-                            return self.run_link(conn, true, pair).await;
+                            return self.run_link(conn, true, pair, None).await;
                         }
                         _ => {
                             conn.close(0u32.into(), b"unexpected peer");
@@ -1319,11 +1457,13 @@ impl Engine {
     }
 
     /// 握手。只有握手阶段的失败返回 `Err`；进入配对或会话后，结束时都返回 `Ok`。
+    /// `slot`：入站连接占用的"未认证"名额，进入会话时归还（见 [`HandshakeSlot`]）。
     async fn run_link(
         &self,
         conn: quinn::Connection,
         initiator: bool,
         pair: bool,
+        slot: Option<HandshakeSlot>,
     ) -> Result<(), String> {
         let fp = peer_fingerprint(&conn).map_err(|e| e.to_string())?;
         let peer = device_id(&fp);
@@ -1373,6 +1513,11 @@ impl Engine {
             link.conn.close(0u32.into(), b"identity mismatch");
             return Err("设备身份校验失败".into());
         }
+        // 对方还没通过认证，名称和版本号可以是任意内容：截短、去掉控制字符后再用于日志和界面。
+        let name = Some(clean_name(&name))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "未命名设备".to_owned());
+        let app_version = clean_name(&app_version);
         if protocol != PROTOCOL_VERSION {
             let _ = link
                 .sender
@@ -1396,11 +1541,30 @@ impl Engine {
             version: app_version,
         };
         let name = peer_info.name.clone();
+        // 旧版本只会用"两个指纹算配对码"的旧方式，可以被中间人凑出相同的码，不再和它们配对。
+        // 已经配对过的旧版本设备照常连接。单元测试里两端都是当前版本，直接视为支持。
+        let secure = peer_supports_secure(&peer_info.version) || cfg!(test);
+        let too_old = || {
+            format!(
+                "「{name}」的流界版本过旧（{}），不支持安全配对。请先把两台电脑都更新到最新版本，再重新配对。",
+                peer_info.version
+            )
+        };
         if we_trust && trusts_you {
+            drop(slot);
             self.run_session(link, peer_info, initiator).await;
         } else if initiator && pair {
-            if link.sender.send(&Message::PairRequest).await.is_ok() {
-                self.run_pairing(link, peer_info, true).await;
+            if !secure {
+                let _ = link
+                    .sender
+                    .send(&Message::Bye {
+                        reason: ByeReason::VersionMismatch,
+                    })
+                    .await;
+                linger_close(&link.conn, b"version").await;
+                self.notice(too_old());
+            } else if link.sender.send(&Message::PairRequest).await.is_ok() {
+                self.run_pairing(link, peer_info, true, None).await;
             }
         } else if initiator {
             // 自动重连时发现对方已不信任本机。
@@ -1417,7 +1581,25 @@ impl Engine {
         } else {
             match tokio::time::timeout(Duration::from_secs(30), link.receiver.recv()).await {
                 Ok(Ok(Some(Message::PairRequest))) => {
-                    self.run_pairing(link, peer_info, false).await
+                    // 本机没有发起，任何局域网里的主机都能触发这个弹窗：限制频率。
+                    let now = self.now_ms();
+                    let allowed = self
+                        .inner
+                        .pair_requests
+                        .lock()
+                        .expect("pair_requests")
+                        .allow(now);
+                    if !allowed {
+                        warn!(device = %short(&peer_info.id), "配对请求过于频繁，已忽略");
+                        let _ = link.sender.send(&Message::PairReject).await;
+                        linger_close(&link.conn, b"too many").await;
+                    } else if !secure {
+                        let _ = link.sender.send(&Message::PairReject).await;
+                        linger_close(&link.conn, b"version").await;
+                        self.notice(too_old());
+                    } else {
+                        self.run_pairing(link, peer_info, false, slot).await
+                    }
                 }
                 Ok(Ok(Some(Message::Bye {
                     reason: ByeReason::Unpaired,
@@ -1430,11 +1612,84 @@ impl Engine {
         Ok(())
     }
 
-    async fn run_pairing(&self, mut link: Link, info: PeerInfo, outgoing: bool) {
+    /// 配对前交换随机数（发起方先承诺），算出两边一致的配对码。见 [`flow_core::pairing`]。
+    async fn exchange_pairing_nonces(
+        &self,
+        link: &mut Link,
+        outgoing: bool,
+        name: &str,
+    ) -> Result<PairingCode, String> {
+        let me = self.inner.identity.fingerprint;
+        let them = link.peer_fingerprint;
+        let binding = channel_binding(&link.conn).map_err(|e| e.to_string())?;
+        let lost = || "配对过程中连接断开了，请重试。".to_owned();
+        let recv = async |link: &mut Link| match link.receiver.recv().await {
+            Ok(Some(Message::PairReject)) => Err(format!("「{name}」拒绝了配对。")),
+            Ok(Some(m)) => Ok(m),
+            _ => Err(lost()),
+        };
+        let mine: Nonce = random_bytes().map_err(|e| e.to_string())?;
+        if outgoing {
+            link.sender
+                .send(&Message::PairCommit(commitment(&me, &mine)))
+                .await
+                .map_err(|_| lost())?;
+            let Message::PairNonce(theirs) = recv(link).await? else {
+                return Err("对方的配对消息顺序不对，请重新配对。".into());
+            };
+            link.sender
+                .send(&Message::PairNonce(mine))
+                .await
+                .map_err(|_| lost())?;
+            Ok(sas_code(&me, &them, &mine, &theirs, &binding))
+        } else {
+            let Message::PairCommit(commit) = recv(link).await? else {
+                return Err("对方的配对消息顺序不对，请重新配对。".into());
+            };
+            link.sender
+                .send(&Message::PairNonce(mine))
+                .await
+                .map_err(|_| lost())?;
+            let Message::PairNonce(theirs) = recv(link).await? else {
+                return Err("对方的配对消息顺序不对，请重新配对。".into());
+            };
+            if !verify_commitment(&them, &theirs, &commit) {
+                return Err(format!(
+                    "与「{name}」配对时校验失败，可能有人在冒充对方。请确认两台电脑在可信的网络中，再重新配对。"
+                ));
+            }
+            Ok(sas_code(&them, &me, &theirs, &mine, &binding))
+        }
+    }
+
+    async fn run_pairing(
+        &self,
+        mut link: Link,
+        info: PeerInfo,
+        outgoing: bool,
+        slot: Option<HandshakeSlot>,
+    ) {
         let PeerInfo {
             id: peer, name, os, ..
         } = info.clone();
-        let code = pairing_code(&self.inner.identity.fingerprint, &link.peer_fingerprint);
+        let exchanged = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            self.exchange_pairing_nonces(&mut link, outgoing, &name),
+        )
+        .await
+        .unwrap_or_else(|_| Err("配对超时，请重新发起。".into()));
+        let code = match exchanged {
+            Ok(code) => code,
+            Err(msg) => {
+                info!(device = %short(&peer), reason = %msg, "配对失败（交换随机数）");
+                linger_close(&link.conn, b"pairing failed").await;
+                // 对方没有通过校验时两边都要知道；本机是被动方的其他失败（比如对方取消）不打扰用户。
+                if outgoing || msg.contains("冒充") {
+                    self.notice(msg);
+                }
+                return;
+            }
+        };
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         {
             let mut st = self.lock();
@@ -1524,6 +1779,7 @@ impl Engine {
                 }
                 info!(device = %short(&peer), %name, "配对成功");
                 self.notice(format!("已与「{name}」配对，之后两台电脑会自动连接。"));
+                drop(slot);
                 self.run_session(link, info, outgoing).await;
             }
             Err(msg) => {
@@ -1550,6 +1806,10 @@ impl Engine {
             mut receiver,
             ..
         } = link;
+        // 双方互信，放开单帧上限。
+        receiver.authenticated();
+        // 对方会回复心跳回执（控制方据此快速发现断网），也要求我们回复。单元测试里视为支持。
+        let acks = peer_supports_secure(&version) || cfg!(test);
         // 对方支持时，鼠标位置走数据报（网络停顿后直接跳到最新位置），其余消息走可靠流。
         let mut moves = MoveSender::new(conn.clone(), &version);
         info!(device = %short(&peer), datagram = moves.enabled(), "鼠标位置发送方式");
@@ -1580,10 +1840,19 @@ impl Engine {
                     conn: conn.clone(),
                     initiator: initiator_id,
                     files,
+                    acks,
+                    accepting_sent: None,
                 },
             );
             st.backoff.remove(&peer);
             st.manual.remove(&peer);
+            // 对方可能刚重启过，剪贴板序号从头开始（锁顺序 state → clipboard）。
+            self.inner
+                .clipboard
+                .lock()
+                .expect("clipboard")
+                .sync
+                .forget(&peer);
             if let Some(r) = st.config.peer_mut(&peer) {
                 r.name = name;
                 r.os = os;
@@ -1674,8 +1943,11 @@ impl Engine {
                     self.emit();
                 }
                 Ok(Some(Message::Profile { name })) => {
+                    let name = clean_name(&name);
                     let mut st = self.lock();
-                    if let Some(r) = st.config.peer_mut(&peer) {
+                    if let Some(r) = st.config.peer_mut(&peer)
+                        && !name.is_empty()
+                    {
                         r.name = name;
                     }
                     self.save(&st);
@@ -1704,9 +1976,31 @@ impl Engine {
                     | Message::Button { .. }
                     | Message::Wheel { .. }
                     | Message::Key { .. }
-                    | Message::ReleaseAll
-                    | Message::Heartbeat { .. }),
+                    | Message::ReleaseAll),
                 )) => self.on_remote_input(&peer, os, m),
+                Ok(Some(m @ Message::Heartbeat { seq })) => {
+                    // 回执走同一条可靠流，控制方收不到就说明网络断了。
+                    if acks {
+                        let _ = tx.send(Message::HeartbeatAck { seq });
+                    }
+                    self.on_remote_input(&peer, os, m);
+                }
+                Ok(Some(Message::HeartbeatAck { .. })) => self.controller().on_ack(&peer),
+                Ok(Some(Message::Availability { accepting })) => {
+                    let changed = {
+                        let mut st = self.lock();
+                        if accepting {
+                            st.remote_blocked.remove(&peer)
+                        } else {
+                            st.remote_blocked.insert(peer.clone())
+                        }
+                    };
+                    if changed {
+                        info!(device = %short(&peer), accepting, "对方的共享状态变化");
+                        // 不再接受时，控制器会在同步配置时回到本机并发出 Lost。
+                        self.emit();
+                    }
+                }
                 Ok(Some(Message::Clipboard { origin, seq, text })) => {
                     self.on_remote_clipboard(&peer, &origin, seq, &text)
                 }
@@ -1729,6 +2023,7 @@ impl Engine {
                 .is_some_and(|s| s.conn.stable_id() == conn.stable_id());
             if current {
                 st.sessions.remove(&peer);
+                st.remote_blocked.remove(&peer);
             }
             current
         };
@@ -1798,13 +2093,25 @@ impl Engine {
         let mut was_remote = false;
         while let Some(ev) = rx.recv().await {
             if let ControlEvent::Lost(id) = &ev {
-                let name = self
-                    .lock()
-                    .config
-                    .peer(id)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                self.notice(format!("与「{name}」的连接中断，键鼠已回到本机。"));
+                let (name, refused) = {
+                    let st = self.lock();
+                    let name = st
+                        .config
+                        .peer(id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
+                    (
+                        name,
+                        st.remote_blocked.contains(id) && st.sessions.contains_key(id),
+                    )
+                };
+                self.notice(if refused {
+                    format!(
+                        "「{name}」暂停了共享或锁定了键鼠，键鼠已回到本机。对方恢复后可以再切过去。"
+                    )
+                } else {
+                    format!("与「{name}」的连接中断，键鼠已回到本机。")
+                });
             }
             let remote = self.controller().active_device().is_some();
             if remote {
@@ -2406,6 +2713,25 @@ impl Engine {
     }
 
     fn on_enter(&self, peer: &DeviceId, peer_os: Os, session: u32, display: &str, x: f64, y: f64) {
+        // 暂停共享、暂停了这台设备、锁定时不接受（锁定只挡新进来的）。先判断，被拒绝时
+        // 不能动正在控制本机的那台。之后它发来的输入因为不是当前控制者而被忽略。
+        let controlled_by = self.controlled_by();
+        let refused = {
+            let mut st = self.lock();
+            let ok = Self::accepting(&st, peer, controlled_by.as_ref());
+            if !ok && let Some(s) = st.sessions.get_mut(peer) {
+                // 对方可能还没收到"不接受"就切过来了（或者它是旧版本）：再告诉它一次。
+                if s.acks {
+                    let _ = s.tx.send(Message::Availability { accepting: false });
+                    s.accepting_sent = Some(false);
+                }
+            }
+            !ok
+        };
+        if refused {
+            info!(device = %short(peer), "本机已暂停共享或锁定，拒绝被控制");
+            return;
+        }
         // 换了一台设备来控制：先把上一台按下的键释放掉。
         self.release_controlled(None);
         // 本机正在控制别的设备时被接管（用户拿起了那台电脑自己的鼠标推过来）：
@@ -2608,8 +2934,8 @@ mod tests {
                     .any(|d| d.id == ida && d.status == DeviceStatus::Connected)
         })
         .await;
-        assert!(Config::load(&a.dir).is_trusted(&idb));
-        assert!(Config::load(&b.dir).is_trusted(&ida));
+        assert!(Config::load(&a.dir).unwrap().is_trusted(&idb));
+        assert!(Config::load(&b.dir).unwrap().is_trusted(&ida));
 
         // 移除后对方也删除可信记录
         a.engine.remove_device(&idb);
@@ -2775,6 +3101,78 @@ mod tests {
         })
         .await;
         (a, b)
+    }
+
+    /// A 通过会话直接给 B 发 Enter（模拟 A 的键鼠切到 B）。
+    fn enter(from: &Engine, to: &DeviceId, session: u32) {
+        let st = from.lock();
+        let _ = st.sessions[to].tx.send(Message::Enter {
+            session,
+            display: "1".into(),
+            x: 10.0,
+            y: 10.0,
+        });
+    }
+
+    fn remote_paused(e: &Engine, id: &DeviceId) -> bool {
+        e.view()
+            .devices
+            .iter()
+            .any(|d| &d.id == id && d.remote_paused)
+    }
+
+    /// 暂停共享、暂停这台设备、锁定都挡住别人控制本机，并告诉对方；锁定不踢掉正在控制本机的那台。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_and_lock_block_incoming_control() {
+        let (a, b) = paired("a7", "b7").await;
+        let (ida, idb) = (a.engine.local_id().clone(), b.engine.local_id().clone());
+
+        // B 暂停共享：A 收到通知，显示「对方已暂停」；A 硬切过来也被拒绝。
+        let mut s = b.engine.settings();
+        s.sharing_paused = true;
+        b.engine.update_settings(s.clone());
+        wait_for("A 知道 B 暂停了", || remote_paused(&a.engine, &idb)).await;
+        enter(&a.engine, &idb, 1);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(b.engine.controlled_by(), None);
+
+        // 恢复后可以控制。
+        s.sharing_paused = false;
+        b.engine.update_settings(s.clone());
+        wait_for("A 知道 B 恢复了", || !remote_paused(&a.engine, &idb)).await;
+        enter(&a.engine, &idb, 2);
+        wait_for("B 被 A 控制", || {
+            b.engine.controlled_by() == Some(ida.clone())
+        })
+        .await;
+
+        // 被控制时锁定：正在控制的 A 不受影响。
+        b.engine.set_locked(true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(b.engine.controlled_by(), Some(ida.clone()));
+        assert!(!remote_paused(&a.engine, &idb));
+
+        // 被控制时暂停这台设备：立即结束控制，A 也知道了。
+        b.engine.set_device_paused(&ida, true);
+        wait_for("B 结束被控制", || b.engine.controlled_by().is_none()).await;
+        wait_for("A 知道被暂停", || remote_paused(&a.engine, &idb)).await;
+
+        // 取消暂停但仍锁定：新的控制进不来。
+        b.engine.set_device_paused(&ida, false);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(remote_paused(&a.engine, &idb), "锁定时仍不接受新的控制");
+        enter(&a.engine, &idb, 3);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(b.engine.controlled_by(), None);
+
+        // 解锁：恢复。
+        b.engine.set_locked(false);
+        wait_for("解锁后恢复", || !remote_paused(&a.engine, &idb)).await;
+        enter(&a.engine, &idb, 4);
+        wait_for("B 再次被 A 控制", || {
+            b.engine.controlled_by() == Some(ida.clone())
+        })
+        .await;
     }
 
     fn latest_transfer(e: &Engine) -> Option<TransferView> {

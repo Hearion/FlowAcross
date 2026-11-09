@@ -160,3 +160,8 @@ pub fn open_permission_settings(kind: String) -> Result<(), String> {
         .open_settings(p)
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn dismiss_config_warning(engine: State<'_, Engine>) {
+    engine.dismiss_config_warning();
+}

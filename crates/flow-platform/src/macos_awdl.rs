@@ -14,6 +14,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::PlatformError;
+use crate::root_install::{self, sh_quote};
 
 const LABEL: &str = "app.flowacross.awdl-guard";
 const PLIST_PATH: &str = "/Library/LaunchDaemons/app.flowacross.awdl-guard.plist";
@@ -63,31 +64,24 @@ pub fn installed() -> bool {
 }
 
 /// 安装后台服务（弹出系统的管理员授权窗口）。用户取消时返回错误。
+///
+/// 脚本和 plist 的内容直接写在 root 命令里（见 [`root_install`]），由 root 写进只有 root 能写的
+/// 系统目录。不经过任何用户可写的临时文件：否则授权弹窗停留期间，同一用户下的其他进程
+/// 可以把临时文件换掉，换来以 root 身份常驻执行。
 pub fn install() -> Result<(), PlatformError> {
-    let dir = std::env::temp_dir().join(format!("flowacross-awdl-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| PlatformError::Os(e.to_string()))?;
-    let script = dir.join("awdl-guard.sh");
-    let plist = dir.join("guard.plist");
-    std::fs::write(&script, SCRIPT).map_err(|e| PlatformError::Os(e.to_string()))?;
-    std::fs::write(&plist, PLIST).map_err(|e| PlatformError::Os(e.to_string()))?;
-    // 文件以 root 所有、普通用户不可写的方式装到系统目录，守护进程只执行这份脚本。
     let cmd = format!(
-        "mkdir -p {dir} && install -o root -g wheel -m 755 {src_script} {script} && \
-         install -o root -g wheel -m 644 {src_plist} {plist} && \
+        "{dir} && {script} && {plist} && \
          (launchctl bootout system/{LABEL} 2>/dev/null; true) && \
-         launchctl bootstrap system {plist}",
-        dir = sh_quote(SCRIPT_DIR),
-        src_script = sh_quote(&script.to_string_lossy()),
-        script = sh_quote(SCRIPT_PATH),
-        src_plist = sh_quote(&plist.to_string_lossy()),
-        plist = sh_quote(PLIST_PATH),
+         launchctl bootstrap system {plist_path}",
+        dir = root_install::ensure_root_dir(SCRIPT_DIR),
+        script = root_install::write_file(SCRIPT_PATH, SCRIPT, "755"),
+        plist = root_install::write_file(PLIST_PATH, PLIST, "644"),
+        plist_path = sh_quote(PLIST_PATH),
     );
-    let result = run_as_admin(
+    run_as_admin(
         &cmd,
         "流界需要管理员权限，安装低延迟模式的后台服务（跨屏时关闭 AWDL）。",
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    result
+    )
 }
 
 /// 移除后台服务，并恢复 AWDL（弹出管理员授权窗口）。
@@ -110,11 +104,6 @@ pub fn set_active(active: bool) {
     } else {
         let _ = std::fs::remove_file(FLAG);
     }
-}
-
-/// 单引号包住，供 shell 使用（路径里不会出现单引号，出现时按标准方式转义）。
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// 放进 AppleScript 字符串字面量时转义反斜杠和双引号。
@@ -150,11 +139,6 @@ mod tests {
 
     #[test]
     fn quoting() {
-        assert_eq!(
-            sh_quote("/Library/Application Support/x"),
-            "'/Library/Application Support/x'"
-        );
-        assert_eq!(sh_quote("it's"), r"'it'\''s'");
         assert_eq!(applescript_quote(r#"a "b" \c"#), r#""a \"b\" \\c""#);
     }
 }

@@ -9,6 +9,28 @@ use crate::geometry::{EDGE_EPSILON, Edge, Point, Rect, overlap};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub String);
 
+impl DeviceId {
+    /// 是否是合法的设备 ID：64 位小写十六进制（证书 SHA-256 指纹）。
+    /// 来自网络（mDNS、对端消息）的 ID 必须先校验，攻击者可以填任意字符串。
+    pub fn is_well_formed(&self) -> bool {
+        self.0.len() == 64
+            && self
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
+    /// 日志里用的简短形式：前 8 个字符。按字符截断，任意字符串都不会 panic。
+    pub fn short(&self) -> &str {
+        let end = self
+            .0
+            .char_indices()
+            .nth(8)
+            .map_or(self.0.len(), |(i, _)| i);
+        &self.0[..end]
+    }
+}
+
 /// 显示器 ID：所属设备 + 该设备系统给出的稳定显示器标识。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DisplayId {
@@ -316,6 +338,21 @@ impl Layout {
 pub(crate) mod tests {
     use super::*;
     use crate::geometry::assert_near;
+
+    #[test]
+    fn device_id_validation_and_short_never_panics() {
+        let good = DeviceId("0123456789abcdef".repeat(4));
+        assert!(good.is_well_formed());
+        assert_eq!(good.short(), "01234567");
+        for bad in ["", "ab", &"A".repeat(64), &"g".repeat(64), &"+f".repeat(32)] {
+            assert!(!DeviceId(bad.to_owned()).is_well_formed(), "{bad}");
+        }
+        // 7 个 ASCII + 汉字：按字节切第 8 位会落在字符中间。
+        let evil = DeviceId("abcdefg中文字符".into());
+        assert!(!evil.is_well_formed());
+        assert_eq!(evil.short(), "abcdefg中");
+        assert_eq!(DeviceId("短".into()).short(), "短");
+    }
 
     pub fn display(device: &str, local: &str, rect: Rect, scale: f64) -> Display {
         Display {

@@ -11,6 +11,9 @@ mod macos;
 mod macos_awdl;
 #[cfg(target_os = "macos")]
 mod macos_input;
+// 生成以 root 运行的安装命令（纯字符串处理）。只有 macOS 用到，但在所有平台编译，方便单元测试。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod root_install;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]

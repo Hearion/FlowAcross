@@ -14,6 +14,12 @@ function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
   if (d.status === "local") return <span className="chip">本机</span>;
   if (d.paused) return <span className="chip muted">已暂停</span>;
+  if (d.status === "connected" && d.remote_paused)
+    return (
+      <span className="chip muted" title="对方暂停了共享或锁定了键鼠，恢复后可以再切过去">
+        对方已暂停
+      </span>
+    );
   if (d.status === "connected") return <span className="chip ok">在线</span>;
   if (d.status === "connecting") return <span className="chip">连接中</span>;
   if (d.manual) return <span className="chip muted">已断开</span>;
@@ -147,6 +153,18 @@ export default function App() {
             <h1>设备布局</h1>
             <p>按真实桌面的摆放拖动屏幕，相贴的边就是鼠标跨过去的地方。</p>
           </div>
+
+          {state.config_warning && (
+            <div className="banner">
+              <span className="banner-icon">
+                <WarnIcon />
+              </span>
+              <span className="banner-text">{state.config_warning}</span>
+              <button className="btn small" onClick={() => api.dismissConfigWarning()}>
+                知道了
+              </button>
+            </div>
+          )}
 
           {missingPerms.length > 0 && (
             <div className="banner">

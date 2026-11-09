@@ -17,13 +17,22 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::engine::{Engine, EngineEvent, EngineOptions, MainThread, Notify};
 
+const LOG_KEEP_DAYS: usize = 14;
+
 /// 日志同时写到终端和 `<数据目录>/logs/flowacross.log.<日期>`，调试两台电脑联调时把日志文件发过来即可。
+/// 只保留最近 [`LOG_KEEP_DAYS`] 天，避免长期运行（或被人反复连接刷日志）把磁盘写满。
 /// 用环境变量 RUST_LOG 调整级别，例如 `RUST_LOG=debug`。
 fn init_logging(dir: &Path) {
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
     use tracing_subscriber::{EnvFilter, fmt, prelude::*};
     let _ = std::fs::create_dir_all(dir);
-    let (file, guard) =
-        tracing_appender::non_blocking(tracing_appender::rolling::daily(dir, "flowacross.log"));
+    let appender = RollingFileAppender::builder()
+        .rotation(Rotation::DAILY)
+        .filename_prefix("flowacross.log")
+        .max_log_files(LOG_KEEP_DAYS)
+        .build(dir)
+        .unwrap_or_else(|_| tracing_appender::rolling::daily(dir, "flowacross.log"));
+    let (file, guard) = tracing_appender::non_blocking(appender);
     // 进程存活期间一直需要这个 guard（负责把缓冲写入文件）。
     std::mem::forget(guard);
     let filter = EnvFilter::try_from_default_env()
@@ -176,6 +185,7 @@ fn main() {
             commands::cancel_transfer,
             commands::dismiss_transfer,
             commands::open_received_files,
+            commands::dismiss_config_warning,
             updater::check_update,
             updater::install_update,
             updater::restart_app,

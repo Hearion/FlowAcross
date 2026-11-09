@@ -43,6 +43,8 @@ export interface Api {
   dismissTransfer(id: number): Promise<void>;
   /** 打开收到的文件所在的文件夹。失败时以字符串原因 reject。 */
   openReceivedFiles(): Promise<void>;
+  /** 用户看过配置损坏的提示了。 */
+  dismissConfigWarning(): Promise<void>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
   onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
@@ -74,6 +76,7 @@ const tauriApi: Api = {
   cancelTransfer: (id) => invoke("cancel_transfer", { id }),
   dismissTransfer: (id) => invoke("dismiss_transfer", { id }),
   openReceivedFiles: () => invoke("open_received_files"),
+  dismissConfigWarning: () => invoke("dismiss_config_warning"),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
   onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),

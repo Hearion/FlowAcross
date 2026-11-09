@@ -4,7 +4,7 @@
 
 ## 1. 把源码拷到 Windows
 
-在 Mac 的项目根目录生成源码压缩包（不含依赖和构建产物，几 MB）：
+在 Mac 的项目根目录生成源码压缩包（只含 git 跟踪的文件，不含依赖、构建产物和未跟踪的文件，几 MB；新建的源文件先 `git add`）：
 
 ```bash
 scripts/pack-source.sh

@@ -25,6 +25,8 @@ pub type Output = mpsc::UnboundedSender<Message>;
 pub type CursorControl = Box<dyn Fn(bool, Option<(f64, f64)>) + Send>;
 
 const HEARTBEAT: Duration = Duration::from_millis(500);
+/// 对方支持心跳回执时，这么久没收到回执就认为网络断了，键鼠回到本机（约 3 个心跳周期）。
+const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// 控制器通知引擎的事件。
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +50,8 @@ pub struct ControllerConfig {
     pub mapping: EdgeMapping,
     /// 共享未暂停。
     pub enabled: bool,
+    /// 会回复心跳回执的设备（版本不低于 `SECURE_SINCE`）。只对它们做快速断线检测。
+    pub acks: HashSet<DeviceId>,
 }
 
 struct Active {
@@ -56,6 +60,8 @@ struct Active {
     cursor: VirtualCursor,
     session: u32,
     last_beat: Instant,
+    /// 最近一次收到对方心跳回执（或开始控制）的时间。
+    last_ack: Instant,
     /// 这次控制转发的按键数（写进日志，便于排查"键盘没过去"）。
     keys_sent: u32,
     /// 这次控制收到的本机鼠标移动事件数和开始时间（写进日志，便于排查卡顿：看鼠标回报率）。
@@ -79,6 +85,7 @@ pub struct Controller {
     /// 最近一次本机光标位置（布局坐标），用快捷键切回本机时放回这里。
     last_local: Option<Point>,
     return_to: Option<Point>,
+    ack_timeout: Duration,
 }
 
 /// 光标移到距离边缘不足 1 个逻辑点、且还在朝边缘移动时，视为"推出边缘"。
@@ -127,12 +134,22 @@ impl Controller {
             swallow: HashSet::new(),
             last_local: None,
             return_to: None,
+            ack_timeout: ACK_TIMEOUT,
         }
     }
 
     /// 正在控制的远端设备；`None` 表示键鼠在本机。
     pub fn active_device(&self) -> Option<&DeviceId> {
         self.active.as_ref().map(|a| &a.device)
+    }
+
+    /// 收到 `from` 的心跳回执。
+    pub fn on_ack(&mut self, from: &DeviceId) {
+        if let Some(a) = self.active.as_mut()
+            && &a.device == from
+        {
+            a.last_ack = Instant::now();
+        }
     }
 
     pub fn configure(&mut self, cfg: ControllerConfig) {
@@ -365,7 +382,7 @@ impl Controller {
             x: lp.x,
             y: lp.y,
         });
-        info!(device = %&target.device.0[..8.min(target.device.0.len())], "键鼠切到远端");
+        info!(device = %target.device.short(), "键鼠切到远端");
         self.router.enter_remote();
         self.switcher.reset();
         self.active = Some(Active {
@@ -374,6 +391,7 @@ impl Controller {
             cursor: VirtualCursor::new(target, point),
             session,
             last_beat: Instant::now(),
+            last_ack: Instant::now(),
             keys_sent: 0,
             moves: 0,
             started: Instant::now(),
@@ -460,8 +478,19 @@ impl Controller {
         true
     }
 
-    /// 定时调用（约每 40 毫秒）：发送心跳、处理贴边停留计时。
+    /// 定时调用（约每 40 毫秒）：发送心跳、检查心跳回执、处理贴边停留计时。
     pub fn tick(&mut self) {
+        // 对方不再回执：网络断了。先把键鼠还给本机（释放远端按键、解锁光标），再通知界面。
+        // 不等 QUIC 的 8 秒空闲超时，否则这段时间本机键鼠全被拦截、光标锁死。
+        if let Some(a) = &self.active
+            && self.cfg.acks.contains(&a.device)
+            && a.last_ack.elapsed() > self.ack_timeout
+        {
+            let device = a.device.clone();
+            info!(device = %device.short(), "对方没有回应心跳，键鼠回到本机");
+            self.leave_to_local(None);
+            let _ = self.events.send(ControlEvent::Lost(device));
+        }
         if let Some(a) = self.active.as_mut()
             && a.last_beat.elapsed() >= HEARTBEAT
         {
@@ -551,6 +580,7 @@ mod tests {
             policy,
             mapping: EdgeMapping::Continuous,
             enabled: true,
+            acks: HashSet::new(),
         }
     }
 
@@ -736,6 +766,46 @@ mod tests {
         // 再推过边缘可以重新控制 PC。
         assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0)), Verdict::Suppress);
         assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+    }
+
+    #[test]
+    fn missing_heartbeat_acks_return_control_quickly() {
+        let mut r = rig(SwitchPolicy::default());
+        r.ctl.ack_timeout = Duration::from_millis(150);
+        // 对方不支持回执（旧版本）：不做快速检测。
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        std::thread::sleep(Duration::from_millis(200));
+        r.ctl.tick();
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        r.ctl.force_local();
+
+        let mut cfg = config(SwitchPolicy::default(), r.pc_tx.clone(), true);
+        cfg.acks.insert(dev("p"));
+        r.ctl.configure(cfg);
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        r.ctl.handle(key(KeyCode::A, true));
+        // 回执按时到达：保持控制。
+        std::thread::sleep(Duration::from_millis(100));
+        r.ctl.on_ack(&dev("p"));
+        std::thread::sleep(Duration::from_millis(20));
+        r.ctl.tick();
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        drain(&mut r.pc_rx);
+        while r.events.try_recv().is_ok() {}
+
+        // 回执断了：释放远端按键、解锁光标、通知引擎。
+        std::thread::sleep(Duration::from_millis(200));
+        r.ctl.tick();
+        assert_eq!(r.ctl.active_device(), None);
+        let msgs = drain(&mut r.pc_rx);
+        assert!(msgs.contains(&Message::Key {
+            code: KeyCode::A,
+            down: false,
+            repeat: false
+        }));
+        assert!(!r.cursor.lock().unwrap().last().unwrap().0);
+        assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
+        assert_eq!(r.events.try_recv(), Ok(ControlEvent::Lost(dev("p"))));
     }
 
     #[test]

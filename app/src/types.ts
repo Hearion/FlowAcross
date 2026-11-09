@@ -38,6 +38,8 @@ export interface DeviceView {
   manual: boolean;
   active: boolean;
   paused: boolean;
+  /** 对方暂停了共享、暂停了本机或锁定了键鼠，暂时不能切过去。 */
+  remote_paused: boolean;
 }
 
 export interface NearbyView {
@@ -180,4 +182,6 @@ export interface StateView {
   file_offer: FileOfferView | null;
   /** 收到的文件保存在这里；null 表示找不到下载文件夹。 */
   receive_dir: string | null;
+  /** 启动时配置文件损坏的说明（原因和备份位置）；用户点「知道了」前一直显示。 */
+  config_warning: string | null;
 }

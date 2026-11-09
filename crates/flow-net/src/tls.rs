@@ -184,3 +184,64 @@ pub fn peer_fingerprint(conn: &quinn::Connection) -> Result<Fingerprint, NetErro
     let leaf = certs.first().ok_or(NetError::NoPeerCertificate)?;
     Ok(fingerprint(leaf.as_ref()))
 }
+
+/// 密码学安全的随机字节（配对随机数用）。
+pub fn random_bytes<const N: usize>() -> Result<[u8; N], NetError> {
+    let mut out = [0u8; N];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut out)
+        .map_err(|_| NetError::Other("系统随机数生成失败".into()))?;
+    Ok(out)
+}
+
+/// TLS 通道绑定值（RFC 5705 exporter）：同一条连接的两端相同，换一条连接（比如中间人分别和两边
+/// 建立的连接）就不同。混进配对码，让配对码只在这一条连接上成立。
+pub fn channel_binding(conn: &quinn::Connection) -> Result<[u8; 32], NetError> {
+    let mut out = [0u8; 32];
+    conn.export_keying_material(&mut out, b"EXPORTER-flowacross-pairing-v2", b"")
+        .map_err(|_| NetError::Other("无法从加密连接导出配对密钥".into()))?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_bytes_differ() {
+        let a: [u8; 32] = random_bytes().unwrap();
+        let b: [u8; 32] = random_bytes().unwrap();
+        assert_ne!(a, b);
+    }
+
+    /// 同一条连接两端导出的通道绑定值相同，不同连接不同。
+    #[tokio::test]
+    async fn channel_binding_matches_on_both_ends_only() {
+        let a = Identity::generate().unwrap();
+        let b = Identity::generate().unwrap();
+        let ep_a = bind_endpoint(&a, 0).unwrap();
+        let ep_b = bind_endpoint(&b, 0).unwrap();
+        let addr_b =
+            std::net::SocketAddr::from(([127, 0, 0, 1], ep_b.local_addr().unwrap().port()));
+        let server = tokio::spawn(async move {
+            let c1 = ep_b.accept().await.unwrap().await.unwrap();
+            let c2 = ep_b.accept().await.unwrap().await.unwrap();
+            (channel_binding(&c1).unwrap(), channel_binding(&c2).unwrap())
+        });
+        let c1 = ep_a
+            .connect(addr_b, "flowacross.local")
+            .unwrap()
+            .await
+            .unwrap();
+        let c2 = ep_a
+            .connect(addr_b, "flowacross.local")
+            .unwrap()
+            .await
+            .unwrap();
+        let (s1, s2) = server.await.unwrap();
+        assert_eq!(channel_binding(&c1).unwrap(), s1);
+        assert_eq!(channel_binding(&c2).unwrap(), s2);
+        assert_ne!(s1, s2);
+    }
+}

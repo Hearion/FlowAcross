@@ -5,7 +5,9 @@
 
 use flow_core::layout::DeviceId;
 use flow_core::pairing::{Fingerprint, device_id};
-use flow_core::protocol::{FrameDecoder, Message, encode_frame};
+use flow_core::protocol::{
+    FrameDecoder, HANDSHAKE_FRAME_LEN, MAX_FRAME_LEN, Message, encode_frame,
+};
 
 use crate::NetError;
 use crate::tls::peer_fingerprint;
@@ -102,8 +104,11 @@ impl LinkSender {
 }
 
 impl LinkReceiver {
+    /// 控制流：对方通过认证前，单帧最大 [`HANDSHAKE_FRAME_LEN`]，见 [`Self::authenticated`]。
     fn new(recv: quinn::RecvStream) -> Self {
-        Self::with_buffer(recv, 16 * 1024)
+        let mut r = Self::with_buffer(recv, 16 * 1024);
+        r.decoder.set_limit(HANDSHAKE_FRAME_LEN);
+        r
     }
 
     fn with_buffer(recv: quinn::RecvStream, size: usize) -> Self {
@@ -112,6 +117,11 @@ impl LinkReceiver {
             decoder: FrameDecoder::default(),
             buf: vec![0u8; size],
         }
+    }
+
+    /// 双方互信、进入会话后调用：放开单帧上限（显示器列表、剪贴板文字可能较大）。
+    pub fn authenticated(&mut self) {
+        self.decoder.set_limit(MAX_FRAME_LEN);
     }
 
     /// 读取下一条消息；对方正常关闭流时返回 `None`。

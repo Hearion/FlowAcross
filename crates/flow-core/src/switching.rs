@@ -183,10 +183,37 @@ impl EdgeSwitcher {
     }
 }
 
+/// 本机是否接受某台设备来控制。
+///
+/// - 暂停共享（`sharing_paused`）、暂停了这台设备（`peer_paused`）：两个方向都停，正在进行的控制也结束；
+/// - 锁定（`locked`）：只是不让新的设备切进来。正在控制本机的那台不受影响——用户可能正是用它的
+///   键鼠点了本机的「锁定」，意思是"留在这台"，不能把他踢回去。
+pub fn accepts_control(
+    sharing_paused: bool,
+    locked: bool,
+    peer_paused: bool,
+    peer_is_controlling: bool,
+) -> bool {
+    !sharing_paused && !peer_paused && (!locked || peer_is_controlling)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::DeviceId;
+
+    #[test]
+    fn pause_and_lock_block_incoming_control() {
+        assert!(accepts_control(false, false, false, false));
+        // 暂停共享、暂停这台设备：一律不接受，正在控制的也不行。
+        assert!(!accepts_control(true, false, false, false));
+        assert!(!accepts_control(true, false, false, true));
+        assert!(!accepts_control(false, false, true, false));
+        assert!(!accepts_control(false, false, true, true));
+        // 锁定：挡住新进来的，正在控制本机的那台保持。
+        assert!(!accepts_control(false, true, false, false));
+        assert!(accepts_control(false, true, false, true));
+    }
 
     fn did(dev: &str) -> DisplayId {
         DisplayId {

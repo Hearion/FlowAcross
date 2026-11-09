@@ -19,3 +19,14 @@ Thumbs.db
 
 # 打包给其他电脑的源码压缩包
 share/
+
+# 本机密钥、令牌等，不要提交，也不会被 scripts/pack-source.sh 打包
+github.txt
+*.token
+*.key
+*.p12
+.env
+.env.*
+
+# Claude Code 本机设置
+.claude/settings.local.json

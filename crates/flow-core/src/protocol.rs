@@ -19,6 +19,10 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// 单帧最大长度。
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
+/// 对方通过认证（双方互信、进入会话）之前的单帧上限。握手和配对消息都很小，
+/// 不让未认证的连接让本机缓冲 8 MB。
+pub const HANDSHAKE_FRAME_LEN: usize = 16 * 1024;
+
 /// 剪贴板文本最大字节数，超过则不同步（界面提示"内容过大"）。
 pub const MAX_CLIPBOARD_TEXT: usize = 4 * 1024 * 1024;
 
@@ -169,6 +173,31 @@ pub enum Message {
     FileError {
         reason: String,
     },
+    // ---- 以下为 0.1.7 新增，只发给版本不低于 [`SECURE_SINCE`] 的设备。
+    /// 被控制方对 `Heartbeat` 的回执。控制方据此在断网后 1.5 秒内把键鼠还给本机，
+    /// 不用等 QUIC 的 8 秒空闲超时。
+    HeartbeatAck {
+        seq: u32,
+    },
+    /// 配对第一步（发起方）：随机数的承诺 `H(发起方指纹, nonce)`，见 [`crate::pairing`]。
+    PairCommit([u8; 32]),
+    /// 配对第二步（响应方）和第三步（发起方公开承诺过的随机数）。
+    PairNonce([u8; 32]),
+    /// 本机现在是否接受对方的控制（暂停共享、暂停了这台设备、锁定时为 false）。
+    /// 会话建立时和变化时发送；对方据此不再把键鼠切过来，正在控制的立即回到它自己那边。
+    Availability {
+        accepting: bool,
+    },
+}
+
+/// 从这个版本起支持心跳回执（[`Message::HeartbeatAck`]）、带承诺的配对（[`Message::PairCommit`]）
+/// 和 [`Message::Availability`]。不按"版本号相同"判断：开发版本和已发布的同号版本协议不同。
+/// 两台电脑联调开发版本前，先把版本号改到不低于这个值。
+pub const SECURE_SINCE: (u32, u32, u32) = (0, 1, 7);
+
+/// 对方是否支持 0.1.7 新增的消息（见 [`SECURE_SINCE`]）。
+pub fn peer_supports_secure(peer_version: &str) -> bool {
+    version_at_least(peer_version, SECURE_SINCE)
 }
 
 /// 让 `Vec<u8>` 按字节串整体编码（postcard 默认逐个字节序列化，大块文件内容很慢）。
@@ -267,6 +296,23 @@ pub fn seq_newer(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
+/// 设备名称等对端提供的短文本最多保留的字符数。
+pub const MAX_NAME_CHARS: usize = 64;
+
+/// 清理对端提供的名称（mDNS、`Hello`、`Profile`）：去掉控制字符和首尾空白，最多保留
+/// [`MAX_NAME_CHARS`] 个字符。对端可以发任意长、任意内容的字符串，原样写日志、配置和界面不安全。
+pub fn clean_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_owned()
+}
+
 /// 版本号 `version`（如 "0.1.3"、"1.2.0-beta"）是否不低于 `min`；无法解析时视为不满足。
 pub fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
     let core = version.split(['-', '+']).next().unwrap_or("");
@@ -278,12 +324,35 @@ pub fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
 }
 
 /// 从字节流中切出完整帧。网络数据可能被任意拆分或粘连，逐段 `push` 后循环调用 `next_message`。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
+    limit: usize,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            limit: MAX_FRAME_LEN,
+        }
+    }
 }
 
 impl FrameDecoder {
+    /// 单帧最大长度为 `limit`（不超过 [`MAX_FRAME_LEN`]）。
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit: limit.min(MAX_FRAME_LEN),
+        }
+    }
+
+    /// 修改单帧上限：握手和配对期间用 [`HANDSHAKE_FRAME_LEN`]，对方通过认证后放开到 [`MAX_FRAME_LEN`]。
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit.min(MAX_FRAME_LEN);
+    }
+
     pub fn push(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
     }
@@ -293,7 +362,7 @@ impl FrameDecoder {
             return Ok(None);
         }
         let len = u32::from_be_bytes(self.buf[..4].try_into().expect("4 bytes")) as usize;
-        if len > MAX_FRAME_LEN {
+        if len > self.limit {
             return Err(ProtocolError::TooLarge(len));
         }
         if self.buf.len() < 4 + len {
@@ -367,7 +436,31 @@ mod tests {
             Message::FileError {
                 reason: "文件已被删除".into(),
             },
+            Message::HeartbeatAck { seq: 7 },
+            Message::PairCommit([3; 32]),
+            Message::PairNonce([9; 32]),
+            Message::Availability { accepting: false },
         ]
+    }
+
+    #[test]
+    fn new_variants_are_appended_after_old_ones() {
+        // 旧版本只认识前 22 个变体；新变体必须排在后面，旧消息的编码保持不变。
+        assert_eq!(
+            encode_payload(&Message::HeartbeatAck { seq: 0 }).unwrap()[0],
+            22
+        );
+        assert_eq!(
+            encode_payload(&Message::PairCommit([0; 32])).unwrap()[0],
+            23
+        );
+        assert_eq!(encode_payload(&Message::PairNonce([0; 32])).unwrap()[0], 24);
+        assert_eq!(
+            encode_payload(&Message::Availability { accepting: true }).unwrap()[0],
+            25
+        );
+        assert!(peer_supports_secure("0.1.7"));
+        assert!(!peer_supports_secure("0.1.6"));
     }
 
     /// 旧版本按变体序号解析消息，已有消息的编码不能变。
@@ -465,6 +558,41 @@ mod tests {
             dec.next_message(),
             Err(ProtocolError::TooLarge(_))
         ));
+    }
+
+    #[test]
+    fn handshake_limit_rejects_large_frames_until_raised() {
+        let mut dec = FrameDecoder::with_limit(HANDSHAKE_FRAME_LEN);
+        dec.push(&((HANDSHAKE_FRAME_LEN as u32) + 1).to_be_bytes());
+        assert!(matches!(
+            dec.next_message(),
+            Err(ProtocolError::TooLarge(_))
+        ));
+        let big = encode_frame(&Message::Clipboard {
+            origin: DeviceId("a".into()),
+            seq: 1,
+            text: "x".repeat(HANDSHAKE_FRAME_LEN),
+        })
+        .unwrap();
+        let mut dec = FrameDecoder::with_limit(HANDSHAKE_FRAME_LEN);
+        dec.push(&big);
+        assert!(dec.next_message().is_err());
+        let mut dec = FrameDecoder::with_limit(HANDSHAKE_FRAME_LEN);
+        dec.set_limit(MAX_FRAME_LEN);
+        dec.push(&big);
+        assert!(matches!(
+            dec.next_message(),
+            Ok(Some(Message::Clipboard { .. }))
+        ));
+    }
+
+    #[test]
+    fn clean_name_strips_controls_and_truncates() {
+        assert_eq!(clean_name("  小严的 MacBook\n"), "小严的 MacBook");
+        assert_eq!(clean_name("a\u{0}b\u{1b}[31mc"), "ab[31mc");
+        let long = "长".repeat(500);
+        assert_eq!(clean_name(&long).chars().count(), MAX_NAME_CHARS);
+        assert_eq!(clean_name("\t\r\n"), "");
     }
 
     #[test]

@@ -43,6 +43,12 @@ impl ClipboardSync {
         })
     }
 
+    /// 与 `device` 新建立会话时调用：对方可能重启过，序号从 1 重新开始，忘掉之前记下的最大序号。
+    /// 否则对方重启（包括每次自动更新）后的前若干次复制都会被当成旧消息丢掉。
+    pub fn forget(&mut self, device: &DeviceId) {
+        self.seen.remove(device);
+    }
+
     /// 收到远端剪贴板内容时调用，返回需要写入本机剪贴板的文本。
     pub fn on_remote(&mut self, origin: &DeviceId, seq: u64, text: &str) -> Option<String> {
         if !self.enabled || origin == &self.local || text.len() > MAX_CLIPBOARD_TEXT {
@@ -94,6 +100,17 @@ mod tests {
         assert!(c.on_remote(&dev("a"), 5, "new").is_some());
         assert!(c.on_remote(&dev("a"), 4, "old").is_none());
         assert!(c.on_remote(&dev("b"), 9, "mine").is_none());
+    }
+
+    #[test]
+    fn peer_restart_is_accepted_after_forget() {
+        let mut c = ClipboardSync::new(dev("b"));
+        assert!(c.on_remote(&dev("a"), 37, "旧").is_some());
+        // 对方重启，序号从 1 开始：不忘掉就会被当成旧消息。
+        assert!(c.on_remote(&dev("a"), 1, "新").is_none());
+        c.forget(&dev("a"));
+        assert_eq!(c.on_remote(&dev("a"), 1, "新").as_deref(), Some("新"));
+        assert!(c.on_remote(&dev("a"), 1, "重复").is_none());
     }
 
     #[test]
