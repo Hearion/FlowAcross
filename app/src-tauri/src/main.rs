@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod engine;
 mod input;
+mod startup;
 mod transfer;
 mod updater;
 
@@ -52,18 +53,36 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// 开发调试：FLOWACROSS_PROFILE=b 可以在同一台电脑上再开一个独立身份的实例。
+fn debug_profile() -> Option<String> {
+    std::env::var("FLOWACROSS_PROFILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 fn main() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // 单实例必须最先注册：第二个进程在这里就退出，不会走到后面的初始化（不会抢端口、不会装键盘钩子）。
+    // 调试用的独立身份实例不受限制。
+    if debug_profile().is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tracing::info!("再次打开流界，显示已有窗口");
+            show_main_window(app);
+        }));
+    }
+    let app = builder
         // 不注册设备级输入（Raw Input）。Windows 上进程注册了键盘 Raw Input 后，只要流界窗口在前台，
         // 系统就不再调用本进程的低级键盘钩子，跨屏时键盘就到不了远端。流界不需要这些设备事件。
         .device_event_filter(tauri::DeviceEventFilter::Always)
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .arg(startup::AUTOSTART_ARG)
+                .build(),
+        )
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updater::PendingUpdate::default())
         .setup(|app| {
-            // 开发调试：FLOWACROSS_PROFILE=b 可以在同一台电脑上再开一个独立身份的实例。
-            let profile = std::env::var("FLOWACROSS_PROFILE")
-                .ok()
-                .filter(|s| !s.is_empty());
+            let profile = debug_profile();
             let mut data_dir = app.path().app_data_dir()?;
             if let Some(p) = &profile {
                 data_dir = data_dir.join("profiles").join(p);
@@ -153,6 +172,12 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            // 窗口在配置里默认隐藏：开机自启时只在托盘 / 菜单栏运行，其余情况启动后显示。
+            if startup::start_hidden(app.handle()) {
+                tracing::info!("开机自启，窗口保持隐藏");
+            } else {
+                show_main_window(app.handle());
+            }
             updater::spawn_auto_check(app.handle().clone());
             Ok(())
         })
@@ -189,6 +214,8 @@ fn main() {
             updater::check_update,
             updater::install_update,
             updater::restart_app,
+            startup::get_autostart,
+            startup::set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("流界启动失败");

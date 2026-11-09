@@ -64,7 +64,9 @@ export function createMock(): Api {
   };
   const notice = (m: string) => noticeListeners.forEach((cb) => cb(m));
   const progressListeners = new Set<(p: UpdateProgress) => void>();
-  const mockUpdate = { version: "0.2.0", current: "0.1.0", notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
+  // ?autostart-error：看开机启动开关失败时的提示。
+  let autostart = false;
+  const mockUpdate ={ version: "0.2.0", current: "0.1.0", notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
 
   return {
     getState: async () => structuredClone(state),
@@ -183,6 +185,15 @@ export function createMock(): Api {
     dismissTransfer: async (id) => set({ transfers: state.transfers.filter((t) => t.id !== id || t.status === "running") }),
     openReceivedFiles: async () => notice("（浏览器预览）这里会打开下载文件夹里的「流界」"),
     dismissConfigWarning: async () => set({ config_warning: null }),
+    getAutostart: async () => autostart,
+    setAutostart: async (enabled) => {
+      await new Promise((r) => setTimeout(r, 300));
+      if (params.has("autostart-error")) {
+        throw "（浏览器预览）开启开机启动失败（拒绝访问）。可能是安全软件拦截了修改启动项，请在安全软件里放行流界，或打开「任务管理器 › 启动应用」手动设置 FlowAcross。";
+      }
+      autostart = enabled;
+      return autostart;
+    },
     // 每次订阅包一层新函数：React 开发模式会"订阅-退订-再订阅"同一个回调，直接存回调会被误删。
     onState: async (cb) => {
       const h = (st: StateView) => cb(st);

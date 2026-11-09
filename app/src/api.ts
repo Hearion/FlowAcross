@@ -45,6 +45,10 @@ export interface Api {
   openReceivedFiles(): Promise<void>;
   /** 用户看过配置损坏的提示了。 */
   dismissConfigWarning(): Promise<void>;
+  /** 系统里是否已注册开机启动。失败时以字符串原因 reject。 */
+  getAutostart(): Promise<boolean>;
+  /** 开启 / 关闭开机启动，返回系统里实际的注册状态。失败时以字符串原因 reject。 */
+  setAutostart(enabled: boolean): Promise<boolean>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
   onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
@@ -77,6 +81,8 @@ const tauriApi: Api = {
   dismissTransfer: (id) => invoke("dismiss_transfer", { id }),
   openReceivedFiles: () => invoke("open_received_files"),
   dismissConfigWarning: () => invoke("dismiss_config_warning"),
+  getAutostart: () => invoke("get_autostart"),
+  setAutostart: (enabled) => invoke("set_autostart", { enabled }),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
   onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),

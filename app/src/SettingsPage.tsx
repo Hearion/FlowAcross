@@ -57,14 +57,13 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
           <Section title="通用">
             <Panel>
               <NameSetting current={state.local.name} />
-              <div className="setting inline">
-                <div className="setting-text">
-                  <span>开机时自动启动</span>
-                  <small>登录系统后在后台运行，已配对的电脑自动连上（即将支持）</small>
-                </div>
-                <Toggle label="开机时自动启动" checked={false} onChange={() => {}} disabled />
-              </div>
+              <AutostartSetting mac={state.local.os === "MacOs"} />
             </Panel>
+            {state.local.os === "MacOs" && (
+              <p className="settings-note">
+                开启后「系统设置 › 通用 › 登录项」里会出现 FlowAcross。如果在那里关掉了它的「允许在后台」，开机时流界不会启动。
+              </p>
+            )}
           </Section>
         )}
 
@@ -223,6 +222,52 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
         <span>{label}</span>
       </div>
       <span className={`row-value ${mono ? "mono" : ""}`}>{value}</span>
+    </div>
+  );
+}
+
+/** 开机启动：状态每次从系统读取（用户可能在任务管理器或系统设置里改过），窗口回到前台时刷新。 */
+function AutostartSetting({ mac }: { mac: boolean }) {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const load = () =>
+      api
+        .getAutostart()
+        .then((v) => {
+          setEnabled(v);
+          setError(null);
+        })
+        .catch((e) => setError(String(e)));
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, []);
+
+  const toggle = (v: boolean) => {
+    setBusy(true);
+    setError(null);
+    api
+      .setAutostart(v)
+      .then(setEnabled)
+      .catch((e) => {
+        setError(String(e));
+        // 失败后以系统实际状态为准。
+        api.getAutostart().then(setEnabled, () => {});
+      })
+      .finally(() => setBusy(false));
+  };
+
+  const status = `登录系统后在后台运行，只显示在${mac ? "菜单栏" : "托盘"}，已配对的电脑自动连上`;
+  return (
+    <div className="setting inline">
+      <div className="setting-text">
+        <span>开机时自动启动</span>
+        <small className={error ? "text-danger" : undefined}>{error ?? status}</small>
+      </div>
+      <Toggle label="开机时自动启动" checked={enabled ?? false} disabled={busy} onChange={toggle} />
     </div>
   );
 }
