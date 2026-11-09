@@ -1466,6 +1466,11 @@ kbd {
   font-size: 12px;
 }
 
+/* 设置项下方的报错文字（开机启动、低延迟模式、软件更新）。 */
+.setting-text small.text-danger {
+  color: var(--danger);
+}
+
 .update-row {
   display: flex;
   align-items: center;

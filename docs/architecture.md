@@ -144,6 +144,15 @@
 - **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。
 - 发版步骤和一次性配置见 `docs/release.md`。
 
+### 开机启动与单实例
+
+外壳代码在 `app/src-tauri/src/startup.rs`。
+
+- **单实例**（`tauri-plugin-single-instance`，最先注册）：再次打开流界时，第二个进程在初始化前就退出（不会抢端口、不会装键盘钩子），已在运行的流界把窗口显示到前台。Windows 用命名互斥量 + 隐藏窗口传参，macOS 用 `/tmp` 下的 Unix socket。调试用的 `FLOWACROSS_PROFILE` 实例不注册这个插件，仍可同机多开。
+- **开机启动**（`tauri-plugin-autostart`）：Windows 写当前用户的 `Run` 注册表项（同时清掉任务管理器里的「已禁用」标记），macOS 写 `~/Library/LaunchAgents/FlowAcross.plist`。启动项带 `--autostart` 参数。开关状态不存配置文件，设置页每次（包括窗口回到前台时）都读系统里实际的注册状态；界面通过 `get_autostart` / `set_autostart` 两个命令调用，不直接开放插件自带的前端命令。
+- **启动时隐藏窗口**：主窗口在 `tauri.conf.json` 里默认 `visible: false`，`setup` 末尾判断：带 `--autostart` 时只在托盘 / 菜单栏运行，否则显示窗口。
+- **重新打开**：Tauri 和 Windows 安装程序重新打开流界时会沿用原来的启动参数，所以更新安装前、点「重新打开流界」前会在数据目录写一个一次性标记 `show-window-once`，下次启动看到它就照常显示窗口。「重新打开流界」是主线程上的同步命令，必须用 `request_restart()` 走正常退出流程，单实例锁才会在新进程启动前释放。
+
 ## 11. 仓库结构
 
 ```

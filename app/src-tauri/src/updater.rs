@@ -120,6 +120,8 @@ pub async fn install_update(app: AppHandle, engine: State<'_, Engine>) -> Result
     // 先释放远端按键、恢复本机输入、断开连接，再替换程序。
     tracing::info!(version = %update.version, "下载完成，关闭引擎后安装");
     engine.shutdown();
+    // 重新打开时会沿用这次的启动参数，开机自启的流界也要照常显示窗口。
+    crate::startup::show_window_on_next_start(&app);
     // Windows 上安装程序启动后当前进程会直接退出；macOS 替换完程序包后由这里重新打开。
     if let Err(e) = update.install(bytes) {
         tracing::error!(error = %e, "安装更新失败");
@@ -134,9 +136,14 @@ pub async fn install_update(app: AppHandle, engine: State<'_, Engine>) -> Result
 }
 
 /// 安装失败后重新打开流界。
+///
+/// 同步命令在主线程上执行，这里不能用 `restart()`：它在主线程上会跳过退出事件，
+/// 单实例插件来不及释放锁，新进程会以为流界还在运行而直接退出。
+/// `request_restart()` 走正常的退出流程（先关闭引擎、释放单实例锁）再重新打开。
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
-    app.restart();
+    crate::startup::show_window_on_next_start(&app);
+    app.request_restart();
 }
 
 /// 后台定期检查更新，发现新版本时推送 `update-available` 事件（每个版本只提示一次）。
