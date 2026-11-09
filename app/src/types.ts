@@ -75,6 +75,8 @@ export interface Settings {
   corner_guard: boolean;
   mapping: EdgeMapping;
   clipboard: boolean;
+  /** 共享剪贴板时也传复制的文件。 */
+  clipboard_files: boolean;
   sharing_paused: boolean;
   auto_check_updates: boolean;
   /** 低延迟模式（仅 macOS）：有设备连着时关闭 AWDL。 */
@@ -109,6 +111,34 @@ export interface UpdateError {
   restart: boolean;
 }
 
+export type TransferStatus = "running" | "done" | "failed" | "canceled";
+
+/** 一次跨设备复制文件（src-tauri/src/transfer.rs）。 */
+export interface TransferView {
+  id: number;
+  peer: string;
+  peer_name: string;
+  /** true：从对方接收；false：发给对方。 */
+  incoming: boolean;
+  /** 「报告.pdf」或「报告.pdf 等 3 项」。 */
+  label: string;
+  done: number;
+  total: number;
+  status: TransferStatus;
+  error: string | null;
+  /** 接收完成并已写入本机剪贴板，可以直接粘贴。 */
+  pasteable: boolean;
+}
+
+/** 其他设备复制了文件、等待手动接收（太大，没有自动接收）。 */
+export interface FileOfferView {
+  peer: string;
+  peer_name: string;
+  label: string;
+  files: number;
+  bytes: number;
+}
+
 export interface StateView {
   local: { id: string; name: string; os: Os };
   onboarded: boolean;
@@ -131,4 +161,9 @@ export interface StateView {
     data_dir: string;
     fingerprint: string;
   };
+  /** 正在进行和最近结束的文件传输，最新的在前。 */
+  transfers: TransferView[];
+  file_offer: FileOfferView | null;
+  /** 收到的文件保存在这里；null 表示找不到下载文件夹。 */
+  receive_dir: string | null;
 }

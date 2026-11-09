@@ -13,6 +13,7 @@
 
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -589,7 +590,7 @@ impl Drop for OpenClipboardGuard {
     }
 }
 
-/// 系统剪贴板（只处理 Unicode 文本）。
+/// 系统剪贴板（Unicode 文本和 `CF_HDROP` 文件列表）。
 pub struct WinClipboard;
 
 impl crate::ClipboardAccess for WinClipboard {
@@ -618,30 +619,63 @@ impl crate::ClipboardAccess for WinClipboard {
     }
 
     fn set_text(&mut self, text: &str) -> Result<(), PlatformError> {
-        use windows_sys::Win32::Foundation::GlobalFree;
-        use windows_sys::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
-        use windows_sys::Win32::System::Memory::{
-            GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
-        };
-        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        use windows_sys::Win32::System::DataExchange::EmptyClipboard;
+        let bytes: Vec<u8> = text
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let _guard = OpenClipboardGuard::open()?;
-        // SAFETY: 分配可移动内存并写入文本；SetClipboardData 成功后内存归系统所有，失败时自行释放。
+        // SAFETY: 剪贴板已打开。
         unsafe {
             EmptyClipboard();
-            let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
-            if mem.is_null() {
-                return Err(PlatformError::Os("分配剪贴板内存失败".into()));
+            set_clipboard_bytes(CF_UNICODETEXT, &bytes)
+        }
+    }
+
+    fn get_files(&mut self) -> Result<Option<Vec<PathBuf>>, PlatformError> {
+        use windows_sys::Win32::System::DataExchange::{
+            GetClipboardData, IsClipboardFormatAvailable,
+        };
+        use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+        // SAFETY: 只查询格式，不需要打开剪贴板。
+        if unsafe { IsClipboardFormatAvailable(CF_HDROP) } == 0 {
+            return Ok(None);
+        }
+        let _guard = OpenClipboardGuard::open()?;
+        // SAFETY: 剪贴板已打开；数据句柄归剪贴板所有，只锁定读取，不释放；按 GlobalSize 限定读取范围。
+        unsafe {
+            let handle = GetClipboardData(CF_HDROP);
+            if handle.is_null() {
+                return Ok(None);
             }
-            let ptr = GlobalLock(mem) as *mut u16;
+            let size = GlobalSize(handle);
+            let ptr = GlobalLock(handle) as *const u8;
             if ptr.is_null() {
-                GlobalFree(mem);
-                return Err(PlatformError::Os("分配剪贴板内存失败".into()));
+                return Ok(None);
             }
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
-            GlobalUnlock(mem);
-            if SetClipboardData(CF_UNICODETEXT, mem).is_null() {
-                GlobalFree(mem);
-                return Err(PlatformError::Os("写入剪贴板失败".into()));
+            let paths = parse_drop_files(std::slice::from_raw_parts(ptr, size));
+            GlobalUnlock(handle);
+            Ok(paths.filter(|p| !p.is_empty()))
+        }
+    }
+
+    fn set_files(&mut self, paths: &[PathBuf]) -> Result<(), PlatformError> {
+        use windows_sys::Win32::System::DataExchange::{EmptyClipboard, RegisterClipboardFormatW};
+        let data = build_drop_files(paths);
+        let name: Vec<u16> = "Preferred DropEffect"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let _guard = OpenClipboardGuard::open()?;
+        // SAFETY: 剪贴板已打开；格式名是以 0 结尾的 UTF-16。
+        unsafe {
+            EmptyClipboard();
+            set_clipboard_bytes(CF_HDROP, &data)?;
+            // 告诉资源管理器这是「复制」而不是「剪切」，粘贴后不会删除接收文件夹里的文件。
+            let effect = RegisterClipboardFormatW(name.as_ptr());
+            if effect != 0 {
+                let _ = set_clipboard_bytes(effect, &DROPEFFECT_COPY.to_le_bytes());
             }
         }
         Ok(())
@@ -650,5 +684,127 @@ impl crate::ClipboardAccess for WinClipboard {
     fn change_count(&self) -> u64 {
         // SAFETY: 无参数的系统查询。
         unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() as u64 }
+    }
+}
+
+const CF_HDROP: u32 = 15;
+const DROPEFFECT_COPY: u32 = 1;
+/// `DROPFILES` 结构（shlobj_core.h）的大小：pFiles(4) + pt(8) + fNC(4) + fWide(4)。
+const DROPFILES_LEN: usize = 20;
+
+/// 把数据复制到新分配的可移动内存并放进剪贴板。调用前必须已打开剪贴板。
+///
+/// # Safety
+/// 调用方持有 [`OpenClipboardGuard`]。
+unsafe fn set_clipboard_bytes(format: u32, data: &[u8]) -> Result<(), PlatformError> {
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::SetClipboardData;
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+    // SAFETY: SetClipboardData 成功后内存归系统所有，失败时自行释放。
+    unsafe {
+        let mem = GlobalAlloc(GMEM_MOVEABLE, data.len());
+        if mem.is_null() {
+            return Err(PlatformError::Os("分配剪贴板内存失败".into()));
+        }
+        let ptr = GlobalLock(mem) as *mut u8;
+        if ptr.is_null() {
+            GlobalFree(mem);
+            return Err(PlatformError::Os("分配剪贴板内存失败".into()));
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        GlobalUnlock(mem);
+        if SetClipboardData(format, mem).is_null() {
+            GlobalFree(mem);
+            return Err(PlatformError::Os("写入剪贴板失败".into()));
+        }
+    }
+    Ok(())
+}
+
+/// 生成 `CF_HDROP` 数据：`DROPFILES` 头 + 每个路径的 UTF-16（以 0 结尾）+ 末尾再一个 0。
+fn build_drop_files(paths: &[PathBuf]) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut out = Vec::new();
+    out.extend_from_slice(&(DROPFILES_LEN as u32).to_le_bytes()); // pFiles
+    out.extend_from_slice(&[0; 8]); // pt
+    out.extend_from_slice(&0u32.to_le_bytes()); // fNC
+    out.extend_from_slice(&1u32.to_le_bytes()); // fWide
+    for p in paths {
+        for u in p.as_os_str().encode_wide().chain(std::iter::once(0)) {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// 解析 `CF_HDROP` 数据，格式不对时返回 `None`。
+fn parse_drop_files(bytes: &[u8]) -> Option<Vec<PathBuf>> {
+    use std::os::windows::ffi::OsStringExt;
+    let word = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    };
+    let offset = word(0)? as usize;
+    let wide = word(16)? != 0;
+    let list = bytes.get(offset..)?;
+    let mut paths = Vec::new();
+    if wide {
+        let units: Vec<u16> = list
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        for s in units.split(|&u| u == 0) {
+            if s.is_empty() {
+                break;
+            }
+            paths.push(PathBuf::from(std::ffi::OsString::from_wide(s)));
+        }
+    } else {
+        // 很旧的程序才会放 ANSI 路径，这里按 UTF-8 尽量解析。
+        for s in list.split(|&b| b == 0) {
+            if s.is_empty() {
+                break;
+            }
+            paths.push(PathBuf::from(String::from_utf8_lossy(s).into_owned()));
+        }
+    }
+    Some(paths)
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+    use crate::ClipboardAccess;
+
+    #[test]
+    fn drop_files_round_trip() {
+        let paths = vec![
+            PathBuf::from(r"C:\Users\小严\Downloads\流界\报告 (1).pdf"),
+            PathBuf::from(r"D:\照片"),
+        ];
+        let data = build_drop_files(&paths);
+        assert_eq!(parse_drop_files(&data), Some(paths));
+        assert_eq!(parse_drop_files(&[1, 2, 3]), None);
+        // 偏移量越界
+        let mut bad = data.clone();
+        bad[0] = 0xFF;
+        bad[1] = 0xFF;
+        assert_eq!(parse_drop_files(&bad), None);
+    }
+
+    /// 会改写系统剪贴板，默认不运行：cargo test -p flow-platform -- --ignored
+    #[test]
+    #[ignore]
+    fn clipboard_files_round_trip() {
+        let mut cb = WinClipboard;
+        let dir = std::env::temp_dir();
+        let count = cb.change_count();
+        cb.set_files(std::slice::from_ref(&dir)).unwrap();
+        assert!(cb.change_count() > count);
+        assert_eq!(cb.get_files().unwrap(), Some(vec![dir]));
+        cb.set_text("流界").unwrap();
+        assert_eq!(cb.get_files().unwrap(), None);
     }
 }

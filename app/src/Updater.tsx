@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { UpdateError, UpdateInfo } from "./types";
+import { InfoIcon, WarnIcon } from "./ui";
 
 export type UpdatePhase = "idle" | "checking" | "latest" | "available" | "downloading" | "installing" | "error";
 
@@ -114,7 +115,10 @@ export function UpdateBanner({ updater }: { updater: Updater }) {
   if (phase === "available" && info && !dismissed) {
     return (
       <div className="banner info">
-        <span>
+        <span className="banner-icon">
+          <InfoIcon />
+        </span>
+        <span className="banner-text">
           流界 {info.version} 已发布。更新时会先断开键鼠共享，安装完成后自动重新打开。
         </span>
         <span className="banner-actions">
@@ -131,6 +135,9 @@ export function UpdateBanner({ updater }: { updater: Updater }) {
   if (phase === "downloading" || phase === "installing") {
     return (
       <div className="banner info">
+        <span className="banner-icon">
+          <InfoIcon />
+        </span>
         <span className="banner-progress">
           {phase === "installing" ? "正在安装更新…" : `正在下载流界 ${info?.version ?? ""}${progress !== null ? `（${Math.round(progress * 100)}%）` : "…"}`}
           <ProgressBar value={phase === "installing" ? null : progress} />
@@ -142,7 +149,10 @@ export function UpdateBanner({ updater }: { updater: Updater }) {
   if (phase === "error" && installFailed && (needsRestart || !dismissed)) {
     return (
       <div className="banner">
-        <span>{error}</span>
+        <span className="banner-icon">
+          <WarnIcon />
+        </span>
+        <span className="banner-text">{error}</span>
         <span className="banner-actions">
           {!needsRestart && (
             <button className="btn small" onClick={updater.dismiss}>

@@ -2,7 +2,7 @@
 //!
 //! 这里定义 Engine 依赖的接口，并按 `cfg(target_os)` 选择 macOS / Windows 实现。
 //!
-//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本（macOS、Windows），系统权限检测（macOS）。
+//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本和文件（macOS、Windows），系统权限检测（macOS）。
 
 pub mod keymap;
 #[cfg(target_os = "macos")]
@@ -39,7 +39,7 @@ pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
     return Err(PlatformError::Unsupported("键鼠注入"));
 }
 
-/// 当前系统的剪贴板（纯文本）。
+/// 当前系统的剪贴板（纯文本和文件）。
 pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     #[cfg(target_os = "macos")]
     return Ok(Box::new(macos_input::MacClipboard));
@@ -240,6 +240,10 @@ pub trait DisplayProvider: Send + Sync {
 pub trait ClipboardAccess: Send {
     fn get_text(&mut self) -> Result<Option<String>, PlatformError>;
     fn set_text(&mut self, text: &str) -> Result<(), PlatformError>;
+    /// 在 Finder / 资源管理器里复制的文件和文件夹（绝对路径）；剪贴板里不是文件时返回 `None`。
+    fn get_files(&mut self) -> Result<Option<Vec<std::path::PathBuf>>, PlatformError>;
+    /// 把文件放进剪贴板（替换原有内容），之后可以在 Finder / 资源管理器里粘贴。
+    fn set_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), PlatformError>;
     /// 剪贴板变化计数（macOS changeCount / Windows GetClipboardSequenceNumber），用于检测变化。
     fn change_count(&self) -> u64;
 }

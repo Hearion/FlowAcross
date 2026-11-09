@@ -81,12 +81,26 @@ export function CrossScreenSettings({ settings: s, update }: Props) {
 
 export function ClipboardSetting({ settings: s, update, title = false }: Props & { title?: boolean }) {
   return (
-    <div className="setting inline">
-      <div className="setting-text">
-        <span className={title ? "panel-title" : undefined}>共享剪贴板</span>
-        <small>在一台电脑复制文字，切到另一台直接粘贴</small>
+    <>
+      <div className="setting inline">
+        <div className="setting-text">
+          <span className={title ? "panel-title" : undefined}>共享剪贴板</span>
+          <small>在一台电脑复制文字或文件，切到另一台直接粘贴</small>
+        </div>
+        <Toggle label="共享剪贴板" checked={s.clipboard} onChange={(v) => update({ clipboard: v })} />
       </div>
-      <Toggle label="共享剪贴板" checked={s.clipboard} onChange={(v) => update({ clipboard: v })} />
-    </div>
+      <div className="setting inline">
+        <div className="setting-text">
+          <span>复制文件</span>
+          <small>键鼠切过去时自动传输，超过 1 GB 需要手动接收</small>
+        </div>
+        <Toggle
+          label="复制文件"
+          checked={s.clipboard && s.clipboard_files}
+          disabled={!s.clipboard}
+          onChange={(v) => update({ clipboard_files: v })}
+        />
+      </div>
+    </>
   );
 }

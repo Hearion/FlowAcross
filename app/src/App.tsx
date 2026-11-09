@@ -5,9 +5,10 @@ import { LayoutMap } from "./LayoutMap";
 import { Onboarding } from "./Onboarding";
 import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
+import { FileTransfers } from "./Transfers";
 import type { DeviceView, Settings, StateView } from "./types";
 import { UpdateBanner, useUpdater } from "./Updater";
-import { ComputerIcon, CursorIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, hueOf, isMac, resolution } from "./ui";
+import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution } from "./ui";
 
 function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
@@ -82,9 +83,9 @@ export default function App() {
           <span className="brand-name">流界</span>
         </div>
 
-        <div className={`status ${s.sharing_paused ? "paused" : ""}`}>
+        <div className={`status ${s.sharing_paused ? "paused" : state.locked ? "locked" : ""}`}>
           <span className="status-live">
-            <span className="pulse" />
+            <span className="status-dot" />
             {s.sharing_paused ? "已暂停" : state.locked ? "已锁定" : "共享中"}
           </span>
           <span className="status-sep" />
@@ -103,11 +104,19 @@ export default function App() {
         </div>
 
         <div className="top-actions">
-          <button className={`btn ${state.locked ? "on" : ""}`} onClick={() => api.setLocked(!state.locked)}>
+          <button
+            className={`btn ${state.locked ? "on" : ""}`}
+            aria-pressed={state.locked}
+            onClick={() => api.setLocked(!state.locked)}
+          >
             <LockIcon />
-            {state.locked ? "已锁定" : "锁定在本机"}
+            {state.locked ? "解除锁定" : "锁定在本机"}
           </button>
-          <button className={`btn ${s.sharing_paused ? "on" : ""}`} onClick={() => update({ sharing_paused: !s.sharing_paused })}>
+          <button
+            className={`btn ${s.sharing_paused ? "on" : ""}`}
+            aria-pressed={s.sharing_paused}
+            onClick={() => update({ sharing_paused: !s.sharing_paused })}
+          >
             <PauseIcon />
             {s.sharing_paused ? "恢复共享" : "暂停共享"}
           </button>
@@ -118,7 +127,7 @@ export default function App() {
             onClick={() => setSettingsSection(settingsSection ? null : "general")}
           >
             <GearIcon />
-            {missingPerms.length > 0 && <span className="badge-dot" />}
+            {missingPerms.length > 0 && <span className="badge-dot warn" />}
           </button>
         </div>
       </header>
@@ -141,7 +150,10 @@ export default function App() {
 
           {missingPerms.length > 0 && (
             <div className="banner">
-              <span>
+              <span className="banner-icon">
+                <WarnIcon />
+              </span>
+              <span className="banner-text">
                 还缺少「{missingPerms.map((p) => PERMISSION_TEXT[p.kind].name).join("」「")}」权限，暂时无法控制其他电脑。
               </span>
               <button className="btn small primary" onClick={() => setSettingsSection("permissions")}>
@@ -164,7 +176,7 @@ export default function App() {
           {onlyLocal && (
             <div className="map-empty">
               <strong>还没有连接其他电脑</strong>
-              <span>在另一台电脑上安装并打开流界，然后点「添加」完成配对。</span>
+              <span>在另一台电脑上安装并打开流界，然后点「添加设备」完成配对。</span>
               <button className="btn primary" onClick={() => setAdding(true)}>
                 <PlusIcon />
                 添加设备
@@ -189,7 +201,7 @@ export default function App() {
               </h2>
               <button className="btn small" onClick={() => setAdding(true)}>
                 <PlusIcon />
-                添加
+                添加设备
                 {state.nearby.length > 0 && <span className="badge-dot" />}
               </button>
             </div>
@@ -203,13 +215,11 @@ export default function App() {
                       className={`device-row ${selected === d.id ? "selected" : ""} ${d.status}`}
                       onClick={() => setSelected(selected === d.id ? null : d.id)}
                     >
-                      <span className={`device-icon hue-${hueOf(state.devices, d.id)}`}>
-                        <ComputerIcon />
-                      </span>
+                      <DeviceIcon os={d.os} hue={hueOf(state.devices, d.id)} />
                       <span className="device-info">
                         <span className="device-name">{d.name}</span>
                         <span className="device-sub">
-                          {OS_TEXT[d.os]} · {screens} 块屏幕
+                          {OS_TEXT[d.os]}，{screens} 块屏幕
                         </span>
                       </span>
                       {statusChip(d)}
@@ -256,6 +266,8 @@ export default function App() {
               </div>
             )}
           </section>
+
+          <FileTransfers state={state} onError={toast} />
 
           <section className="panel">
             <div className="panel-head">

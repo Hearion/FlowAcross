@@ -660,7 +660,7 @@ impl InputInjector for MacInjector {
 // 剪贴板
 // ---------------------------------------------------------------------------
 
-/// 系统剪贴板（NSPasteboard，只处理纯文本）。
+/// 系统剪贴板（NSPasteboard：纯文本和文件 URL）。
 pub struct MacClipboard;
 
 impl crate::ClipboardAccess for MacClipboard {
@@ -680,6 +680,56 @@ impl crate::ClipboardAccess for MacClipboard {
             let s = objc2_foundation::NSString::from_str(text);
             // SAFETY: 同上。
             if pb.setString_forType(&s, unsafe { objc2_app_kit::NSPasteboardTypeString }) {
+                Ok(())
+            } else {
+                Err(PlatformError::Os("写入剪贴板失败".into()))
+            }
+        })
+    }
+
+    fn get_files(&mut self) -> Result<Option<Vec<std::path::PathBuf>>, PlatformError> {
+        use objc2_foundation::{NSString, NSURL};
+        objc2::rc::autoreleasepool(|_| {
+            let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+            let Some(items) = pb.pasteboardItems() else {
+                return Ok(None);
+            };
+            let file_url = NSString::from_str("public.file-url");
+            let mut out = Vec::new();
+            for item in items.iter() {
+                let Some(s) = item.stringForType(&file_url) else {
+                    continue;
+                };
+                let Some(url) = NSURL::URLWithString(&s) else {
+                    continue;
+                };
+                // Finder 有时给的是文件引用 URL（file:///.file/id=…），先换成路径 URL。
+                let url = url.filePathURL().unwrap_or(url);
+                if let Some(path) = url.path() {
+                    out.push(std::path::PathBuf::from(path.to_string()));
+                }
+            }
+            Ok((!out.is_empty()).then_some(out))
+        })
+    }
+
+    fn set_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), PlatformError> {
+        use objc2::rc::Retained;
+        use objc2::runtime::ProtocolObject;
+        use objc2_app_kit::NSPasteboardWriting;
+        use objc2_foundation::{NSArray, NSString, NSURL};
+        objc2::rc::autoreleasepool(|_| {
+            let urls: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
+                .iter()
+                .map(|p| {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
+                    ProtocolObject::from_retained(url)
+                })
+                .collect();
+            let array = NSArray::from_retained_slice(&urls);
+            let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            if pb.writeObjects(&array) {
                 Ok(())
             } else {
                 Err(PlatformError::Os("写入剪贴板失败".into()))

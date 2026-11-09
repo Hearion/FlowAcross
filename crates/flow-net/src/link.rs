@@ -1,6 +1,7 @@
 //! 在 QUIC 连接的控制流上收发消息。
 //!
 //! 发起方打开双向流并先发消息（QUIC 在有数据写入前不会通知对方新流），接受方等待这条流。
+//! 会话建立后，任何一方都可以用 [`open_stream`] 另开流传文件，对方用 [`accept_stream`] 接收。
 
 use flow_core::layout::DeviceId;
 use flow_core::pairing::{Fingerprint, device_id};
@@ -58,20 +59,58 @@ impl Link {
     }
 }
 
+/// 在已建立的连接上新开一条流（用来传文件，不阻塞控制流里的键鼠消息）。
+/// QUIC 在写入数据前不会通知对方有新流，打开后要马上发第一条消息。
+pub async fn open_stream(conn: &quinn::Connection) -> Result<(LinkSender, LinkReceiver), NetError> {
+    let (send, recv) = conn.open_bi().await?;
+    Ok((
+        LinkSender { send },
+        LinkReceiver::with_buffer(recv, BULK_BUF),
+    ))
+}
+
+/// 等待对方新开的流（控制流之外的）。连接断开时返回错误。
+pub async fn accept_stream(
+    conn: &quinn::Connection,
+) -> Result<(LinkSender, LinkReceiver), NetError> {
+    let (send, recv) = conn.accept_bi().await?;
+    Ok((
+        LinkSender { send },
+        LinkReceiver::with_buffer(recv, BULK_BUF),
+    ))
+}
+
+/// 传文件的流读缓冲大一些，减少读取次数。
+const BULK_BUF: usize = 64 * 1024;
+
 impl LinkSender {
     pub async fn send(&mut self, msg: &Message) -> Result<(), NetError> {
         let frame = encode_frame(msg)?;
         self.send.write_all(&frame).await?;
         Ok(())
     }
+
+    /// 发完了：正常关闭发送方向，对方读到结尾。
+    pub fn finish(&mut self) {
+        let _ = self.send.finish();
+    }
+
+    /// 中止发送（取消传输），对方读取时立即出错。
+    pub fn reset(&mut self) {
+        let _ = self.send.reset(0u32.into());
+    }
 }
 
 impl LinkReceiver {
     fn new(recv: quinn::RecvStream) -> Self {
+        Self::with_buffer(recv, 16 * 1024)
+    }
+
+    fn with_buffer(recv: quinn::RecvStream, size: usize) -> Self {
         Self {
             recv,
             decoder: FrameDecoder::default(),
-            buf: vec![0u8; 16 * 1024],
+            buf: vec![0u8; size],
         }
     }
 
@@ -142,5 +181,67 @@ mod tests {
         assert_eq!(seen_by_b, a.device_id);
         assert!(matches!(first, Message::Hello { .. }));
         assert_eq!(second, Message::PairRequest);
+    }
+
+    /// 控制流建立后，另开的流可以独立传大块数据，控制流照常收发。
+    #[tokio::test]
+    async fn extra_streams_carry_bulk_data_beside_control() {
+        let a = Identity::generate().unwrap();
+        let b = Identity::generate().unwrap();
+        let ep_a = bind_endpoint(&a, 0).unwrap();
+        let ep_b = bind_endpoint(&b, 0).unwrap();
+        let addr_b =
+            std::net::SocketAddr::from(([127, 0, 0, 1], ep_b.local_addr().unwrap().port()));
+        let chunk = vec![7u8; flow_core::files::CHUNK_SIZE];
+
+        let expected = chunk.clone();
+        let server = tokio::spawn(async move {
+            let conn = ep_b.accept().await.unwrap().await.unwrap();
+            let mut link = Link::accept(conn.clone()).await.unwrap();
+            link.receiver.recv().await.unwrap().unwrap();
+            let (mut tx, mut rx) = accept_stream(&conn).await.unwrap();
+            assert_eq!(
+                rx.recv().await.unwrap(),
+                Some(Message::FileRequest { id: 9 })
+            );
+            for _ in 0..8 {
+                tx.send(&Message::FileChunk(expected.clone()))
+                    .await
+                    .unwrap();
+            }
+            tx.send(&Message::FileEnd).await.unwrap();
+            tx.finish();
+            // 控制流不受影响。
+            link.sender.send(&Message::ReleaseAll).await.unwrap();
+            link.receiver.recv().await.unwrap()
+        });
+
+        let conn = ep_a
+            .connect(addr_b, "flowacross.local")
+            .unwrap()
+            .await
+            .unwrap();
+        let mut link = Link::open(conn.clone(), &hello(&a)).await.unwrap();
+        let (mut tx, mut rx) = open_stream(&conn).await.unwrap();
+        tx.send(&Message::FileRequest { id: 9 }).await.unwrap();
+        let mut chunks = 0;
+        loop {
+            match rx.recv().await.unwrap() {
+                Some(Message::FileChunk(c)) => {
+                    assert_eq!(c, chunk);
+                    chunks += 1;
+                }
+                Some(Message::FileEnd) => break,
+                other => panic!("意外的消息：{other:?}"),
+            }
+        }
+        assert_eq!(chunks, 8);
+        assert_eq!(rx.recv().await.unwrap(), None, "发送方正常关闭");
+        assert_eq!(
+            link.receiver.recv().await.unwrap(),
+            Some(Message::ReleaseAll)
+        );
+        link.sender.send(&Message::PairConfirm).await.unwrap();
+        assert_eq!(server.await.unwrap(), Some(Message::PairConfirm));
     }
 }

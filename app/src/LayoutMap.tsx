@@ -1,14 +1,13 @@
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import type { DeviceView, Display, Layout } from "./types";
-import { CursorIcon, hueOf, resolution } from "./ui";
+import { CursorIcon, OsIcon, hueOf, resolution } from "./ui";
 
 interface Props {
   layout: Layout;
   devices: DeviceView[];
   selected: string | null;
   onSelect: (device: string | null) => void;
-  /** 拖动结束，位移单位为布局空间逻辑点。 */
-  /** 位移与吸附距离的单位都是布局逻辑点。 */
+  /** 拖动结束。位移与吸附距离的单位都是布局空间逻辑点。 */
   onDrop: (device: string, dx: number, dy: number, snap: number) => void;
   /** 底部预留的像素高度（给空状态提示等浮层留位置，屏幕不会被盖住）。 */
   reserveBottom?: number;
@@ -33,8 +32,10 @@ interface Link {
 }
 
 const PADDING = 40;
-/** 屏幕卡片之间留出的缝（像素，每边一半），发光的跨屏边就画在缝里。 */
-const GAP = 12;
+/** 屏幕之间留出的缝（像素，每边一半），发光的接缝就画在缝里。 */
+const GAP = 16;
+/** 接缝的粗细（像素），与 styles.css 的 .link 一致。 */
+const SEAM = 6;
 const SNAP_PX = 16;
 const MAX_SCALE = 0.24;
 /** 与 flow-core 的 ADJACENCY_TOLERANCE 保持一致。 */
@@ -122,6 +123,7 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
 
   const links = useMemo(() => findLinks(layout.displays), [layout]);
   const leads = useMemo(() => leadDisplays(layout.displays), [layout]);
+  const deviceCount = useMemo(() => new Set(layout.displays.map((d) => d.id.device)).size, [layout]);
   const deviceById = new Map(devices.map((d) => [d.id, d]));
 
   const onPointerDown = (e: PointerEvent, device: string) => {
@@ -175,12 +177,15 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
               transform: dragging ? `translate(${drag.dx}px, ${drag.dy}px)` : undefined,
             }}
             onPointerDown={(e) => onPointerDown(e, d.id.device)}
-            title={`${dev?.name ?? ""} · ${d.name}`}
+            title={`${dev?.name ?? ""}：${d.name}`}
           >
             <div className="screen-glass">
               {lead && dev && (
                 <div className="screen-head">
-                  <span className="screen-device">{dev.name}</span>
+                  <span className="screen-device">
+                    <OsIcon os={dev.os} size={13} className="screen-os" />
+                    <span className="screen-device-name">{dev.name}</span>
+                  </span>
                   {dev.active ? (
                     <span className="screen-chip here">
                       <CursorIcon size={11} />
@@ -191,6 +196,7 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
                   )}
                 </div>
               )}
+              <div className="screen-mark">{dev && <OsIcon os={dev.os} size={40} />}</div>
               <div className="screen-foot">
                 <span className="screen-name">{d.name}</span>
                 <span className="screen-meta">{resolution(d, dev?.os ?? "Other")}</span>
@@ -207,18 +213,30 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
             className={`link ${l.vertical ? "v" : "h"}`}
             style={
               l.vertical
-                ? { left: view.ox + l.x * view.s - 2.5, top: view.oy + l.y * view.s + 10, height: Math.max(l.length * view.s - 20, 8) }
-                : { top: view.oy + l.y * view.s - 2.5, left: view.ox + l.x * view.s + 10, width: Math.max(l.length * view.s - 20, 8) }
+                ? { left: view.ox + l.x * view.s - SEAM / 2, top: view.oy + l.y * view.s + 10, height: Math.max(l.length * view.s - 20, 8) }
+                : { top: view.oy + l.y * view.s - SEAM / 2, left: view.ox + l.x * view.s + 10, width: Math.max(l.length * view.s - 20, 8) }
             }
           />
         ))}
 
-      <div className="map-legend">
-        <span className="legend-link" />
-        发光的边可以跨屏
-        <span className="legend-sep" />
-        拖动屏幕调整摆放
-      </div>
+      {/* 只有本机时没有接缝可讲；有多台但都没相贴时，告诉用户怎么做 */}
+      {deviceCount > 1 && (
+        <div className="map-legend">
+          {links.length > 0 ? (
+            <>
+              <span className="legend-link" />
+              蓝色接缝处可以跨屏
+              <span className="legend-sep" />
+              拖动屏幕调整摆放
+            </>
+          ) : (
+            <>
+              <span className="legend-link off" />
+              不同电脑的屏幕还没有相贴，把它们拖到挨在一起才能跨屏
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

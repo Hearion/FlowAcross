@@ -1,6 +1,6 @@
 //! 设备之间的消息与帧编解码。
 //!
-//! - 可靠流（控制流、剪贴板流）：每帧 = 4 字节大端长度 + postcard 编码的 [`Message`]。
+//! - 可靠流（控制流、传文件的流）：每帧 = 4 字节大端长度 + postcard 编码的 [`Message`]。
 //! - 不可靠数据报（鼠标绝对坐标）：4 字节大端序号 + postcard 编码的 [`Message`]。
 //!   数据报可能丢失或乱序，接收方按序号丢弃比已收到的更旧的位置。网络短暂停顿后
 //!   直接跳到最新位置，而不是像可靠流那样把积压的旧位置逐个重放。
@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::files::FileOffer;
 use crate::geometry::Rect;
 use crate::keys::{InputEvent, KeyCode, MouseButton};
 use crate::layout::DeviceId;
@@ -146,6 +147,61 @@ pub enum Message {
     Bye {
         reason: ByeReason,
     },
+    // ---- 以下为 0.1.5 新增，只发给支持的版本（见 `files::peer_supports_files`）。
+    // 新变体只能加在末尾：postcard 按序号编码变体，插在中间会让旧版本解析错。
+    /// 本机剪贴板里是文件：只发清单，对方需要时再新开一条流来取（见 [`crate::files`]）。
+    FileOffer(FileOffer),
+    /// 传文件的流上的第一条消息：请求编号为 `id` 的那批文件。
+    FileRequest {
+        id: u64,
+    },
+    /// 接下来是一个目录或文件。`path` 是以 `/` 分隔的相对路径；文件内容在随后的 `FileChunk` 里。
+    FileEntry {
+        path: String,
+        size: u64,
+        dir: bool,
+    },
+    /// 当前文件的一段内容，最多 [`crate::files::CHUNK_SIZE`] 字节。
+    FileChunk(#[serde(with = "raw_bytes")] Vec<u8>),
+    /// 全部发完。
+    FileEnd,
+    /// 发送方出错，传输结束。`reason` 直接显示给用户。
+    FileError {
+        reason: String,
+    },
+}
+
+/// 让 `Vec<u8>` 按字节串整体编码（postcard 默认逐个字节序列化，大块文件内容很慢）。
+mod raw_bytes {
+    use serde::{Deserializer, Serializer, de};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        struct Bytes;
+        impl<'de> de::Visitor<'de> for Bytes {
+            type Value = Vec<u8>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("字节串")
+            }
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Vec<u8>, E> {
+                Ok(v.to_vec())
+            }
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
+                Ok(v)
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+                let mut v = Vec::new();
+                while let Some(b) = seq.next_element()? {
+                    v.push(b);
+                }
+                Ok(v)
+            }
+        }
+        d.deserialize_byte_buf(Bytes)
+    }
 }
 
 impl From<InputEvent> for Message {
@@ -293,7 +349,49 @@ mod tests {
             Message::Bye {
                 reason: ByeReason::Paused,
             },
+            Message::FileOffer(FileOffer {
+                id: 4,
+                names: vec!["报告.pdf".into()],
+                items: 1,
+                files: 1,
+                bytes: 1024,
+            }),
+            Message::FileRequest { id: 4 },
+            Message::FileEntry {
+                path: "照片/a.jpg".into(),
+                size: 3,
+                dir: false,
+            },
+            Message::FileChunk(vec![0, 255, 7]),
+            Message::FileEnd,
+            Message::FileError {
+                reason: "文件已被删除".into(),
+            },
         ]
+    }
+
+    /// 旧版本按变体序号解析消息，已有消息的编码不能变。
+    #[test]
+    fn existing_variant_tags_are_stable() {
+        assert_eq!(encode_payload(&Message::PairRequest).unwrap(), [1]);
+        assert_eq!(encode_payload(&Message::ReleaseAll).unwrap(), [12]);
+        assert_eq!(
+            encode_payload(&Message::Bye {
+                reason: ByeReason::Paused
+            })
+            .unwrap(),
+            [15, 1]
+        );
+        assert_eq!(encode_payload(&Message::FileEnd).unwrap(), [20]);
+    }
+
+    /// 文件内容按字节串编码：长度前缀 + 原样字节，不会膨胀。
+    #[test]
+    fn file_chunk_is_compact() {
+        let chunk = vec![0xAB; crate::files::CHUNK_SIZE];
+        let bytes = encode_payload(&Message::FileChunk(chunk.clone())).unwrap();
+        assert!(bytes.len() <= chunk.len() + 8);
+        assert_eq!(decode_payload(&bytes).unwrap(), Message::FileChunk(chunk));
     }
 
     #[test]

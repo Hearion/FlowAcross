@@ -14,7 +14,7 @@ tauri-build = { version = "2", features = [] }
 flow-core.workspace = true
 flow-platform.workspace = true
 flow-net.workspace = true
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "fs", "io-util"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }

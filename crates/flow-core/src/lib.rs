@@ -10,10 +10,12 @@
 //! - [`protocol`]：设备间消息与帧编解码。
 //! - [`pairing`]：设备指纹与 6 位配对码。
 //! - [`clipboard`]：剪贴板同步防回环。
+//! - [`files`]：跨设备复制文件（清单、路径校验、接收校验、什么时候去取）。
 //! - [`throttle`]：鼠标位置发送节流。
 
 pub mod clipboard;
 pub mod cursor;
+pub mod files;
 pub mod geometry;
 pub mod keys;
 pub mod layout;

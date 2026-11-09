@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod engine;
 mod input;
+mod transfer;
 mod updater;
 
 use std::path::{Path, PathBuf};
@@ -95,6 +96,11 @@ fn main() {
             let main_thread: MainThread = Arc::new(move |f| {
                 let _ = main_handle.run_on_main_thread(f);
             });
+            // 从其他电脑复制来的文件放在「下载/流界」（调试用的第二个实例放在「流界-<profile>」）。
+            let receive_dir = app.path().download_dir().ok().map(|d| match &profile {
+                Some(p) => d.join(format!("流界-{p}")),
+                None => d.join("流界"),
+            });
             // 在主线程上启动引擎：首次枚举显示器时可以读到系统的显示器名称。
             let engine = tauri::async_runtime::block_on(Engine::start(
                 EngineOptions {
@@ -103,6 +109,7 @@ fn main() {
                     discovery: true,
                     input: true,
                     main_thread: Some(main_thread),
+                    receive_dir,
                 },
                 notify,
             ))?;
@@ -165,6 +172,10 @@ fn main() {
             commands::open_data_dir,
             commands::set_low_latency,
             commands::remove_low_latency,
+            commands::accept_files,
+            commands::cancel_transfer,
+            commands::dismiss_transfer,
+            commands::open_received_files,
             updater::check_update,
             updater::install_update,
             updater::restart_app,

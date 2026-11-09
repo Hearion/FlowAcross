@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { api } from "./api";
 import type { NearbyView, Os, PairingView, PermissionKind, PermissionView } from "./types";
-import { ComputerIcon } from "./ui";
+import { AlertIcon, CheckIcon, DeviceIcon } from "./ui";
 
 export const OS_TEXT: Record<Os, string> = {
   MacOs: "macOS",
@@ -45,9 +45,7 @@ export function NearbyList({ nearby }: { nearby: NearbyView[] }) {
     <ul className="nearby-list">
       {nearby.map((d) => (
         <li key={d.id}>
-          <span className="device-icon hue-2">
-            <ComputerIcon />
-          </span>
+          <DeviceIcon os={d.os} hue={4} />
           <span className="device-info">
             <span className="device-name">{d.name}</span>
             <span className="device-sub">{OS_TEXT[d.os]}</span>
@@ -86,11 +84,19 @@ export function PairingDialog({ pairing }: { pairing: PairingView }) {
         请确认两台电脑上显示的配对码完全一致。
         {p.outgoing ? "然后在两台电脑上都点「确认配对」。" : "如果你没有发起配对，请点「拒绝」。"}
       </p>
-      <div className="pair-code">{p.code}</div>
+      <div className="pair-code" aria-label={`配对码 ${p.code}`}>
+        {[...p.code].map((c, i) =>
+          c === " " ? <span key={i} className="pair-gap" /> : <span key={i} className="pair-digit">{c}</span>,
+        )}
+      </div>
       <div className="pair-status">
-        <span className={p.local_confirmed ? "ok" : ""}>{p.local_confirmed ? "✓ 本机已确认" : "本机尚未确认"}</span>
+        <span className={p.local_confirmed ? "ok" : ""}>
+          {p.local_confirmed ? <CheckIcon /> : <span className="pair-pending" />}
+          {p.local_confirmed ? "本机已确认" : "本机尚未确认"}
+        </span>
         <span className={p.remote_confirmed ? "ok" : ""}>
-          {p.remote_confirmed ? `✓ ${p.name} 已确认` : `等待 ${p.name} 确认`}
+          {p.remote_confirmed ? <CheckIcon /> : <span className="pair-pending" />}
+          {p.remote_confirmed ? `${p.name} 已确认` : `等待 ${p.name} 确认`}
         </span>
       </div>
       <div className="modal-actions">
@@ -162,7 +168,7 @@ export function PermissionList({ permissions, hint }: { permissions: PermissionV
         const ok = p.state === "granted" || p.state === "not_applicable";
         return (
           <li key={p.kind}>
-            <span className={`perm-dot ${ok ? "ok" : ""}`}>{ok ? "✓" : "!"}</span>
+            <span className={`perm-dot ${ok ? "ok" : ""}`}>{ok ? <CheckIcon /> : <AlertIcon />}</span>
             <span className="perm-text">
               <strong>{t.name}</strong>
               <small>{t.why}</small>

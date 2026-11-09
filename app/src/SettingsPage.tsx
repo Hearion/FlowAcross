@@ -3,7 +3,7 @@ import { api } from "./api";
 import { PermissionList } from "./Dialogs";
 import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
-import { Logo, Toggle } from "./ui";
+import { ChevronLeftIcon, Logo, SETTINGS_ICONS, Toggle } from "./ui";
 import { ProgressBar, type Updater } from "./Updater";
 
 export type SettingsSection = "general" | "permissions" | "crossing" | "clipboard" | "updates" | "account" | "about";
@@ -34,14 +34,22 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
     <div className="settings-page">
       <nav className="settings-nav">
         <button className="settings-back" onClick={onClose}>
-          ‹ 返回设备布局
+          <ChevronLeftIcon />
+          返回设备布局
         </button>
-        {NAV.map((n) => (
-          <button key={n.id} className={`settings-nav-item ${section === n.id ? "on" : ""}`} onClick={() => onSection(n.id)}>
-            {n.label}
-            {n.id === "permissions" && missing > 0 && <span className="nav-badge">{missing}</span>}
-          </button>
-        ))}
+        <div className="settings-nav-title">设置</div>
+        {NAV.map((n) => {
+          const Icon = SETTINGS_ICONS[n.id];
+          return (
+            <button key={n.id} className={`settings-nav-item ${section === n.id ? "on" : ""}`} onClick={() => onSection(n.id)}>
+              <span className="settings-nav-icon">
+                <Icon />
+              </span>
+              <span className="settings-nav-label">{n.label}</span>
+              {n.id === "permissions" && missing > 0 && <span className="nav-badge">{missing}</span>}
+            </button>
+          );
+        })}
       </nav>
 
       <div className="settings-body">
@@ -86,7 +94,22 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
           <Section title="剪贴板" desc="内容通过加密连接直接在电脑之间传输，不经过任何服务器。">
             <Panel>
               <ClipboardSetting settings={state.settings} update={update} />
+              <div className="setting inline">
+                <div className="setting-text">
+                  <span>收到的文件</span>
+                  <small>{state.receive_dir ?? "找不到本机的下载文件夹，暂时无法接收文件"}</small>
+                </div>
+                {state.receive_dir && (
+                  <button className="btn small" onClick={() => api.openReceivedFiles()}>
+                    打开文件夹
+                  </button>
+                )}
+              </div>
             </Panel>
+            <p className="settings-note">
+              {"在一台电脑上复制文件后，把键鼠切到另一台，文件会自动传过去并放进它的剪贴板，在 Finder 或资源管理器里粘贴即可。" +
+                "传完之前粘贴的还是原来的内容，进度显示在主界面侧栏。两边都需要流界 0.1.5 或更新版本。"}
+            </p>
           </Section>
         )}
 
@@ -130,8 +153,9 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <div className="about-head">
               <Logo size={56} />
               <div>
-                <strong>流界 FlowAcross</strong>
-                <span>一套键鼠，自由跨屏</span>
+                <span className="about-name">流界</span>
+                <span className="about-latin">FlowAcross</span>
+                <span className="muted">一套键鼠，自由跨屏</span>
               </div>
             </div>
             <Panel>
@@ -312,7 +336,7 @@ function NameSetting({ current }: { current: string }) {
     if (value.trim() !== current) api.setDeviceName(value);
   };
   return (
-    <div className="setting">
+    <div className="setting inline">
       <div className="setting-text">
         <span>设备名称</span>
         <small>其他电脑会用这个名字找到这台电脑</small>

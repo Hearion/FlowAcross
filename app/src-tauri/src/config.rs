@@ -33,6 +33,8 @@ pub struct Settings {
     pub mapping: EdgeMapping,
     /// 共享剪贴板文本。
     pub clipboard: bool,
+    /// 共享剪贴板时也传复制的文件（需要 `clipboard` 同时打开）。
+    pub clipboard_files: bool,
     /// 暂停共享（键鼠不再流转到其他设备，连接保持）。
     pub sharing_paused: bool,
     /// 启动时和之后每隔几小时检查一次新版本（只提示，不自动安装）。
@@ -49,6 +51,7 @@ impl Default for Settings {
             corner_guard: true,
             mapping: EdgeMapping::Continuous,
             clipboard: true,
+            clipboard_files: true,
             sharing_paused: false,
             auto_check_updates: true,
             low_latency: false,

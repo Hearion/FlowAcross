@@ -108,6 +108,33 @@ pub fn open_data_dir(engine: State<'_, Engine>) {
     reveal(engine.data_dir());
 }
 
+/// 接收其他设备复制的、等待手动接收的文件。
+#[tauri::command]
+pub fn accept_files(engine: State<'_, Engine>) {
+    engine.accept_files();
+}
+
+#[tauri::command]
+pub fn cancel_transfer(engine: State<'_, Engine>, id: u64) {
+    engine.cancel_transfer(id);
+}
+
+/// 从列表中移除已结束的传输。
+#[tauri::command]
+pub fn dismiss_transfer(engine: State<'_, Engine>, id: u64) {
+    engine.dismiss_transfer(id);
+}
+
+/// 打开收到的文件所在的文件夹（还没收过文件时先建好）。
+#[tauri::command]
+pub fn open_received_files(engine: State<'_, Engine>) -> Result<(), String> {
+    let dir = engine.receive_dir().ok_or("找不到本机的下载文件夹。")?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("无法创建文件夹「{}」：{e}", dir.display()))?;
+    reveal(dir);
+    Ok(())
+}
+
 /// 开启或关闭低延迟模式（仅 macOS）。第一次开启会弹出管理员授权窗口，放到阻塞线程里等。
 #[tauri::command]
 pub async fn set_low_latency(engine: State<'_, Engine>, enabled: bool) -> Result<(), String> {

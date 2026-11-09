@@ -36,6 +36,13 @@ export interface Api {
   setLowLatency(enabled: boolean): Promise<void>;
   /** 关闭低延迟模式并移除后台服务。失败时以字符串原因 reject。 */
   removeLowLatency(): Promise<void>;
+  /** 接收等待中的文件（`StateView.file_offer`）。 */
+  acceptFiles(): Promise<void>;
+  cancelTransfer(id: number): Promise<void>;
+  /** 从列表中移除已结束的传输。 */
+  dismissTransfer(id: number): Promise<void>;
+  /** 打开收到的文件所在的文件夹。失败时以字符串原因 reject。 */
+  openReceivedFiles(): Promise<void>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
   onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
@@ -63,6 +70,10 @@ const tauriApi: Api = {
   restartApp: () => invoke("restart_app"),
   setLowLatency: (enabled) => invoke("set_low_latency", { enabled }),
   removeLowLatency: () => invoke("remove_low_latency"),
+  acceptFiles: () => invoke("accept_files"),
+  cancelTransfer: (id) => invoke("cancel_transfer", { id }),
+  dismissTransfer: (id) => invoke("dismiss_transfer", { id }),
+  openReceivedFiles: () => invoke("open_received_files"),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
   onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),

@@ -4,6 +4,8 @@ import type { Api } from "./api";
 import type { StateView, UpdateProgress } from "./types";
 
 export function createMock(): Api {
+  // 预览开关：?onboarding 显示首次引导，?solo 只有本机（看空状态）。
+  const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
   let state: StateView = {
     local: { id: "local", name: "本机（浏览器预览）", os: "MacOs" },
     onboarded: true,
@@ -21,7 +23,7 @@ export function createMock(): Api {
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, sharing_paused: false, auto_check_updates: true, low_latency: false },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -31,7 +33,24 @@ export function createMock(): Api {
     controlled_by: null,
     low_latency: { supported: true, installed: false, active: false },
     about: { version: "0.1.0", protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
+    transfers: [],
+    file_offer: null,
+    receive_dir: "~/Downloads/流界",
   };
+  if (params.has("onboarding")) state.onboarded = false;
+  // ?files：看跨设备复制文件的各种状态。
+  if (params.has("files")) {
+    state.file_offer = { peer: "pc", peer_name: "书房台式机", label: "项目素材 等 3 项", files: 214, bytes: 3_480_000_000 };
+    state.transfers = [
+      { id: 3, peer: "pc", peer_name: "书房台式机", incoming: true, label: "季度报告.pdf 等 2 项", done: 31_400_000, total: 86_000_000, status: "running", error: null, pasteable: false },
+      { id: 2, peer: "pc", peer_name: "书房台式机", incoming: false, label: "截图 2026-11-08.png", done: 2_100_000, total: 2_100_000, status: "done", error: null, pasteable: false },
+      { id: 1, peer: "pc", peer_name: "书房台式机", incoming: true, label: "照片", done: 120_000_000, total: 512_000_000, status: "failed", error: "磁盘空间不足，请清理后重试。", pasteable: false },
+    ];
+  }
+  if (params.has("solo")) {
+    state.devices = state.devices.filter((d) => d.id === "local");
+    state.layout = { displays: state.layout.displays.filter((d) => d.id.device === "local") };
+  }
   const stateListeners = new Set<(s: StateView) => void>();
   const noticeListeners = new Set<(m: string) => void>();
   const set = (next: Partial<StateView>) => {
@@ -131,6 +150,33 @@ export function createMock(): Api {
     },
     removeLowLatency: async () =>
       set({ settings: { ...state.settings, low_latency: false }, low_latency: { supported: true, installed: false, active: false } }),
+    acceptFiles: async () => {
+      const offer = state.file_offer;
+      if (!offer) return;
+      const id = Date.now();
+      set({
+        file_offer: null,
+        transfers: [
+          { id, peer: offer.peer, peer_name: offer.peer_name, incoming: true, label: offer.label, done: 0, total: offer.bytes, status: "running", error: null, pasteable: false },
+          ...state.transfers,
+        ],
+      });
+      const timer = setInterval(() => {
+        const t = state.transfers.find((x) => x.id === id);
+        if (!t || t.status !== "running") return clearInterval(timer);
+        const done = Math.min(t.total, t.done + t.total / 12);
+        const finished = done >= t.total;
+        set({ transfers: state.transfers.map((x) => (x.id === id ? { ...x, done, status: finished ? "done" : "running", pasteable: finished } : x)) });
+        if (finished) {
+          clearInterval(timer);
+          notice(`已收到「${t.peer_name}」的「${t.label}」，可以直接粘贴。`);
+        }
+      }, 250);
+    },
+    cancelTransfer: async (id) =>
+      set({ transfers: state.transfers.map((t) => (t.id === id && t.status === "running" ? { ...t, status: "canceled" } : t)) }),
+    dismissTransfer: async (id) => set({ transfers: state.transfers.filter((t) => t.id !== id || t.status === "running") }),
+    openReceivedFiles: async () => notice("（浏览器预览）这里会打开下载文件夹里的「流界」"),
     // 每次订阅包一层新函数：React 开发模式会"订阅-退订-再订阅"同一个回调，直接存回调会被误删。
     onState: async (cb) => {
       const h = (st: StateView) => cb(st);
