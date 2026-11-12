@@ -153,9 +153,31 @@ const FLAG_CTRL: u64 = 0x4_0000;
 const FLAG_ALT: u64 = 0x8_0000;
 const FLAG_CMD: u64 = 0x10_0000;
 const FLAG_CAPS: u64 = 0x1_0000;
-/// 系统创建键盘事件时按键位自动带上的标志（小键盘、方向键 / Fn 区），注入时要保留。
+/// 真实键盘上按键位固定带的标志（小键盘、方向键 / Fn 区），注入时按键位补上。
 const FLAG_NUMPAD: u64 = 0x20_0000;
 const FLAG_FN: u64 = 0x80_0000;
+
+/// 某个虚拟键码在真实键盘上固定带的小键盘 / Fn 标志。
+///
+/// 只按键位决定，不能从系统创建出来的事件里读：事件源会把系统当前的修饰键状态带进来，
+/// 一旦里面混着 Fn（本机按着 Fn / 地球键，或上一次方向键留下的状态），普通字母就会变成
+/// Fn+D（听写）、Fn+E（表情与符号）这类系统快捷键。
+fn key_position_flags(vk: u16) -> u64 {
+    match vk {
+        // 方向键：小键盘 + Fn
+        0x7B..=0x7E => FLAG_NUMPAD | FLAG_FN,
+        // F1–F20
+        0x7A | 0x78 | 0x63 | 0x76 | 0x60 | 0x61 | 0x62 | 0x64 | 0x65 | 0x6D | 0x67 | 0x6F
+        | 0x69 | 0x6B | 0x71 | 0x6A | 0x40 | 0x4F | 0x50 | 0x5A => FLAG_FN,
+        // Help / Home / Page Up / 向前删除 / End / Page Down
+        0x72 | 0x73 | 0x74 | 0x75 | 0x77 | 0x79 => FLAG_FN,
+        // 小键盘
+        0x41 | 0x43 | 0x45 | 0x47 | 0x4B | 0x4C | 0x4E | 0x51 | 0x52..=0x59 | 0x5B | 0x5C => {
+            FLAG_NUMPAD
+        }
+        _ => 0,
+    }
+}
 
 /// 修饰键对应的 (通用标志, 设备标志)。
 fn modifier_flags(code: KeyCode) -> Option<(u64, u64)> {
@@ -549,17 +571,17 @@ impl MacInjector {
     }
 
     /// 打上流界标记、带上当前修饰键后发送，并释放事件。
-    fn post(&self, event: CGEventRef) -> Result<(), PlatformError> {
+    /// `position_flags` 是键盘事件按键位固定带的标志（见 [`key_position_flags`]），鼠标事件传 0。
+    fn post(&self, event: CGEventRef, position_flags: u64) -> Result<(), PlatformError> {
         if event.is_null() {
             return Err(PlatformError::Os("创建系统输入事件失败".into()));
         }
         // SAFETY: event 由 CGEventCreate* 返回（+1），发送后释放。
         unsafe {
             CGEventSetIntegerValueField(event, FIELD_USER_DATA, INJECTED_MARK as i64);
-            // 修饰键以远端按下的为准（不混入本机键盘的状态），但保留系统按键位加上的小键盘 / Fn 标志，
-            // 否则方向键、Home/End、小键盘在部分程序里行为不对。
-            let keep = CGEventGetFlags(event) & (FLAG_NUMPAD | FLAG_FN);
-            CGEventSetFlags(event, self.flags() | keep);
+            // 修饰键以远端按下的为准，整个覆盖掉事件源带进来的本机状态（包括 Fn）；
+            // 小键盘 / Fn 标志只按键位补，否则方向键、Home/End、小键盘在部分程序里行为不对。
+            CGEventSetFlags(event, self.flags() | position_flags);
             CGEventPost(HID_TAP, event);
             CFRelease(event);
         }
@@ -623,7 +645,7 @@ impl InputInjector for MacInjector {
             }
         }
         self.pos = to;
-        self.post(ev)
+        self.post(ev, 0)
     }
 
     fn button(&mut self, button: MouseButton, down: bool) -> Result<(), PlatformError> {
@@ -662,7 +684,7 @@ impl InputInjector for MacInjector {
                 CGEventSetIntegerValueField(ev, FIELD_BUTTON_NUMBER, button_number(button) as i64);
                 CGEventSetIntegerValueField(ev, FIELD_CLICK_STATE, clicks);
             }
-            self.post(ev)
+            self.post(ev, 0)
         }
     }
 
@@ -682,7 +704,7 @@ impl InputInjector for MacInjector {
         }
         // SAFETY: 创建事件，post 负责释放。
         let ev = unsafe { CGEventCreateScrollWheelEvent2(self.source, units, 2, wy, wx, 0) };
-        self.post(ev)
+        self.post(ev, 0)
     }
 
     fn key(&mut self, code: KeyCode, down: bool, repeat: bool) -> Result<(), PlatformError> {
@@ -717,7 +739,7 @@ impl InputInjector for MacInjector {
                     CGEventSetIntegerValueField(ev, FIELD_AUTOREPEAT, 1);
                 }
             }
-            self.post(ev)
+            self.post(ev, key_position_flags(vk))
         }
     }
 }
@@ -862,6 +884,27 @@ impl crate::ClipboardAccess for MacClipboard {
 mod tests {
     use super::*;
     use crate::ClipboardAccess;
+
+    #[test]
+    fn position_flags_follow_key_position() {
+        let flags = |usage: u16| key_position_flags(keymap::to_mac(KeyCode(usage)).unwrap());
+        // 字母、数字、回车、空格不带任何标志（带 Fn 会触发听写、表情等系统快捷键）
+        for usage in [0x04, 0x07, 0x08, 0x1E, 0x28, 0x2C] {
+            assert_eq!(flags(usage), 0, "usage {usage:#x}");
+        }
+        // 方向键
+        for usage in 0x4F..=0x52 {
+            assert_eq!(flags(usage), FLAG_NUMPAD | FLAG_FN, "usage {usage:#x}");
+        }
+        // F1–F12、Home / Page Up / 向前删除 / End / Page Down
+        for usage in (0x3A..=0x45).chain(0x4A..=0x4E) {
+            assert_eq!(flags(usage), FLAG_FN, "usage {usage:#x}");
+        }
+        // 小键盘
+        for usage in 0x53..=0x63 {
+            assert_eq!(flags(usage), FLAG_NUMPAD, "usage {usage:#x}");
+        }
+    }
 
     /// 会改写系统剪贴板，默认不运行：cargo test -p flow-platform -- --ignored
     #[test]
