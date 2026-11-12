@@ -110,7 +110,8 @@ jobs:
             os: windows-latest
             args: --bundles nsis
           - name: macOS
-            os: macos-latest
+            # Intel 构建机同样生成通用包，避免 ARM 托管构建机容量不足阻塞发版。
+            os: macos-15-intel
             args: --target universal-apple-darwin --bundles app,dmg
     runs-on: ${{ matrix.os }}
     steps:
