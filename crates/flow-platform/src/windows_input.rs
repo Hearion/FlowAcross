@@ -607,7 +607,7 @@ impl Drop for OpenClipboardGuard {
     }
 }
 
-/// 系统剪贴板（Unicode 文本和 `CF_HDROP` 文件列表）。
+/// 系统剪贴板（Unicode 文本、`CF_HDROP` 文件列表和图片）。
 pub struct WinClipboard;
 
 impl crate::ClipboardAccess for WinClipboard {
@@ -700,9 +700,101 @@ impl crate::ClipboardAccess for WinClipboard {
         Ok(())
     }
 
+    fn get_image(&mut self) -> Result<Option<Vec<u8>>, PlatformError> {
+        use windows_sys::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        let png = png_format();
+        // SAFETY: 只查询格式，不需要打开剪贴板。
+        let (has_png, has_dib) = unsafe {
+            (
+                png != 0 && IsClipboardFormatAvailable(png) != 0,
+                IsClipboardFormatAvailable(CF_DIB) != 0,
+            )
+        };
+        if !has_png && !has_dib {
+            return Ok(None);
+        }
+        // 先把数据复制出来就关闭剪贴板，转换不占着它。
+        let (png_data, dib_data) = {
+            let _guard = OpenClipboardGuard::open()?;
+            // SAFETY: 剪贴板已打开。
+            unsafe {
+                let png_data = if has_png {
+                    get_clipboard_bytes(png)
+                } else {
+                    None
+                };
+                // 浏览器、截图工具会同时放一份 PNG（保留透明度）；没有再读系统位图。
+                let dib_data = if png_data.is_none() {
+                    get_clipboard_bytes(CF_DIB)
+                } else {
+                    None
+                };
+                (png_data, dib_data)
+            }
+        };
+        Ok(png_data.or_else(|| dib_data.and_then(|d| crate::dib::dib_to_png(&d))))
+    }
+
+    fn set_image(&mut self, image: &crate::ClipboardImage) -> Result<(), PlatformError> {
+        use windows_sys::Win32::System::DataExchange::EmptyClipboard;
+        let format = png_format();
+        let _guard = OpenClipboardGuard::open()?;
+        // SAFETY: 剪贴板已打开。
+        unsafe {
+            EmptyClipboard();
+            let mut written = false;
+            // 画图和多数聊天软件只认位图；浏览器、Office 优先用 PNG（保留透明度）。
+            if let Some(dib) = &image.dib {
+                set_clipboard_bytes(CF_DIB, dib)?;
+                written = true;
+            }
+            if format != 0 && set_clipboard_bytes(format, image.png()).is_ok() {
+                written = true;
+            }
+            if written {
+                Ok(())
+            } else {
+                Err(PlatformError::Os("写入剪贴板失败".into()))
+            }
+        }
+    }
+
     fn change_count(&self) -> u64 {
         // SAFETY: 无参数的系统查询。
         unsafe { windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber() as u64 }
+    }
+}
+
+const CF_DIB: u32 = 8;
+
+/// 浏览器、Office、截图工具约定俗成的 "PNG" 剪贴板格式；注册失败时返回 0。
+fn png_format() -> u32 {
+    let name: Vec<u16> = "PNG".encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: 格式名是以 0 结尾的 UTF-16。
+    unsafe { windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW(name.as_ptr()) }
+}
+
+/// 读出剪贴板里某种格式的全部字节。调用前必须已打开剪贴板。
+///
+/// # Safety
+/// 调用方持有 [`OpenClipboardGuard`]。
+unsafe fn get_clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    use windows_sys::Win32::System::DataExchange::GetClipboardData;
+    use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    // SAFETY: 数据句柄归剪贴板所有，只锁定读取，不释放；按 GlobalSize 限定读取范围。
+    unsafe {
+        let handle = GetClipboardData(format);
+        if handle.is_null() {
+            return None;
+        }
+        let size = GlobalSize(handle);
+        let ptr = GlobalLock(handle) as *const u8;
+        if ptr.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+        GlobalUnlock(handle);
+        Some(bytes)
     }
 }
 

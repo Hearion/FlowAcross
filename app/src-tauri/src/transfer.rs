@@ -140,6 +140,7 @@ pub fn summarize(roots: &[PathBuf], entries: &[Entry]) -> FileOffer {
         items: roots.len() as u32,
         files: entries.iter().filter(|e| !e.dir).count() as u64,
         bytes: entries.iter().map(|e| e.size).sum(),
+        image: false,
     }
 }
 
@@ -201,8 +202,9 @@ pub async fn send(
             dir: e.dir,
         };
         tokio::select! {
-            r = tx.send(&msg) => r.map_err(|_| peer_gone())?,
+            biased;
             _ = ticket.cancelled() => return Err(CANCELED.into()),
+            r = tx.send(&msg) => r.map_err(|_| peer_gone())?,
         }
         if e.dir {
             continue;
@@ -218,8 +220,9 @@ pub async fn send(
             };
             buf.resize(want, 0);
             let n = tokio::select! {
-                r = file.read(&mut buf[..]) => r.map_err(|err| io_text(&e.abs, &err))?,
+                biased;
                 _ = ticket.cancelled() => return Err(CANCELED.into()),
+                r = file.read(&mut buf[..]) => r.map_err(|err| io_text(&e.abs, &err))?,
             };
             buf.truncate(n);
             if n == 0 {
@@ -229,15 +232,20 @@ pub async fn send(
                 ));
             }
             tokio::select! {
-                r = tx.send(&chunk) => r.map_err(|_| peer_gone())?,
+                biased;
                 _ = ticket.cancelled() => return Err(CANCELED.into()),
+                r = tx.send(&chunk) => r.map_err(|_| peer_gone())?,
             }
             left -= n as u64;
             ticket.add(n);
             on_progress();
         }
     }
-    tx.send(&Message::FileEnd).await.map_err(|_| peer_gone())?;
+    tokio::select! {
+        biased;
+        _ = ticket.cancelled() => return Err(CANCELED.into()),
+        r = tx.send(&Message::FileEnd) => r.map_err(|_| peer_gone())?,
+    }
     tx.finish();
     Ok(())
 }
@@ -274,8 +282,9 @@ pub async fn receive(
         .unwrap_or_default();
     let staging = root.join(format!("{STAGING_PREFIX}{id}-{nonce}"));
     let result = tokio::select! {
-        r = receive_into(tx, rx, id, declared, &staging, ticket, &on_progress) => r,
+        biased;
         _ = ticket.cancelled() => Err(CANCELED.into()),
+        r = receive_into(tx, rx, id, declared, &staging, ticket, &on_progress) => r,
     };
     let result = match result {
         Ok(tops) => finalize(&staging, root, &tops).await,

@@ -35,6 +35,9 @@ pub enum ControlEvent {
     Changed,
     /// 正在控制的设备不可用了（断线、被暂停、被移除），键鼠已回到本机。
     Lost(DeviceId),
+    /// 键鼠从远端穿过屏幕边回到了本机的这个位置（布局坐标）。跟在 `Changed` 后面发，
+    /// 只用于在这条边上闪一道浮光；快捷键、断线等其他方式回来时不发。
+    Returned(Point),
 }
 
 /// 引擎提供给控制器的配置快照。
@@ -155,8 +158,8 @@ impl Controller {
     pub fn configure(&mut self, cfg: ControllerConfig) {
         self.switcher.policy = cfg.policy.clone();
         self.cfg = cfg;
-        if !self.cfg.enabled {
-            // 暂停前开始的贴边停留计时不能在暂停后到期触发切换。
+        if !self.cfg.enabled || self.cfg.policy.locked {
+            // 暂停或锁定前开始的贴边停留计时不能在之后到期触发切换。
             self.switcher.reset();
         }
         let Some(a) = &self.active else {
@@ -168,7 +171,7 @@ impl Controller {
             .outputs
             .get(&a.device)
             .is_some_and(|tx| tx.same_channel(&a.tx));
-        if !reachable || !self.cfg.enabled {
+        if !reachable || !self.cfg.enabled || self.cfg.policy.locked {
             let device = a.device.clone();
             self.leave_to_local(None);
             if !reachable {
@@ -371,7 +374,11 @@ impl Controller {
     /// `exit`：从本机离开时本机光标应停的位置（布局坐标）。
     fn switch_to(&mut self, c: Crossing, exit: Option<Point>) {
         if c.display.device == self.local {
+            let was_remote = self.active.is_some();
             self.leave_to_local(Some(c.point));
+            if was_remote {
+                let _ = self.events.send(ControlEvent::Returned(c.point));
+            }
         } else {
             self.enter(c.display, c.point, exit);
         }
@@ -452,7 +459,7 @@ impl Controller {
 
     /// 快捷键切换：按设备在布局中的水平位置，切到左边或右边最近的一台。
     fn hotkey_switch(&mut self, right: bool) -> bool {
-        if !self.cfg.enabled || self.cfg.outputs.is_empty() {
+        if !self.cfg.enabled || self.cfg.policy.locked || self.cfg.outputs.is_empty() {
             return false;
         }
         let layout = &self.cfg.layout;
@@ -669,6 +676,13 @@ mod tests {
         assert!(!cap);
         let (x, y) = at.unwrap();
         assert!(x > 1438.0 && x < 1440.0 && y == 420.0);
+        // 先通知键鼠换了地方，再给出回到本机的位置（用来在这条边上闪浮光）。
+        assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
+        match r.events.try_recv() {
+            // 布局坐标 = 本机系统坐标 + 偏移（测试里是 100, 0）。
+            Ok(ControlEvent::Returned(p)) => assert_eq!((p.x - 100.0, p.y), (x, y)),
+            other => panic!("期望 Returned，实际 {other:?}"),
+        }
     }
 
     #[test]
@@ -715,10 +729,7 @@ mod tests {
 
     #[test]
     fn hotkey_switches_and_swallows_arrow() {
-        let mut r = rig(SwitchPolicy {
-            locked: true,
-            ..Default::default()
-        });
+        let mut r = rig(SwitchPolicy::default());
         r.ctl.handle(mv(500.0, 500.0, 0.0, 0.0));
         r.ctl.handle(key(KeyCode::LEFT_CTRL, true));
         r.ctl.handle(key(KeyCode::LEFT_ALT, true));
@@ -737,6 +748,70 @@ mod tests {
         let (cap, at) = *r.cursor.lock().unwrap().last().unwrap();
         assert!(!cap);
         assert_eq!(at, Some((500.0, 500.0)));
+    }
+
+    #[test]
+    fn locking_blocks_edges_and_hotkeys_and_releases_remote_keys() {
+        let locked = SwitchPolicy {
+            locked: true,
+            ..Default::default()
+        };
+        let mut r = rig(locked.clone());
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0)), Verdict::Pass);
+        r.ctl.handle(key(KeyCode::LEFT_CTRL, true));
+        r.ctl.handle(key(KeyCode::LEFT_ALT, true));
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Pass);
+        assert_eq!(r.ctl.active_device(), None);
+        assert!(drain(&mut r.pc_rx).is_empty());
+
+        let mut r = rig(SwitchPolicy::default());
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        r.ctl.handle(key(KeyCode::A, true));
+        r.ctl.handle(CapturedEvent::Button {
+            button: flow_core::keys::MouseButton::Left,
+            down: true,
+        });
+        drain(&mut r.pc_rx);
+        while r.events.try_recv().is_ok() {}
+        r.ctl.configure(config(locked, r.pc_tx.clone(), true));
+        assert_eq!(r.ctl.active_device(), None);
+        let msgs = drain(&mut r.pc_rx);
+        assert!(msgs.contains(&Message::Key {
+            code: KeyCode::A,
+            down: false,
+            repeat: false
+        }));
+        assert!(msgs.contains(&Message::Button {
+            button: flow_core::keys::MouseButton::Left,
+            down: false
+        }));
+        assert!(matches!(msgs.last(), Some(Message::Leave { .. })));
+        assert!(!r.cursor.lock().unwrap().last().unwrap().0);
+        assert_eq!(r.events.try_recv(), Ok(ControlEvent::Changed));
+        assert!(r.events.try_recv().is_err(), "主动锁定不会报告连接中断");
+        assert_eq!(r.ctl.handle(key(KeyCode::A, false)), Verdict::Pass);
+    }
+
+    #[test]
+    fn locking_cancels_pending_dwell() {
+        let mut r = rig(SwitchPolicy {
+            dwell_ms: 30,
+            ..Default::default()
+        });
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        r.ctl.configure(config(
+            SwitchPolicy {
+                locked: true,
+                dwell_ms: 30,
+                ..Default::default()
+            },
+            r.pc_tx.clone(),
+            true,
+        ));
+        std::thread::sleep(Duration::from_millis(40));
+        r.ctl.tick();
+        assert_eq!(r.ctl.active_device(), None);
+        assert!(drain(&mut r.pc_rx).is_empty());
     }
 
     #[test]

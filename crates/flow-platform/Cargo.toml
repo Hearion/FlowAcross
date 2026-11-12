@@ -10,13 +10,19 @@ publish.workspace = true
 [dependencies]
 flow-core.workspace = true
 thiserror.workspace = true
+# 剪贴板图片在 Windows 位图和 PNG 之间互转（`dib.rs`，纯逻辑，所有平台都编译以便测试）。
+png = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 core-foundation = "0.10"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSDictionary", "NSValue", "NSEnumerator", "NSProcessInfo", "NSObject", "NSURL"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSGraphics", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSDictionary", "NSValue", "NSEnumerator", "NSProcessInfo", "NSObject", "NSURL", "NSData", "NSGeometry", "NSRunLoop", "NSDate"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSGraphics", "NSPasteboard", "NSPasteboardItem", "NSImageRep", "NSBitmapImageRep", "NSWindow", "NSResponder", "NSView", "NSColor", "NSWorkspace", "NSAccessibility", "NSApplication", "objc2-quartz-core", "objc2-core-graphics", "objc2-core-foundation"] }
+# 屏幕边缘浮光用 Core Animation 的渐变图层画（`macos_glow.rs`）。
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CAGradientLayer", "CAAnimation", "CAMediaTiming", "CAMediaTimingFunction", "CATransaction", "objc2-core-foundation"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGColor"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

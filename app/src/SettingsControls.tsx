@@ -84,6 +84,13 @@ export function CrossScreenSettings({ settings: s, update }: Props) {
       </div>
       <div className="setting inline">
         <div className="setting-text">
+          <span>跨屏时显示边缘浮光</span>
+          <small>键鼠来到这台电脑时，进来的那条屏幕边亮一下</small>
+        </div>
+        <Toggle label="跨屏时显示边缘浮光" checked={s.edge_glow} onChange={(v) => update({ edge_glow: v })} />
+      </div>
+      <div className="setting inline">
+        <div className="setting-text">
           <span>快捷键切换</span>
           <small>按住后用方向键切到左右相邻的电脑</small>
         </div>
@@ -175,17 +182,17 @@ export function ClipboardSetting({ settings: s, update, title = false }: Props &
       <div className="setting inline">
         <div className="setting-text">
           <span className={title ? "panel-title" : undefined}>共享剪贴板</span>
-          <small>在一台电脑复制文字或文件，切到另一台直接粘贴</small>
+          <small>在一台电脑复制文字、文件或截图，切到另一台直接粘贴</small>
         </div>
         <Toggle label="共享剪贴板" checked={s.clipboard} onChange={(v) => update({ clipboard: v })} />
       </div>
       <div className="setting inline">
         <div className="setting-text">
-          <span>复制文件</span>
+          <span>复制文件和图片</span>
           <small>键鼠切过去时自动传输，超过 1 GB 需要手动接收</small>
         </div>
         <Toggle
-          label="复制文件"
+          label="复制文件和图片"
           checked={s.clipboard && s.clipboard_files}
           disabled={!s.clipboard}
           onChange={(v) => update({ clipboard_files: v })}

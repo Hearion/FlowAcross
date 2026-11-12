@@ -726,7 +726,7 @@ impl InputInjector for MacInjector {
 // 剪贴板
 // ---------------------------------------------------------------------------
 
-/// 系统剪贴板（NSPasteboard：纯文本和文件 URL）。
+/// 系统剪贴板（NSPasteboard：纯文本、文件 URL 和图片）。
 pub struct MacClipboard;
 
 impl crate::ClipboardAccess for MacClipboard {
@@ -803,6 +803,54 @@ impl crate::ClipboardAccess for MacClipboard {
         })
     }
 
+    fn get_image(&mut self) -> Result<Option<Vec<u8>>, PlatformError> {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+        use objc2_foundation::NSDictionary;
+        objc2::rc::autoreleasepool(|_| {
+            let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+            // SAFETY: NSPasteboardTypePNG / TIFF 是 AppKit 导出的常量。
+            let (png, tiff) = unsafe {
+                (
+                    objc2_app_kit::NSPasteboardTypePNG,
+                    objc2_app_kit::NSPasteboardTypeTIFF,
+                )
+            };
+            // 截图直接就是 PNG。
+            if let Some(data) = pb.dataForType(png) {
+                return Ok(Some(data.to_vec()));
+            }
+            // 预览、浏览器等复制的图片常常只有 TIFF：转成 PNG。
+            let Some(data) = pb.dataForType(tiff) else {
+                return Ok(None);
+            };
+            let Some(rep) = NSBitmapImageRep::imageRepWithData(&data) else {
+                return Ok(None);
+            };
+            // SAFETY: 属性字典为空，类型是 AppKit 定义的 PNG。
+            let converted = unsafe {
+                rep.representationUsingType_properties(
+                    NSBitmapImageFileType::PNG,
+                    &NSDictionary::new(),
+                )
+            };
+            Ok(converted.map(|d| d.to_vec()))
+        })
+    }
+
+    fn set_image(&mut self, image: &crate::ClipboardImage) -> Result<(), PlatformError> {
+        objc2::rc::autoreleasepool(|_| {
+            let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let data = objc2_foundation::NSData::with_bytes(image.png());
+            // SAFETY: 同上。
+            if pb.setData_forType(Some(&data), unsafe { objc2_app_kit::NSPasteboardTypePNG }) {
+                Ok(())
+            } else {
+                Err(PlatformError::Os("写入剪贴板失败".into()))
+            }
+        })
+    }
+
     fn change_count(&self) -> u64 {
         objc2::rc::autoreleasepool(|_| {
             objc2_app_kit::NSPasteboard::generalPasteboard().changeCount() as u64
@@ -828,5 +876,30 @@ mod tests {
         if let Some(t) = before {
             cb.set_text(&t).unwrap();
         }
+    }
+
+    /// 会改写系统剪贴板，默认不运行：cargo test -p flow-platform -- --ignored
+    #[test]
+    #[ignore]
+    fn clipboard_image_round_trip() {
+        // 1×1 的红色 PNG。
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[255, 0, 0]).unwrap();
+        writer.finish().unwrap();
+
+        let mut cb = MacClipboard;
+        let count = cb.change_count();
+        let image = crate::ClipboardImage::from_png(png.clone()).unwrap();
+        cb.set_image(&image).unwrap();
+        assert!(cb.change_count() > count);
+        assert_eq!(cb.get_image().unwrap(), Some(png));
+        // 图片不是文字也不是文件。
+        assert_eq!(cb.get_text().unwrap(), None);
+        assert_eq!(cb.get_files().unwrap(), None);
+        assert!(crate::ClipboardImage::from_png(b"not png".to_vec()).is_none());
     }
 }

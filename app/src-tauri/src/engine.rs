@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 
 use flow_core::Rect;
 use flow_core::clipboard::ClipboardSync;
-use flow_core::files::{FileOffer, OfferBook, peer_supports_files};
+use flow_core::files::{
+    FileOffer, IMAGE_FILE_NAME, MAX_IMAGE_BYTES, OfferBook, peer_supports_files,
+    peer_supports_images,
+};
+use flow_core::geometry::Point;
 use flow_core::keys::{InputEvent, KeyCode, Modifiers, PressedState, WinToMacKeys};
 use flow_core::layout::{DeviceId, Display, DisplayId, Layout};
 use flow_core::pairing::{Nonce, PairingCode, commitment, device_id, sas_code, verify_commitment};
@@ -206,7 +210,7 @@ pub struct DeviceView {
     /// 本机的键鼠当前是否在这台设备上。
     pub active: bool,
     pub paused: bool,
-    /// 对方暂停了共享、暂停了本机或锁定了键鼠，暂时不能切过去。
+    /// 对方暂停了共享或暂停了本机，暂时不能切过去。
     pub remote_paused: bool,
 }
 
@@ -412,7 +416,7 @@ struct State {
     config_warning: Option<String>,
     /// 配置文件读不了也备份不了：这次运行不写配置，避免覆盖原文件。
     config_readonly: bool,
-    /// 告诉本机"现在不接受控制"的设备（对方暂停了共享、暂停了本机或锁定了），不往它那边切。
+    /// 告诉本机"现在不接受控制"的设备（对方暂停了共享或暂停了本机），不往它那边切。
     remote_blocked: HashSet<DeviceId>,
 }
 
@@ -423,10 +427,21 @@ struct Session {
     initiator: DeviceId,
     /// 对方支持跨设备复制文件（看版本）。
     files: bool,
+    /// 对方支持复制图片（看版本）；不支持时图片按普通文件发过去。
+    images: bool,
     /// 对方支持 0.1.7 新增的消息：心跳回执、`Availability`（看版本）。
     acks: bool,
     /// 上次告诉对方的"本机是否接受它控制"；`None` 表示还没发过。
     accepting_sent: Option<bool>,
+}
+
+/// 可以收发剪贴板的一台设备。
+struct ClipPeer {
+    tx: mpsc::UnboundedSender<Message>,
+    /// 可以发文件清单给它。
+    files: bool,
+    /// 它能把收到的图片直接写入剪贴板。
+    images: bool,
 }
 
 struct Pairing {
@@ -816,12 +831,10 @@ impl Engine {
     }
 
     /// 本机现在是否接受 `peer` 的控制（见 [`accepts_control`]）。
-    fn accepting(st: &State, peer: &DeviceId, controlled_by: Option<&DeviceId>) -> bool {
+    fn accepting(st: &State, peer: &DeviceId) -> bool {
         accepts_control(
             st.config.settings.sharing_paused,
-            st.locked,
             st.config.peer(peer).is_some_and(|p| p.paused),
-            controlled_by == Some(peer),
         )
     }
 
@@ -834,7 +847,7 @@ impl Engine {
             .map(|c| c.by.clone())
     }
 
-    /// 暂停、锁定状态变化后：告诉支持的设备本机是否还接受它控制；正在控制本机、但已不被接受的
+    /// 暂停状态变化后：告诉支持的设备本机是否还接受它控制；正在控制本机、但已不被接受的
     /// （暂停了共享或暂停了它）立即结束，释放它按下的键。只在变化时发送。
     fn sync_availability(&self) {
         let controlled_by = self.controlled_by();
@@ -844,7 +857,7 @@ impl Engine {
             let decisions: Vec<(DeviceId, bool)> = st
                 .sessions
                 .keys()
-                .map(|id| (id.clone(), Self::accepting(&st, id, controlled_by.as_ref())))
+                .map(|id| (id.clone(), Self::accepting(&st, id)))
                 .collect();
             for (id, ok) in decisions {
                 if !ok && controlled_by.as_ref() == Some(&id) {
@@ -1156,10 +1169,33 @@ impl Engine {
         // 低延迟模式要先装好后台服务才能开，只能通过 `set_low_latency` 改；
         // 界面传来的是整份设置的快照，这一项以引擎里的为准。
         let low_latency = st.config.settings.low_latency;
+        let was_paused = st.config.settings.sharing_paused;
         st.config.settings = Settings {
             low_latency,
             ..settings
         };
+        let paused = st.config.settings.sharing_paused;
+        if paused != was_paused {
+            // 与收发路径按同一顺序持锁，暂停返回后不能再写入远端剪贴板或启动新传输。
+            let mut cb = self.inner.clipboard.lock().expect("clipboard");
+            cb.sync.enabled = !paused && st.config.settings.clipboard;
+            cb.sync.forget_applied();
+            // 暂停期间复制的内容不在恢复时补发。
+            cb.last_count = cb.access.as_mut().map(|a| a.change_count());
+            if paused {
+                let mut f = self.inner.files.lock().expect("files");
+                f.epoch += 1;
+                f.book.clear();
+                f.unoffered = None;
+                f.transfers.cancel_all();
+                if let Some((offer, _)) = f.local.take() {
+                    for s in st.sessions.values().filter(|s| s.files) {
+                        let _ =
+                            s.tx.send(Message::FileOffer(FileOffer::withdrawn(offer.id)));
+                    }
+                }
+            }
+        }
         self.save(&st);
         drop(st);
         self.emit();
@@ -1960,7 +1996,8 @@ impl Engine {
         info!(device = %short(&peer), datagram = moves.enabled(), "鼠标位置发送方式");
         // 单元测试里两端都是当前（未发布的）版本号，直接视为支持。
         let files = peer_supports_files(&version) || cfg!(test);
-        info!(device = %short(&peer), version = %version, files, "对方版本");
+        let images = files && (peer_supports_images(&version) || cfg!(test));
+        info!(device = %short(&peer), version = %version, files, images, "对方版本");
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let initiator_id = if initiator {
             self.local_id().clone()
@@ -1985,6 +2022,7 @@ impl Engine {
                     conn: conn.clone(),
                     initiator: initiator_id,
                     files,
+                    images,
                     acks,
                     accepting_sent: None,
                 },
@@ -2022,10 +2060,10 @@ impl Engine {
             if files && st.files_allowed(&peer) {
                 let mut f = self.inner.files.lock().expect("files");
                 if let Some((offer, _)) = &f.local {
-                    let _ = tx.send(Message::FileOffer(offer.clone()));
+                    let _ = tx.send(offer.clone().into_message(images));
                 } else if let Some((paths, epoch)) = f.unoffered.take() {
                     // 复制时还没有设备连着，清单没整理过：现在整理并发给所有能收的设备。
-                    tokio::spawn(self.clone().offer_files(paths, epoch));
+                    tokio::spawn(self.clone().offer_files(paths, epoch, false));
                 }
             }
         }
@@ -2182,7 +2220,11 @@ impl Engine {
                 Ok(Some(Message::Clipboard { origin, seq, text })) => {
                     self.on_remote_clipboard(&peer, &origin, seq, &text)
                 }
-                Ok(Some(Message::FileOffer(offer))) => self.on_file_offer(&peer, offer),
+                Ok(Some(msg @ (Message::FileOffer(_) | Message::ImageOffer(_)))) => {
+                    if let Some(offer) = FileOffer::from_message(msg) {
+                        self.on_file_offer(&peer, offer);
+                    }
+                }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             }
@@ -2283,6 +2325,11 @@ impl Engine {
     async fn control_event_loop(self, mut rx: mpsc::UnboundedReceiver<ControlEvent>) {
         let mut was_remote = false;
         while let Some(ev) = rx.recv().await {
+            if let ControlEvent::Returned(at) = &ev {
+                // 键鼠已经回到本机（前一个 `Changed` 处理过了），这里只负责浮光。
+                self.glow_on_return(*at);
+                continue;
+            }
             if let ControlEvent::Lost(id) = &ev {
                 // 用户自己移除或暂停了正在控制的设备：键鼠回到本机是预期的，不提示"连接中断"。
                 let (by_user, name, refused) = {
@@ -2296,9 +2343,7 @@ impl Engine {
                 };
                 if !by_user {
                     self.notice(if refused {
-                        format!(
-                            "「{name}」暂停了共享或锁定了键鼠，键鼠已回到本机。对方恢复后可以再切过去。"
-                        )
+                        format!("「{name}」暂停了共享，键鼠已回到本机。对方恢复后可以再切过去。")
                     } else {
                         format!("与「{name}」的连接中断，键鼠已回到本机。")
                     });
@@ -2355,9 +2400,8 @@ impl Engine {
     // 剪贴板
     // -----------------------------------------------------------------------
 
-    /// 可以收发剪贴板的设备：已连接且没有被暂停。第二项表示可以发文件清单给它。
-    fn clipboard_peers(&self) -> Option<Vec<(mpsc::UnboundedSender<Message>, bool)>> {
-        let st = self.lock();
+    /// 可以收发剪贴板的设备：已连接且没有被暂停。
+    fn clipboard_peers(st: &State) -> Option<Vec<ClipPeer>> {
         if !st.config.settings.clipboard || st.config.settings.sharing_paused {
             return None;
         }
@@ -2365,12 +2409,16 @@ impl Engine {
             .sessions
             .iter()
             .filter(|(id, _)| st.config.peer(id).is_some_and(|p| !p.paused))
-            .map(|(id, s)| (s.tx.clone(), s.files && st.files_allowed(id)))
+            .map(|(id, s)| ClipPeer {
+                tx: s.tx.clone(),
+                files: s.files && st.files_allowed(id),
+                images: s.images,
+            })
             .collect();
         Some(peers)
     }
 
-    /// 定时检查本机剪贴板：新的文本发给其他设备；复制了文件则发文件清单。
+    /// 定时检查本机剪贴板：新的文本发给其他设备；复制了文件或图片（截图）则发清单。
     async fn clipboard_loop(self) {
         if !self.inner.input {
             return;
@@ -2381,13 +2429,11 @@ impl Engine {
                 return;
             }
             // `None`：共享剪贴板关着或暂停了；空列表：开着但现在没有设备连着。
-            let peers = self.clipboard_peers();
-            let files_on = {
+            let (epoch, withdrawn, files, image, msg, peers) = {
                 let st = self.lock();
+                let peers = Self::clipboard_peers(&st);
                 let s = &st.config.settings;
-                s.clipboard && s.clipboard_files && !s.sharing_paused
-            };
-            let (epoch, withdrawn, files, msg, peers) = {
+                let files_on = s.clipboard && s.clipboard_files && !s.sharing_paused;
                 let mut cb = self.inner.clipboard.lock().expect("clipboard");
                 cb.sync.enabled = peers.is_some();
                 if cb.access.is_none() {
@@ -2422,7 +2468,7 @@ impl Engine {
                 let Some(access) = cb.access.as_mut() else {
                     continue;
                 };
-                let capable = peers.as_ref().is_some_and(|p| p.iter().any(|(_, f)| *f));
+                let capable = peers.as_ref().is_some_and(|p| p.iter().any(|p| p.files));
                 let mut files = if capable || files_on {
                     match access.get_files() {
                         Ok(f) => f,
@@ -2451,29 +2497,43 @@ impl Engine {
                         None
                     }
                 };
+                // 既不是文件也没有文字：可能是截图或复制的图片，稍后在后台读出来（转换较慢，不在这里持锁做）。
+                // 有文字时不看图片：表格、文档软件复制文字时会顺带放一张渲染图。
+                let image = capable && files.is_none() && text.as_deref().is_none_or(str::is_empty);
                 let msg = text.and_then(|t| cb.sync.on_local_change(&t));
-                (epoch, withdrawn, files, msg, peers)
+                (epoch, withdrawn, files, image, msg, peers)
             };
+            // 读取剪贴板后可能刚好暂停了共享；按当前状态和代号核对后再投递。
+            let st = self.lock();
+            if st.config.settings.sharing_paused
+                || !st.config.settings.clipboard
+                || self.inner.files.lock().expect("files").epoch != epoch
+            {
+                continue;
+            }
             if let Some(id) = withdrawn {
-                for (tx, _) in peers.iter().filter(|(_, f)| *f) {
-                    let _ = tx.send(Message::FileOffer(FileOffer::withdrawn(id)));
+                for p in peers.iter().filter(|p| p.files) {
+                    let _ = p.tx.send(Message::FileOffer(FileOffer::withdrawn(id)));
                 }
             }
             match files {
                 Some(paths) => {
                     // 复制了文件：支持的设备收清单；旧版本照旧收文字（Finder 会附带文件名）。
                     if let Some(msg) = msg {
-                        for (tx, _) in peers.iter().filter(|(_, f)| !*f) {
-                            let _ = tx.send(msg.clone());
+                        for p in peers.iter().filter(|p| !p.files) {
+                            let _ = p.tx.send(msg.clone());
                         }
                     }
-                    tokio::spawn(self.clone().offer_files(paths, epoch));
+                    tokio::spawn(self.clone().offer_files(paths, epoch, false));
+                }
+                None if image => {
+                    tokio::spawn(self.clone().offer_image(epoch));
                 }
                 None => {
                     if let Some(msg) = msg {
                         debug!(peers = peers.len(), "发送剪贴板");
-                        for (tx, _) in peers {
-                            let _ = tx.send(msg.clone());
+                        for p in peers {
+                            let _ = p.tx.send(msg.clone());
                         }
                     }
                 }
@@ -2485,12 +2545,10 @@ impl Engine {
         if !self.inner.input {
             return;
         }
-        let allowed = {
-            let st = self.lock();
-            st.config.settings.clipboard
-                && !st.config.settings.sharing_paused
-                && st.config.peer(peer).is_some_and(|p| !p.paused)
-        };
+        let st = self.lock();
+        let allowed = st.config.settings.clipboard
+            && !st.config.settings.sharing_paused
+            && st.config.peer(peer).is_some_and(|p| !p.paused);
         if !allowed {
             return;
         }
@@ -2547,9 +2605,46 @@ impl Engine {
         }
     }
 
+    /// 本机剪贴板里可能是图片（截图、复制的图片）：读出来存成临时 PNG 文件，按图片提供给其他设备。
+    /// `epoch` 是发现时剪贴板的代。
+    async fn offer_image(self, epoch: u64) {
+        let staged = tokio::task::spawn_blocking(move || -> Result<Option<PathBuf>, String> {
+            // 读取和转换可能要几百毫秒：单独开一个剪贴板访问，不占引擎的锁。
+            let mut access = flow_platform::clipboard().map_err(|e| e.to_string())?;
+            let Some(png) = access.get_image().map_err(|e| e.to_string())? else {
+                return Ok(None);
+            };
+            if png.len() as u64 > MAX_IMAGE_BYTES {
+                return Err(format!(
+                    "图片太大（超过 {} MB），请先存成文件再复制。",
+                    MAX_IMAGE_BYTES >> 20
+                ));
+            }
+            // 临时文件只留最新的一张；每次用新的子目录，不改动可能还在发送的旧文件名。
+            let base = std::env::temp_dir().join("flowacross-clipboard");
+            let _ = std::fs::remove_dir_all(&base);
+            let dir = base.join(epoch.to_string());
+            let path = dir.join(IMAGE_FILE_NAME);
+            std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &png))
+                .map_err(|e| transfer::io_text(&path, &e))?;
+            Ok(Some(path))
+        })
+        .await;
+        match staged {
+            Ok(Ok(Some(path))) => self.offer_files(vec![path], epoch, true).await,
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(e)) => {
+                warn!(error = %e, "读取剪贴板里的图片失败");
+                self.notice(format!("复制的图片无法共享给其他电脑：{e}"));
+            }
+        }
+    }
+
     /// 把本机这些文件作为当前复制的内容提供给其他设备：整理清单并发出去。
     /// `epoch` 是发现时剪贴板的代，整理期间剪贴板又变了就放弃。
-    pub(crate) async fn offer_files(self, paths: Vec<PathBuf>, epoch: u64) {
+    /// `image`：这是剪贴板里的一张图片存成的 PNG 文件，对方收完后写入剪贴板的是图片本身。
+    pub(crate) async fn offer_files(self, paths: Vec<PathBuf>, epoch: u64, image: bool) {
         let roots = paths.clone();
         let summary = tokio::task::spawn_blocking(move || {
             transfer::walk(&roots).map(|entries| transfer::summarize(&roots, &entries))
@@ -2564,6 +2659,10 @@ impl Engine {
                 return;
             }
         };
+        let st = self.lock();
+        if st.config.settings.sharing_paused {
+            return;
+        }
         let offer = {
             let mut f = self.inner.files.lock().expect("files");
             if f.epoch != epoch {
@@ -2572,25 +2671,26 @@ impl Engine {
             f.next_offer += 1;
             let offer = FileOffer {
                 id: f.next_offer,
+                image: image && summary.items == 1 && summary.files == 1,
                 ..summary
             };
             f.local = Some((offer.clone(), paths));
             offer
         };
-        let peers: Vec<_> = self
-            .clipboard_peers()
+        let peers: Vec<_> = Self::clipboard_peers(&st)
             .unwrap_or_default()
             .into_iter()
-            .filter(|(_, f)| *f)
+            .filter(|p| p.files)
             .collect();
         info!(
             files = offer.files,
             bytes = offer.bytes,
+            image = offer.image,
             peers = peers.len(),
             "复制了文件，已通知其他设备"
         );
-        for (tx, _) in peers {
-            let _ = tx.send(Message::FileOffer(offer.clone()));
+        for p in peers {
+            let _ = p.tx.send(offer.clone().into_message(p.images));
         }
     }
 
@@ -2601,17 +2701,20 @@ impl Engine {
     }
 
     fn on_file_offer(&self, peer: &DeviceId, offer: FileOffer) {
-        if !self.lock().files_allowed(peer) {
-            return;
-        }
         let controlled = self.inner.controlled.lock().expect("controlled").is_some();
         debug!(device = %short(peer), items = offer.items, bytes = offer.bytes, "收到文件清单");
-        let fetch = self.inner.files.lock().expect("files").book.on_offer(
-            peer.clone(),
-            offer,
-            controlled,
-            self.now_ms(),
-        );
+        let fetch = {
+            let st = self.lock();
+            if !st.files_allowed(peer) {
+                return;
+            }
+            self.inner.files.lock().expect("files").book.on_offer(
+                peer.clone(),
+                offer,
+                controlled,
+                self.now_ms(),
+            )
+        };
         if let Some((from, offer)) = fetch {
             self.start_fetch(from, offer);
         }
@@ -2620,26 +2723,25 @@ impl Engine {
 
     /// 键鼠来到本机（开始被控制，或控制远端后回到本机）：有其他设备刚复制的文件就去取。
     fn on_arrive(&self) {
-        let fetch = self
-            .inner
-            .files
-            .lock()
-            .expect("files")
-            .book
-            .on_arrive(self.now_ms());
-        let Some((from, offer)) = fetch else {
-            return;
+        let fetch = {
+            let st = self.lock();
+            if st.config.settings.sharing_paused {
+                return;
+            }
+            let mut f = self.inner.files.lock().expect("files");
+            let Some((from, offer)) = f.book.on_arrive(self.now_ms()) else {
+                return;
+            };
+            if st.files_allowed(&from) {
+                Some((from, offer))
+            } else {
+                // 单独暂停这台设备时留着清单，等用户手动接收；全局暂停会清空清单。
+                f.book.restore(from, offer);
+                None
+            }
         };
-        if self.lock().files_allowed(&from) {
+        if let Some((from, offer)) = fetch {
             self.start_fetch(from, offer);
-        } else {
-            // 此刻暂停了共享或这台设备：清单留着，恢复后可以在侧栏手动接收。
-            self.inner
-                .files
-                .lock()
-                .expect("files")
-                .book
-                .restore(from, offer);
         }
     }
 
@@ -2696,6 +2798,10 @@ impl Engine {
             return;
         };
         let (id, ticket, epoch) = {
+            let st = self.lock();
+            if !st.files_allowed(&peer) {
+                return;
+            }
             let mut f = self.inner.files.lock().expect("files");
             // 剪贴板只有一份：新的文件取代还没收完的旧文件。
             f.transfers.cancel_incoming();
@@ -2739,18 +2845,32 @@ impl Engine {
         let label = offer.label();
         match result {
             Ok(paths) => {
-                let pasted = self.paste_files(&paths, epoch);
-                info!(files = paths.len(), pasted, "文件接收完成");
+                let pasted = if offer.image {
+                    self.paste_image(&paths, epoch)
+                } else {
+                    self.paste_files(&paths, epoch)
+                };
+                info!(
+                    files = paths.len(),
+                    image = offer.image,
+                    pasted,
+                    "文件接收完成"
+                );
                 self.inner
                     .files
                     .lock()
                     .expect("files")
                     .transfers
                     .finish(id, Ok(pasted));
-                self.notice(if pasted {
-                    format!("已收到「{name}」的「{label}」，可以直接粘贴。")
-                } else {
-                    format!("已收到「{name}」的「{label}」，保存在下载文件夹的「流界」里。")
+                self.notice(match (offer.image, pasted) {
+                    (true, true) => format!("已收到「{name}」复制的图片，可以直接粘贴。"),
+                    (true, false) => {
+                        format!("已收到「{name}」复制的图片，保存在下载文件夹的「流界」里。")
+                    }
+                    (false, true) => format!("已收到「{name}」的「{label}」，可以直接粘贴。"),
+                    (false, false) => {
+                        format!("已收到「{name}」的「{label}」，保存在下载文件夹的「流界」里。")
+                    }
                 });
             }
             Err(e) => {
@@ -2769,9 +2889,49 @@ impl Engine {
         self.emit();
     }
 
+    /// 把收到的图片本身（不是文件）写入本机剪贴板，写入后删掉收到的文件：对方复制的是图片，
+    /// 不该在下载文件夹里留下一堆截图。写不进去时文件留着，返回 false。
+    fn paste_image(&self, paths: &[PathBuf], epoch: u64) -> bool {
+        let [path] = paths else {
+            return false;
+        };
+        if !self.inner.input {
+            return false;
+        }
+        // 读文件和（Windows 上）解码都在持锁之前做。
+        let image = match std::fs::metadata(path) {
+            Ok(m) if m.len() <= MAX_IMAGE_BYTES => std::fs::read(path)
+                .ok()
+                .and_then(flow_platform::ClipboardImage::from_png),
+            _ => None,
+        };
+        let Some(image) = image else {
+            warn!("收到的图片无法识别，保留为文件");
+            return false;
+        };
+        let written = self.write_clipboard(epoch, |access| access.set_image(&image));
+        if written {
+            let _ = std::fs::remove_file(path);
+        }
+        written
+    }
+
     /// 把收到的文件写入本机剪贴板。期间用户复制了别的内容就不覆盖。返回是否写入。
     fn paste_files(&self, paths: &[PathBuf], epoch: u64) -> bool {
         if !self.inner.input || paths.is_empty() {
+            return false;
+        }
+        self.write_clipboard(epoch, |access| access.set_files(paths))
+    }
+
+    /// 把收到的内容写入本机剪贴板；暂停了共享，或剪贴板的代已经不是 `epoch`（用户又复制了别的）时不写。
+    fn write_clipboard(
+        &self,
+        epoch: u64,
+        write: impl FnOnce(&mut dyn flow_platform::ClipboardAccess) -> Result<(), PlatformError>,
+    ) -> bool {
+        let st = self.lock();
+        if st.config.settings.sharing_paused {
             return false;
         }
         let mut cb = self.inner.clipboard.lock().expect("clipboard");
@@ -2784,15 +2944,15 @@ impl Engine {
         let Some(access) = cb.access.as_mut() else {
             return false;
         };
-        match access.set_files(paths) {
+        match write(access.as_mut()) {
             Ok(()) => {
-                // 记下写入后的计数，轮询时不会把收到的文件当成本机复制的再发出去。
+                // 记下写入后的计数，轮询时不会把收到的内容当成本机复制的再发出去。
                 let count = access.change_count();
                 cb.last_count = Some(count);
                 true
             }
             Err(e) => {
-                warn!(error = %e, "把文件写入剪贴板失败");
+                warn!(error = %e, "把收到的内容写入剪贴板失败");
                 false
             }
         }
@@ -2810,16 +2970,20 @@ impl Engine {
             tx.reset();
             return;
         };
-        let allowed = self.lock().files_allowed(&peer);
-        let local = self
-            .inner
-            .files
-            .lock()
-            .expect("files")
-            .local
-            .clone()
-            .filter(|(o, _)| o.id == id && allowed);
-        let Some((offer, paths)) = local else {
+        let transfer = {
+            let st = self.lock();
+            let mut f = self.inner.files.lock().expect("files");
+            f.local
+                .clone()
+                .filter(|(o, _)| o.id == id && st.files_allowed(&peer))
+                .map(|(offer, paths)| {
+                    let (tid, ticket) =
+                        f.transfers
+                            .start(peer.clone(), false, offer.label(), offer.bytes);
+                    (offer, paths, tid, ticket)
+                })
+        };
+        let Some((offer, paths, tid, ticket)) = transfer else {
             let _ = tx
                 .send(&Message::FileError {
                     reason: "复制的内容已经变了，请在那台电脑上重新复制文件。".into(),
@@ -2828,12 +2992,6 @@ impl Engine {
             tx.finish();
             return;
         };
-        let (tid, ticket) = self.inner.files.lock().expect("files").transfers.start(
-            peer.clone(),
-            false,
-            offer.label(),
-            offer.bytes,
-        );
         info!(device = %short(&peer), files = offer.files, bytes = offer.bytes, "开始发送文件");
         self.emit();
         let result = transfer::send(&mut tx, paths, &ticket, || self.progress()).await;
@@ -2891,6 +3049,10 @@ impl Engine {
             self.on_enter(peer, peer_os, session, &display, x, y);
             return;
         }
+        let st = self.lock();
+        if !Self::accepting(&st, peer) {
+            return;
+        }
         // 只接受当前控制本机的设备发来的输入，并记录它按下的键。
         let action = {
             let mut guard = self.inner.controlled.lock().expect("controlled");
@@ -2932,7 +3094,10 @@ impl Engine {
             Some(Remote::Button(b, down)) => self.inject(|i| i.button(b, down)),
             Some(Remote::Wheel(dx, dy)) => self.inject(|i| i.wheel(dx, dy)),
             Some(Remote::Key(code, down, repeat)) => self.inject(|i| i.key(code, down, repeat)),
-            Some(Remote::Release) => self.release_controlled(Some(peer)),
+            Some(Remote::Release) => {
+                drop(st);
+                self.release_controlled(Some(peer));
+            }
             Some(Remote::ReleaseKeys) => {
                 let events = self
                     .inner
@@ -2952,12 +3117,11 @@ impl Engine {
     }
 
     fn on_enter(&self, peer: &DeviceId, peer_os: Os, session: u32, display: &str, x: f64, y: f64) {
-        // 暂停共享、暂停了这台设备、锁定时不接受（锁定只挡新进来的）。先判断，被拒绝时
+        // 暂停共享或暂停了这台设备时不接受；锁定只限制本机切出去。先判断，被拒绝时
         // 不能动正在控制本机的那台。之后它发来的输入因为不是当前控制者而被忽略。
-        let controlled_by = self.controlled_by();
         let refused = {
             let mut st = self.lock();
-            let ok = Self::accepting(&st, peer, controlled_by.as_ref());
+            let ok = Self::accepting(&st, peer);
             if !ok && let Some(s) = st.sessions.get_mut(peer) {
                 // 对方可能还没收到"不接受"就切过来了（或者它是旧版本）：再告诉它一次。
                 if s.acks {
@@ -2968,11 +3132,15 @@ impl Engine {
             !ok
         };
         if refused {
-            info!(device = %short(peer), "本机已暂停共享或锁定，拒绝被控制");
+            info!(device = %short(peer), "本机已暂停共享，拒绝被控制");
             return;
         }
         // 换了一台设备来控制：先把上一台按下的键释放掉。
         self.release_controlled(None);
+        let st = self.lock();
+        if !Self::accepting(&st, peer) {
+            return;
+        }
         // 本机正在控制别的设备时被接管（用户拿起了那台电脑自己的鼠标推过来）：
         // 先释放远端按键、解锁本机光标，再接受对方的控制，否则两边都以为自己是控制方。
         if self.controller().yield_control() {
@@ -3000,9 +3168,54 @@ impl Engine {
             last_seen: Instant::now(),
         });
         self.inject(|i| i.move_to(display, x, y));
+        self.edge_glow(&st, display, x, y);
+        drop(st);
         // 键鼠来到本机：对方刚复制的文件可能要在这里粘贴。
         self.on_arrive();
         self.emit();
+    }
+
+    /// 键鼠来到了本机这块显示器的 `(x, y)`（显示器内的逻辑坐标）：在它进来的那条屏幕边上闪一道浮光。
+    fn edge_glow(&self, st: &State, display: &str, x: f64, y: f64) {
+        if !self.inner.input || !st.config.settings.edge_glow {
+            return;
+        }
+        let Some(run) = &self.inner.main_thread else {
+            return;
+        };
+        let Some(d) = st.local_displays.iter().find(|d| d.local_id == display) else {
+            return;
+        };
+        // 落点贴着它穿过的那条边。
+        let rect = Rect::new(0.0, 0.0, d.rect.width, d.rect.height);
+        let p = rect.clamp(Point::new(x, y));
+        let edge = rect.nearest_edge(p);
+        let along = rect.edge_fraction(edge, p);
+        let display = display.to_owned();
+        // macOS 的窗口只能在主线程上建。
+        run(Box::new(move || {
+            flow_platform::edge_glow(&display, edge, along)
+        }));
+    }
+
+    /// 键鼠从远端穿过屏幕边回到了本机的 `at`（布局坐标）：同样闪一道浮光。
+    fn glow_on_return(&self, at: Point) {
+        let st = self.lock();
+        let (ox, oy) = st.config.local_offset;
+        let p = Point::new(at.x - ox, at.y - oy);
+        // 落点可能正好在屏幕边界上：取最近的一块。
+        let dist = |r: &Rect| {
+            let q = r.clamp(p);
+            (q.x - p.x).abs() + (q.y - p.y).abs()
+        };
+        let Some(d) = st
+            .local_displays
+            .iter()
+            .min_by(|a, b| dist(&a.rect).total_cmp(&dist(&b.rect)))
+        else {
+            return;
+        };
+        self.edge_glow(&st, &d.local_id, p.x - d.rect.x, p.y - d.rect.y);
     }
 
     /// 结束被控制并释放对方按下的所有键。`by` 为 `None` 时不论是谁都释放。
@@ -3407,9 +3620,9 @@ mod tests {
             .any(|d| &d.id == id && d.remote_paused)
     }
 
-    /// 暂停共享、暂停这台设备、锁定都挡住别人控制本机，并告诉对方；锁定不踢掉正在控制本机的那台。
+    /// 暂停挡住双向控制，锁定只限制本机切出去，对方仍可进入。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn pause_and_lock_block_incoming_control() {
+    async fn pause_blocks_incoming_but_lock_allows_it() {
         let (a, b) = paired("a7", "b7").await;
         let (ida, idb) = (a.engine.local_id().clone(), b.engine.local_id().clone());
 
@@ -3443,19 +3656,31 @@ mod tests {
         wait_for("B 结束被控制", || b.engine.controlled_by().is_none()).await;
         wait_for("A 知道被暂停", || remote_paused(&a.engine, &idb)).await;
 
-        // 取消暂停但仍锁定：新的控制进不来。
+        // 取消暂停但仍锁定：A 可以重新进入，锁定不限制对方的键鼠。
         b.engine.set_device_paused(&ida, false);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(remote_paused(&a.engine, &idb), "锁定时仍不接受新的控制");
+        wait_for("锁定时对方仍可进入", || {
+            !remote_paused(&a.engine, &idb)
+        })
+        .await;
         enter(&a.engine, &idb, 3);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(b.engine.controlled_by(), None);
+        wait_for("锁定后 B 仍能被 A 接管", || {
+            b.engine.controlled_by() == Some(ida.clone())
+        })
+        .await;
 
-        // 解锁：恢复。
-        b.engine.set_locked(false);
-        wait_for("解锁后恢复", || !remote_paused(&a.engine, &idb)).await;
+        // 全局暂停会结束已有控制，即使仍保持锁定。
+        s.sharing_paused = true;
+        b.engine.update_settings(s.clone());
+        assert!(b.engine.controlled_by().is_none());
+        wait_for("暂停通知到 A", || remote_paused(&a.engine, &idb)).await;
         enter(&a.engine, &idb, 4);
-        wait_for("B 再次被 A 控制", || {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(b.engine.controlled_by().is_none());
+        s.sharing_paused = false;
+        b.engine.update_settings(s);
+        wait_for("恢复通知到 A", || !remote_paused(&a.engine, &idb)).await;
+        enter(&a.engine, &idb, 5);
+        wait_for("恢复后 B 再次被 A 控制", || {
             b.engine.controlled_by() == Some(ida.clone())
         })
         .await;
@@ -3470,6 +3695,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn copied_files_reach_the_other_device() {
         let (a, b) = paired("a5", "b5").await;
+        a.engine.set_locked(true);
+        b.engine.set_locked(true);
+        assert!(Engine::clipboard_peers(&a.engine.lock()).is_some());
+        assert!(Engine::clipboard_peers(&b.engine.lock()).is_some());
         let src = a.dir.join("src");
         let photos = src.join("照片");
         std::fs::create_dir_all(photos.join("2024")).unwrap();
@@ -3487,7 +3716,7 @@ mod tests {
         let epoch = a.engine.clipboard_epoch();
         a.engine
             .clone()
-            .offer_files(vec![report.clone(), photos.clone()], epoch)
+            .offer_files(vec![report.clone(), photos.clone()], epoch, false)
             .await;
         wait_for("B 收到清单", || b.engine.view().file_offer.is_some()).await;
         let offer = b.engine.view().file_offer.unwrap();
@@ -3529,7 +3758,10 @@ mod tests {
         assert_eq!(leftovers, 0);
 
         // A 的剪贴板换了内容，旧清单取不到了。
-        a.engine.clone().offer_files(vec![photos], epoch).await;
+        a.engine
+            .clone()
+            .offer_files(vec![photos], epoch, false)
+            .await;
         wait_for("第二份清单", || b.engine.view().file_offer.is_some()).await;
         a.engine.inner.files.lock().unwrap().local = None;
         b.engine.accept_files();
@@ -3548,7 +3780,10 @@ mod tests {
         assert!(!recv.join("照片 (1)").exists());
 
         // 同一个文件再复制一次，键鼠来到 B 时自动取回：重名改为「报告 (1).txt」。
-        a.engine.clone().offer_files(vec![report], epoch).await;
+        a.engine
+            .clone()
+            .offer_files(vec![report], epoch, false)
+            .await;
         wait_for("第三份清单", || b.engine.view().file_offer.is_some()).await;
         b.engine.on_arrive();
         assert!(b.engine.view().file_offer.is_none(), "已经开始自动接收");
@@ -3557,6 +3792,166 @@ mod tests {
                 && latest_transfer(&b.engine).is_some_and(|t| t.status == TransferStatus::Done)
         })
         .await;
+    }
+
+    /// A 复制了一张图片（截图）→ B 收到的清单标着"图片" → 收完后按图片处理。
+    /// 测试里不碰系统剪贴板，所以写不进去，图片留在接收文件夹里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn copied_image_is_offered_and_received_as_an_image() {
+        let (a, b) = paired("img-a", "img-b").await;
+        a.engine.set_locked(true);
+        b.engine.set_locked(true);
+        let shot = a.dir.join(flow_core::files::IMAGE_FILE_NAME);
+        let png = b"\x89PNG\r\n\x1a\n fake image body".to_vec();
+        std::fs::write(&shot, &png).unwrap();
+
+        let epoch = a.engine.clipboard_epoch();
+        a.engine.clone().offer_files(vec![shot], epoch, true).await;
+        wait_for("B 收到图片清单", || {
+            b.engine.view().file_offer.is_some()
+        })
+        .await;
+        assert_eq!(b.engine.view().file_offer.unwrap().label, "图片");
+
+        b.engine.accept_files();
+        wait_for("B 收完图片", || {
+            latest_transfer(&b.engine).is_some_and(|t| t.status == TransferStatus::Done)
+        })
+        .await;
+        let t = latest_transfer(&b.engine).unwrap();
+        assert!(t.label == "图片" && !t.pasteable);
+        let saved = b
+            .dir
+            .join("received")
+            .join(flow_core::files::IMAGE_FILE_NAME);
+        assert_eq!(std::fs::read(saved).unwrap(), png);
+        assert!(
+            b.notices
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|n| n.contains("复制的图片"))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pause_clears_offers_and_blocks_file_and_clipboard_sharing_until_resumed() {
+        let (a, b) = paired("pause-offer-a", "pause-offer-b").await;
+        let ida = a.engine.local_id().clone();
+        let file = a.dir.join("暂停测试.txt");
+        std::fs::write(&file, b"pause and resume").unwrap();
+        let epoch = a.engine.clipboard_epoch();
+        a.engine
+            .clone()
+            .offer_files(vec![file.clone()], epoch, false)
+            .await;
+        wait_for("B 收到文件清单", || {
+            b.engine.view().file_offer.is_some()
+        })
+        .await;
+        let stale = b
+            .engine
+            .inner
+            .files
+            .lock()
+            .unwrap()
+            .book
+            .pending()
+            .unwrap()
+            .1
+            .clone();
+        let before = b.engine.clipboard_epoch();
+        {
+            let mut f = b.engine.inner.files.lock().unwrap();
+            f.local = Some((stale.clone(), vec![file.clone()]));
+            f.unoffered = Some((vec![file.clone()], before));
+        }
+        let mut settings = b.engine.settings();
+        settings.sharing_paused = true;
+        b.engine.update_settings(settings.clone());
+        assert!(Engine::clipboard_peers(&b.engine.lock()).is_none());
+        assert!(!b.engine.inner.clipboard.lock().unwrap().sync.enabled);
+        {
+            let f = b.engine.inner.files.lock().unwrap();
+            assert!(f.epoch > before);
+            assert!(f.local.is_none() && f.unoffered.is_none() && f.book.pending().is_none());
+        }
+        // 暂停前已排队的自动/手动请求和异步清单整理都不能启动共享。
+        b.engine.start_fetch(ida.clone(), stale.clone());
+        b.engine.on_file_offer(&ida, stale);
+        b.engine.accept_files();
+        b.engine.on_arrive();
+        b.engine
+            .clone()
+            .offer_files(vec![file.clone()], before, false)
+            .await;
+        assert!(b.engine.view().file_offer.is_none());
+        assert!(b.engine.view().transfers.is_empty());
+        assert!(b.engine.inner.files.lock().unwrap().local.is_none());
+
+        settings.sharing_paused = false;
+        b.engine.update_settings(settings);
+        assert!(Engine::clipboard_peers(&b.engine.lock()).is_some());
+        assert!(b.engine.view().file_offer.is_none(), "恢复后不会重启旧清单");
+        a.engine.clone().offer_files(vec![file], epoch, false).await;
+        wait_for("恢复后能收到新的复制", || {
+            b.engine.view().file_offer.is_some()
+        })
+        .await;
+        b.engine.accept_files();
+        wait_for("恢复后传输完成", || {
+            latest_transfer(&b.engine).is_some_and(|t| t.status == TransferStatus::Done)
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pausing_either_side_cancels_active_file_transfers() {
+        for pause_sender in [false, true] {
+            let (a, b) = paired(
+                &format!("pause-send-{pause_sender}"),
+                &format!("pause-recv-{pause_sender}"),
+            )
+            .await;
+            let file = a.dir.join("传输中.bin");
+            std::fs::File::create(&file)
+                .unwrap()
+                .set_len(256 * 1024 * 1024)
+                .unwrap();
+            let epoch = a.engine.clipboard_epoch();
+            a.engine.clone().offer_files(vec![file], epoch, false).await;
+            wait_for("收到传输清单", || {
+                b.engine.view().file_offer.is_some()
+            })
+            .await;
+            b.engine.accept_files();
+            wait_for("开始传输数据", || {
+                latest_transfer(&b.engine)
+                    .is_some_and(|t| t.status == TransferStatus::Running && t.done > 0)
+            })
+            .await;
+            let paused = if pause_sender { &a.engine } else { &b.engine };
+            let other = if pause_sender { &b.engine } else { &a.engine };
+            let mut settings = paused.settings();
+            settings.sharing_paused = true;
+            paused.update_settings(settings);
+            wait_for("暂停方取消传输", || {
+                latest_transfer(paused).is_some_and(|t| t.status == TransferStatus::Canceled)
+            })
+            .await;
+            wait_for("另一方也停止传输", || {
+                latest_transfer(other).is_some_and(|t| t.status != TransferStatus::Running)
+            })
+            .await;
+            assert!(b.engine.view().file_offer.is_none());
+            assert_eq!(
+                std::fs::read_dir(b.dir.join("received")).unwrap().count(),
+                0,
+                "暂停不留下半个文件"
+            );
+            a.engine.shutdown();
+            b.engine.shutdown();
+        }
     }
 
     /// 接收方取消：两边都停下，不留下半个文件。
@@ -3569,7 +3964,7 @@ mod tests {
         let file = src.join("大文件.bin");
         std::fs::write(&file, vec![1u8; 64 * 1024 * 1024]).unwrap();
         let epoch = a.engine.clipboard_epoch();
-        a.engine.clone().offer_files(vec![file], epoch).await;
+        a.engine.clone().offer_files(vec![file], epoch, false).await;
         wait_for("B 收到清单", || b.engine.view().file_offer.is_some()).await;
         b.engine.accept_files();
         wait_for("开始传输", || {

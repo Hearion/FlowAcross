@@ -8,7 +8,7 @@ import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { FileTransfers } from "./Transfers";
 import type { DeviceView, Settings, StateView } from "./types";
 import { UpdateBanner, useUpdater } from "./Updater";
-import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
+import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlayIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
 
 function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
@@ -17,7 +17,7 @@ function statusChip(d: DeviceView) {
   if (d.paused) return <span className="chip muted">{text}</span>;
   if (d.status === "connected" && d.remote_paused)
     return (
-      <span className="chip muted" title="对方暂停了共享或锁定了键鼠，恢复后可以再切过去">
+      <span className="chip muted" title="对方暂停了共享，恢复后可以再切过去">
         {text}
       </span>
     );
@@ -114,6 +114,7 @@ export default function App() {
           <button
             className={`btn ${state.locked ? "on" : ""}`}
             aria-pressed={state.locked}
+            title="阻止本机键鼠切到其他设备；仍允许对方控制本机，并保留剪贴板和文件共享"
             onClick={() => api.setLocked(!state.locked)}
           >
             <LockIcon />
@@ -122,9 +123,10 @@ export default function App() {
           <button
             className={`btn ${s.sharing_paused ? "on" : ""}`}
             aria-pressed={s.sharing_paused}
+            title={s.sharing_paused ? "恢复键鼠、剪贴板和文件共享" : "暂停双向键鼠、剪贴板和文件共享，并取消正在进行的传输"}
             onClick={() => update({ sharing_paused: !s.sharing_paused })}
           >
-            <PauseIcon />
+            {s.sharing_paused ? <PlayIcon /> : <PauseIcon />}
             {s.sharing_paused ? "恢复共享" : "暂停共享"}
           </button>
           <button

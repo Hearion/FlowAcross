@@ -16,6 +16,16 @@ use thiserror::Error;
 /// 从这个版本起支持跨设备复制文件。对方更旧时不发文件清单（旧版本解析不了新消息，会断开连接）。
 pub const FILE_TRANSFER_SINCE: (u32, u32, u32) = (0, 1, 5);
 
+/// 从这个版本起支持复制图片（截图等剪贴板里只有图片数据的内容，见 [`Message::ImageOffer`]）。
+/// 对方更旧时把图片当成一个普通的 PNG 文件发过去。
+pub const IMAGE_SINCE: (u32, u32, u32) = (0, 2, 0);
+
+/// 剪贴板里的图片转成 PNG 后超过这么多字节就不同步。
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 剪贴板图片存成文件时用的名字（发送方的临时文件，也是对方不支持图片时收到的文件名）。
+pub const IMAGE_FILE_NAME: &str = "剪贴板图片.png";
+
 /// 每个 `FileChunk` 最多这么多字节。
 pub const CHUNK_SIZE: usize = 256 * 1024;
 
@@ -47,6 +57,11 @@ pub struct FileOffer {
     pub files: u64,
     /// 总字节数。
     pub bytes: u64,
+    /// 这是剪贴板里的一张图片（截图等），存成了一个 PNG 文件：对方收完后把图片本身写入剪贴板，
+    /// 而不是文件。不在这个结构里上网络，靠消息种类区分（见 [`Self::into_message`]），
+    /// 这样旧版本照样能解析 `FileOffer`。
+    #[serde(skip)]
+    pub image: bool,
 }
 
 impl FileOffer {
@@ -57,6 +72,33 @@ impl FileOffer {
             items: 0,
             files: 0,
             bytes: 0,
+            image: false,
+        }
+    }
+
+    /// 发给对方的消息。`peer_images`：对方支持复制图片（[`peer_supports_images`]）；
+    /// 不支持时图片按普通文件发，对方收到的是一个 PNG 文件。
+    pub fn into_message(self, peer_images: bool) -> Message {
+        if self.image && peer_images {
+            Message::ImageOffer(self)
+        } else {
+            Message::FileOffer(self)
+        }
+    }
+
+    /// 从收到的消息里取出清单；不是清单消息时返回 `None`。
+    pub fn from_message(msg: Message) -> Option<Self> {
+        match msg {
+            Message::FileOffer(offer) => Some(Self {
+                image: false,
+                ..offer
+            }),
+            // 图片只能是单个文件；撤回一律走 `FileOffer`。
+            Message::ImageOffer(offer) => Some(Self {
+                image: offer.items == 1 && offer.files == 1,
+                ..offer
+            }),
+            _ => None,
         }
     }
 
@@ -66,6 +108,9 @@ impl FileOffer {
 
     /// 给用户看的简短描述：「报告.pdf」或「报告.pdf 等 3 项」。
     pub fn label(&self) -> String {
+        if self.image {
+            return "图片".to_owned();
+        }
         let first = self.names.first().map(String::as_str).unwrap_or("文件");
         match self.items {
             0 | 1 => first.to_owned(),
@@ -80,6 +125,11 @@ impl FileOffer {
 /// 本机开发调试时，先把两边的版本号改到不低于 [`FILE_TRANSFER_SINCE`]。
 pub fn peer_supports_files(peer_version: &str) -> bool {
     version_at_least(peer_version, FILE_TRANSFER_SINCE)
+}
+
+/// 对方是否支持复制图片：版本不低于 [`IMAGE_SINCE`]。
+pub fn peer_supports_images(peer_version: &str) -> bool {
+    version_at_least(peer_version, IMAGE_SINCE)
 }
 
 /// 系统生成的、不值得传的文件。
@@ -362,6 +412,7 @@ mod tests {
             items: 2,
             files: 5,
             bytes,
+            image: false,
         }
     }
 
@@ -372,6 +423,40 @@ mod tests {
         one.items = 1;
         assert_eq!(one.label(), "报告.pdf");
         assert!(FileOffer::withdrawn(3).is_withdrawn());
+    }
+
+    #[test]
+    fn image_offers_use_their_own_message_and_fall_back_to_files() {
+        let image = FileOffer {
+            id: 4,
+            names: vec![IMAGE_FILE_NAME.into()],
+            items: 1,
+            files: 1,
+            bytes: 9,
+            image: true,
+        };
+        assert_eq!(image.label(), "图片");
+        // 支持图片的设备：单独的消息，编解码后还是图片。
+        let msg = image.clone().into_message(true);
+        assert!(matches!(msg, Message::ImageOffer(_)));
+        let bytes = crate::protocol::encode_payload(&msg).unwrap();
+        let back = crate::protocol::decode_payload(&bytes).unwrap();
+        assert_eq!(FileOffer::from_message(back), Some(image.clone()));
+        // 旧版本：普通文件清单，对方收到一个 PNG 文件。
+        let msg = image.clone().into_message(false);
+        assert!(matches!(msg, Message::FileOffer(_)));
+        let got = FileOffer::from_message(msg).unwrap();
+        assert!(!got.image);
+        assert_eq!(got.label(), IMAGE_FILE_NAME);
+        // 普通文件不会变成图片；声称是图片却不止一个文件的按文件处理。
+        assert!(matches!(
+            offer(1, 1).into_message(true),
+            Message::FileOffer(_)
+        ));
+        let odd = FileOffer::from_message(Message::ImageOffer(offer(1, 1))).unwrap();
+        assert!(!odd.image);
+        assert_eq!(FileOffer::from_message(Message::FileEnd), None);
+        assert!(peer_supports_images("0.2.0") && !peer_supports_images("0.1.99"));
     }
 
     #[test]

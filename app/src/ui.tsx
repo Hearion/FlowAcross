@@ -109,6 +109,14 @@ export function PauseIcon() {
   );
 }
 
+export function PlayIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function GearIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">

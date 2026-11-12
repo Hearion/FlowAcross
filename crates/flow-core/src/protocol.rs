@@ -184,11 +184,15 @@ pub enum Message {
     PairCommit([u8; 32]),
     /// 配对第二步（响应方）和第三步（发起方公开承诺过的随机数）。
     PairNonce([u8; 32]),
-    /// 本机现在是否接受对方的控制（暂停共享、暂停了这台设备、锁定时为 false）。
+    /// 本机现在是否接受对方的控制（暂停共享或暂停了这台设备时为 false；锁定在本机不影响）。
     /// 会话建立时和变化时发送；对方据此不再把键鼠切过来，正在控制的立即回到它自己那边。
     Availability {
         accepting: bool,
     },
+    // ---- 以下为 0.2.0 新增，只发给版本不低于 [`crate::files::IMAGE_SINCE`] 的设备。
+    /// 本机剪贴板里是一张图片（截图等）：和 `FileOffer` 一样只发清单，内容是一个 PNG 文件，
+    /// 对方取回后把图片本身写入剪贴板。撤回仍用 `FileOffer`。
+    ImageOffer(FileOffer),
 }
 
 /// 从这个版本起支持心跳回执（[`Message::HeartbeatAck`]）、带承诺的配对（[`Message::PairCommit`]）
@@ -425,6 +429,7 @@ mod tests {
                 items: 1,
                 files: 1,
                 bytes: 1024,
+                image: false,
             }),
             Message::FileRequest { id: 4 },
             Message::FileEntry {

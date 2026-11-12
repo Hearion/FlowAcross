@@ -20,7 +20,7 @@ pub struct SwitchPolicy {
     pub dwell_ms: u64,
     /// 屏幕角落多大范围内（逻辑点）不触发切换，避免误触系统触发角 / 开始菜单。
     pub corner_deadzone: f64,
-    /// 锁定在当前设备：边缘切换失效（快捷键切换不受影响）。
+    /// 锁定在本机：禁止本机键鼠通过边缘或快捷键切到其他设备，不影响对方控制本机。
     pub locked: bool,
 }
 
@@ -185,16 +185,10 @@ impl EdgeSwitcher {
 
 /// 本机是否接受某台设备来控制。
 ///
-/// - 暂停共享（`sharing_paused`）、暂停了这台设备（`peer_paused`）：两个方向都停，正在进行的控制也结束；
-/// - 锁定（`locked`）：只是不让新的设备切进来。正在控制本机的那台不受影响——用户可能正是用它的
-///   键鼠点了本机的「锁定」，意思是"留在这台"，不能把他踢回去。
-pub fn accepts_control(
-    sharing_paused: bool,
-    locked: bool,
-    peer_paused: bool,
-    peer_is_controlling: bool,
-) -> bool {
-    !sharing_paused && !peer_paused && (!locked || peer_is_controlling)
+/// 暂停共享或暂停这台设备时，两个方向都停，正在进行的控制也结束。
+/// 「锁定在本机」只限制本机键鼠切出去，不参与是否接受对方控制的判断。
+pub fn accepts_control(sharing_paused: bool, peer_paused: bool) -> bool {
+    !sharing_paused && !peer_paused
 }
 
 #[cfg(test)]
@@ -203,16 +197,11 @@ mod tests {
     use crate::layout::DeviceId;
 
     #[test]
-    fn pause_and_lock_block_incoming_control() {
-        assert!(accepts_control(false, false, false, false));
-        // 暂停共享、暂停这台设备：一律不接受，正在控制的也不行。
-        assert!(!accepts_control(true, false, false, false));
-        assert!(!accepts_control(true, false, false, true));
-        assert!(!accepts_control(false, false, true, false));
-        assert!(!accepts_control(false, false, true, true));
-        // 锁定：挡住新进来的，正在控制本机的那台保持。
-        assert!(!accepts_control(false, true, false, false));
-        assert!(accepts_control(false, true, false, true));
+    fn pause_blocks_incoming_control() {
+        assert!(accepts_control(false, false));
+        assert!(!accepts_control(true, false));
+        assert!(!accepts_control(false, true));
+        assert!(!accepts_control(true, true));
     }
 
     fn did(dev: &str) -> DisplayId {

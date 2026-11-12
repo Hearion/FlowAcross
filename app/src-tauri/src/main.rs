@@ -97,7 +97,7 @@ fn main() {
             let pause =
                 CheckMenuItem::with_id(app, "pause", "暂停共享", true, false, None::<&str>)?;
             let lock =
-                CheckMenuItem::with_id(app, "lock", "锁定在当前电脑", true, false, None::<&str>)?;
+                CheckMenuItem::with_id(app, "lock", "锁定在本机", true, false, None::<&str>)?;
             let logs = MenuItem::with_id(app, "logs", "打开日志文件夹", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出流界", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;

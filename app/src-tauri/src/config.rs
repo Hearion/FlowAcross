@@ -47,11 +47,13 @@ pub struct Settings {
     pub corner_guard: bool,
     /// 尺寸不同的屏幕之间如何对应。
     pub mapping: EdgeMapping,
+    /// 键鼠从别的电脑来到本机时，在它进来的那条屏幕边上闪一道浮光。
+    pub edge_glow: bool,
     /// 共享剪贴板文本。
     pub clipboard: bool,
     /// 共享剪贴板时也传复制的文件（需要 `clipboard` 同时打开）。
     pub clipboard_files: bool,
-    /// 暂停共享（键鼠不再流转到其他设备，连接保持）。
+    /// 暂停全部互通：双向键鼠、剪贴板、文件共享及正在进行的传输；设备连接保持。
     pub sharing_paused: bool,
     /// 启动时和之后每隔几小时检查一次新版本（只提示，不自动安装）。
     pub auto_check_updates: bool,
@@ -83,6 +85,7 @@ impl Default for Settings {
             dwell_ms: 0,
             corner_guard: true,
             mapping: EdgeMapping::Continuous,
+            edge_glow: true,
             clipboard: true,
             clipboard_files: true,
             sharing_paused: false,

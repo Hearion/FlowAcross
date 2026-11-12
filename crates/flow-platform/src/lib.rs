@@ -2,13 +2,20 @@
 //!
 //! 这里定义 Engine 依赖的接口，并按 `cfg(target_os)` 选择 macOS / Windows 实现。
 //!
-//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本和文件（macOS、Windows），系统权限检测（macOS）。
+//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本、文件和图片（macOS、Windows），系统权限检测（macOS）。
 
+// Windows 位图和 PNG 互转（纯字节处理）。只有 Windows 用到，但在所有平台编译，方便单元测试。
+#[cfg_attr(not(windows), allow(dead_code))]
+mod dib;
+// 屏幕边缘浮光的形状和节奏（纯计算）。逐帧渲染只有 Windows 用到，同样在所有平台编译。
+mod glow;
 pub mod keymap;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_awdl;
+#[cfg(target_os = "macos")]
+mod macos_glow;
 #[cfg(target_os = "macos")]
 mod macos_input;
 // 生成以 root 运行的安装命令（纯字符串处理）。只有 macOS 用到，但在所有平台编译，方便单元测试。
@@ -16,6 +23,8 @@ mod macos_input;
 mod root_install;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_glow;
 #[cfg(windows)]
 mod windows_input;
 
@@ -42,7 +51,7 @@ pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
     return Err(PlatformError::Unsupported("键鼠注入"));
 }
 
-/// 当前系统的剪贴板（纯文本和文件）。
+/// 当前系统的剪贴板（纯文本、文件和图片）。
 pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     #[cfg(target_os = "macos")]
     return Ok(Box::new(macos_input::MacClipboard));
@@ -62,6 +71,18 @@ pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     windows_input::set_cursor_captured(captured, restore_at);
     #[cfg(not(any(target_os = "macos", windows)))]
     let _ = (captured, restore_at);
+}
+
+/// 键鼠从别的设备来到本机时，在它进来的那条屏幕边上闪一道浮光（约 0.75 秒，不抢焦点、鼠标可穿透）。
+/// `display_local_id`：本机显示器；`along`：进入点在这条边上的位置，0..1（左右边从上往下，上下边从左往右）。
+/// macOS 上必须在主线程调用（其他线程调用时忽略）；Windows 上任意线程都可以，动画在单独的线程里播。
+pub fn edge_glow(display_local_id: &str, edge: flow_core::geometry::Edge, along: f64) {
+    #[cfg(target_os = "macos")]
+    macos_glow::show(display_local_id, edge, along);
+    #[cfg(windows)]
+    windows_glow::show(display_local_id, edge, along);
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = (display_local_id, edge, along);
 }
 
 /// 当前系统的显示器枚举实现。
@@ -249,8 +270,40 @@ pub trait ClipboardAccess: Send {
     fn get_files(&mut self) -> Result<Option<Vec<std::path::PathBuf>>, PlatformError>;
     /// 把文件放进剪贴板（替换原有内容），之后可以在 Finder / 资源管理器里粘贴。
     fn set_files(&mut self, paths: &[std::path::PathBuf]) -> Result<(), PlatformError>;
+    /// 剪贴板里的图片（截图、在浏览器或看图软件里复制的图片），统一转成 PNG；没有图片时返回 `None`。
+    /// 大图转换要几十到几百毫秒，不要在持有引擎状态锁时调用。
+    fn get_image(&mut self) -> Result<Option<Vec<u8>>, PlatformError>;
+    /// 把一张图片放进剪贴板（替换原有内容），之后可以粘贴进聊天窗口、文档和画图软件。
+    fn set_image(&mut self, image: &ClipboardImage) -> Result<(), PlatformError>;
     /// 剪贴板变化计数（macOS changeCount / Windows GetClipboardSequenceNumber），用于检测变化。
     fn change_count(&self) -> u64;
+}
+
+/// 准备好写入剪贴板的图片。Windows 上要先把 PNG 解成位图，大图要几十到几百毫秒：
+/// 先在不持锁的地方用 [`ClipboardImage::from_png`] 准备好，[`ClipboardAccess::set_image`] 只管写入。
+pub struct ClipboardImage {
+    png: Vec<u8>,
+    /// `CF_DIB` 数据；解不出来时只写 PNG。
+    #[cfg(windows)]
+    dib: Option<Vec<u8>>,
+}
+
+impl ClipboardImage {
+    /// 不是 PNG 时返回 `None`。
+    pub fn from_png(png: Vec<u8>) -> Option<Self> {
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return None;
+        }
+        Some(Self {
+            #[cfg(windows)]
+            dib: dib::png_to_dib(&png),
+            png,
+        })
+    }
+
+    pub fn png(&self) -> &[u8] {
+        &self.png
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

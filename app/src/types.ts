@@ -38,7 +38,7 @@ export interface DeviceView {
   manual: boolean;
   active: boolean;
   paused: boolean;
-  /** 对方暂停了共享、暂停了本机或锁定了键鼠，暂时不能切过去。 */
+  /** 对方暂停了共享或暂停了本机，暂时不能切过去。 */
   remote_paused: boolean;
 }
 
@@ -76,6 +76,8 @@ export interface Settings {
   dwell_ms: number;
   corner_guard: boolean;
   mapping: EdgeMapping;
+  /** 键鼠从别的电脑来到本机时，在进来的那条屏幕边上闪一道浮光。 */
+  edge_glow: boolean;
   clipboard: boolean;
   /** 共享剪贴板时也传复制的文件。 */
   clipboard_files: boolean;

@@ -24,7 +24,7 @@ export function createMock(): Api {
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" } },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", edge_glow: true, clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" } },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -76,8 +76,19 @@ export function createMock(): Api {
       set({ local: { ...state.local, name: n }, devices: state.devices.map((d) => (d.id === "local" ? { ...d, name: n } : d)) });
     },
     finishOnboarding: async () => set({ onboarded: true }),
-    updateSettings: async (settings) => set({ settings }),
-    setLocked: async (locked) => set({ locked }),
+    updateSettings: async (settings) => set({
+      settings,
+      ...(settings.sharing_paused ? {
+        controlled_by: null,
+        devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id })),
+        file_offer: null,
+        transfers: state.transfers.map((t) => t.status === "running" ? { ...t, status: "canceled" as const } : t),
+      } : {}),
+    }),
+    setLocked: async (locked) => set({
+      locked,
+      ...(locked ? { devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id })) } : {}),
+    }),
     setDevicePaused: async (device, paused) =>
       set({ devices: state.devices.map((d) => (d.id === device ? { ...d, paused } : d)) }),
     moveDevice: async (device, dx, dy) =>
