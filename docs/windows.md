@@ -174,3 +174,19 @@ npm run build:win
 安装程序在 `target\release\bundle\nsis\` 下。目前没有代码签名，安装时 SmartScreen 会提示「未知发布者」，点「更多信息 › 仍要运行」即可。
 
 也可以在 GitHub 仓库的 Actions 页面手动运行「Windows 测试包」工作流，构建好后从运行结果的附件下载安装程序。正式发版见 [release.md](release.md)。
+
+## 10. 检查屏幕边缘浮光
+
+不需要第二台电脑，可在主显示器的左、上、右、下四条边依次预览：
+
+```powershell
+cargo run -p flow-platform --example edge_glow
+```
+
+0.2.0 的 GDI 分层窗口在部分 Windows 环境中会把每行内容向右错移 4 像素，造成左侧留白、右侧浮光内缘出现独立蓝线。修复后的 Windows 实现改用 DirectComposition 提交 BGRA 纹理；macOS 的 Core Animation 实现保持原样。
+
+下面的原生回归测试需要可见的 SDR 桌面，会在四条屏幕边短暂显示测试图案，检查合成后的列位置、透明背景、焦点和鼠标穿透。普通测试和 CI 默认跳过：
+
+```powershell
+cargo test -p flow-platform composed_pixels_keep_their_columns_and_overlay_ignores_input -- --ignored --nocapture
+```

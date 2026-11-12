@@ -1154,6 +1154,7 @@ dependencies = [
  "objc2-quartz-core",
  "png",
  "thiserror 2.0.21",
+ "windows",
  "windows-sys 0.61.2",
 ]
 
