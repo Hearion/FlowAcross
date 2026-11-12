@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "flow-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "postcard",
  "serde",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "flow-net"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bytes",
  "flow-core",
@@ -1133,6 +1133,7 @@ dependencies = [
  "quinn",
  "rcgen",
  "rustls",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -1140,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "flow-platform"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "core-foundation 0.10.1",
  "core-graphics",
@@ -1154,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "flowacross"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "flow-core",
  "flow-net",

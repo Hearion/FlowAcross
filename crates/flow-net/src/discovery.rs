@@ -1,11 +1,11 @@
 //! mDNS 服务发现：广播本机，发现局域网中的其他流界设备。
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use flow_core::layout::DeviceId;
 use flow_core::protocol::clean_name;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{NetError, SERVICE_TYPE};
@@ -73,6 +73,42 @@ fn service_info(a: &Advert) -> Result<ServiceInfo, NetError> {
     .enable_addr_auto())
 }
 
+fn scoped_socket_addr(ip: IpAddr, port: u16, scope_id: u32) -> Option<SocketAddr> {
+    if ip.is_unspecified() || ip.is_multicast() {
+        return None;
+    }
+    match ip {
+        // fe80::/10 的网卡编号来自本机收到 mDNS 的接口，不能丢弃或使用对端的编号。
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            (scope_id != 0).then(|| SocketAddrV6::new(v6, port, 0, scope_id).into())
+        }
+        _ => Some(SocketAddr::new(ip, port)),
+    }
+}
+
+fn resolved_addrs(ips: impl Iterator<Item = ScopedIp>, port: u16) -> Vec<SocketAddr> {
+    let mut addrs: Vec<_> = ips
+        .filter_map(|ip| {
+            let scope_id = match &ip {
+                ScopedIp::V6(v6) => v6.scope_id().index,
+                _ => 0,
+            };
+            scoped_socket_addr(ip.to_ip_addr(), port, scope_id)
+        })
+        .collect();
+    // IPv4 优先，其次非链路本地的 IPv6；相同优先级按地址排序，日志顺序稳定。
+    addrs.sort_by_key(|a| {
+        let priority = match a.ip() {
+            IpAddr::V4(_) => 0,
+            IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => 2,
+            IpAddr::V6(_) => 1,
+        };
+        (priority, *a)
+    });
+    addrs.dedup();
+    addrs
+}
+
 impl Discovery {
     /// 开始广播并浏览。发现/消失事件发到 `tx`（不包含本机）。
     pub fn start(advert: Advert, tx: UnboundedSender<DiscoveryEvent>) -> Result<Self, NetError> {
@@ -98,19 +134,7 @@ impl Discovery {
                             if device == me || !device.is_well_formed() {
                                 continue;
                             }
-                            let mut addrs: Vec<SocketAddr> = s
-                                .addresses
-                                .iter()
-                                .map(|ip| ip.to_ip_addr())
-                                .filter(|ip| !ip.is_unspecified())
-                                .map(|ip| SocketAddr::new(ip, s.port))
-                                .collect();
-                            // IPv4 优先，其次非链路本地的 IPv6。
-                            addrs.sort_by_key(|a| match a.ip() {
-                                IpAddr::V4(_) => 0,
-                                IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => 2,
-                                IpAddr::V6(_) => 1,
-                            });
+                            let addrs = resolved_addrs(s.addresses.into_iter(), s.port);
                             by_fullname.insert(s.fullname.clone(), device.clone());
                             DiscoveryEvent::Found(Found {
                                 device,
@@ -157,5 +181,45 @@ impl Drop for Discovery {
     fn drop(&mut self) {
         let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_local_addresses_keep_the_local_interface() {
+        let ip = "fe80::1839:cbe9:1dc2:fd28".parse().unwrap();
+        assert_eq!(scoped_socket_addr(ip, 24830, 0), None);
+        let wlan = scoped_socket_addr(ip, 24830, 7).unwrap();
+        assert_eq!(wlan, "[fe80::1839:cbe9:1dc2:fd28%7]:24830".parse().unwrap());
+        assert_ne!(wlan, scoped_socket_addr(ip, 24830, 12).unwrap());
+    }
+
+    #[test]
+    fn discovery_prefers_ipv4_and_discards_unusable_addresses() {
+        let ips = [
+            "::",
+            "0.0.0.0",
+            "ff02::fb",
+            "224.0.0.251",
+            "fe80::1",
+            "2001:db8::2",
+            "192.168.5.81",
+            "192.168.5.81",
+        ];
+        let addrs = resolved_addrs(
+            ips.into_iter()
+                .map(|ip| ScopedIp::from(ip.parse::<IpAddr>().unwrap())),
+            24830,
+        );
+        assert_eq!(
+            addrs,
+            vec![
+                "192.168.5.81:24830".parse().unwrap(),
+                "[2001:db8::2]:24830".parse().unwrap()
+            ]
+        );
     }
 }

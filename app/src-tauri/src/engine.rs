@@ -43,6 +43,63 @@ const TICK: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// 设备离线后自动重连的次数（约 30 秒内）。用完后停止，等用户手动连接或对方主动连过来。
 const MAX_AUTO_ATTEMPTS: u32 = 5;
+
+/// 后续的无效地址不能盖过已经发生的超时或身份校验失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ConnectFailureKind {
+    Address,
+    Transport,
+    Timeout,
+    Handshake,
+    Identity,
+}
+
+#[derive(Debug)]
+struct ConnectFailure {
+    kind: ConnectFailureKind,
+    details: String,
+}
+
+impl std::fmt::Display for ConnectFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.details)
+    }
+}
+
+impl ConnectFailure {
+    fn notice(&self, name: &str, nearby: bool, pair: bool) -> String {
+        let action = if pair { "配对" } else { "连接" };
+        let message = match self.kind {
+            ConnectFailureKind::Timeout | ConnectFailureKind::Transport => {
+                let reason = if self.kind == ConnectFailureKind::Timeout {
+                    "连接超时"
+                } else {
+                    "暂时无法连接"
+                };
+                let summary = if nearby {
+                    format!("已发现「{name}」，但{reason}。")
+                } else if self.kind == ConnectFailureKind::Timeout {
+                    format!("连接「{name}」超时，对方可能已离线或网络尚未恢复。")
+                } else {
+                    format!("{reason}「{name}」，对方可能已离线或网络尚未恢复。")
+                };
+                format!(
+                    "{summary}\n请先断开并重新连接两台电脑的 Wi-Fi，或重插网线，再点「{action}」重试。若仍失败，请检查流界的本地网络权限和防火墙设置。"
+                )
+            }
+            ConnectFailureKind::Address => format!(
+                "「{name}」的连接地址暂时不可用。\n请重新打开对方的流界，稍等几秒后再点「{action}」。"
+            ),
+            ConnectFailureKind::Handshake => format!(
+                "已连接到「{name}」，但设备握手未完成。\n请重新打开两端的流界，并确认版本一致后重试。"
+            ),
+            ConnectFailureKind::Identity => format!(
+                "「{name}」的设备身份校验失败，已停止连接。\n请确认选择了正确的电脑，并重新打开两端的流界后重试。"
+            ),
+        };
+        format!("{message}\n详细原因可在「设置 › 关于 › 打开日志文件夹」查看。")
+    }
+}
 /// 被控制期间超过这么久没收到对方任何消息（含心跳），就自行释放按键、结束被控制。
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
 /// 两次发送鼠标位置的最小间隔（毫秒），即最多 250 次/秒，高于常见屏幕刷新率。
@@ -1339,7 +1396,7 @@ impl Engine {
             for name in &gave_up {
                 info!(%name, "自动重连次数用完，停止自动连接");
                 self.notice(format!(
-                    "多次连接「{name}」都没有成功，已停止自动连接。对方的流界打开后会自动连过来，也可以在设备详情里点「连接」。"
+                    "与「{name}」的连接尚未恢复，已暂停自动重试。可先断开并重新连接两台电脑的 Wi-Fi，或重插网线，再在设备详情里点「连接」。"
                 ));
             }
             if !targets.is_empty() || !gave_up.is_empty() {
@@ -1391,21 +1448,21 @@ impl Engine {
         if let Err(e) = result
             && user
         {
-            let name = {
+            let (name, nearby) = {
                 let mut st = self.lock();
                 if !pair {
                     // 手动连接失败：仍然停在"需要手动连接"，不恢复自动重连。
                     st.manual.insert(peer.clone());
                 }
-                st.config
+                let name = st
+                    .config
                     .peer(&peer)
                     .map(|p| p.name.clone())
                     .or_else(|| st.nearby.get(&peer).map(|f| f.name.clone()))
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                (name, st.nearby.contains_key(&peer))
             };
-            self.notice(format!(
-                "无法连接到「{name}」：{e}。请确认两台电脑在同一局域网，且对方的流界正在运行。"
-            ));
+            self.notice(e.notice(&name, nearby, pair));
         }
         self.emit();
     }
@@ -1415,34 +1472,60 @@ impl Engine {
         peer: &DeviceId,
         addrs: &[SocketAddr],
         pair: bool,
-    ) -> Result<(), String> {
-        let mut last_err = "没有可用的网络地址".to_owned();
+    ) -> Result<(), ConnectFailure> {
+        let mut errors = Vec::new();
+        let mut kind = ConnectFailureKind::Address;
         for addr in addrs {
             let connecting = match self.inner.endpoint.connect(*addr, "flowacross.local") {
                 Ok(c) => c,
                 Err(e) => {
-                    last_err = e.to_string();
+                    warn!(%addr, error = %e, "无法使用连接地址");
+                    errors.push(format!("{addr}：{e}"));
                     continue;
                 }
             };
-            match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
+            let error = match tokio::time::timeout(CONNECT_TIMEOUT, connecting).await {
                 Ok(Ok(conn)) => {
                     // mDNS 广播可以被伪造，必须核对证书指纹就是我们要连的那台设备。
                     match peer_fingerprint(&conn) {
                         Ok(fp) if &device_id(&fp) == peer => {
-                            return self.run_link(conn, true, pair, None).await;
+                            return self.run_link(conn, true, pair, None).await.map_err(
+                                |details| ConnectFailure {
+                                    kind: ConnectFailureKind::Handshake,
+                                    details,
+                                },
+                            );
                         }
                         _ => {
                             conn.close(0u32.into(), b"unexpected peer");
-                            last_err = "对方的身份与发现的设备不一致".to_owned();
+                            kind = ConnectFailureKind::Identity;
+                            "对方的身份与发现的设备不一致".to_owned()
                         }
                     }
                 }
-                Ok(Err(e)) => last_err = format!("连接失败（{e}）"),
-                Err(_) => last_err = "连接超时".to_owned(),
-            }
+                Ok(Err(e)) => {
+                    let failure = if matches!(e, quinn::ConnectionError::TimedOut) {
+                        ConnectFailureKind::Timeout
+                    } else {
+                        ConnectFailureKind::Transport
+                    };
+                    kind = kind.max(failure);
+                    format!("连接失败（{e}）")
+                }
+                Err(_) => {
+                    kind = kind.max(ConnectFailureKind::Timeout);
+                    "连接超时（UDP 握手未完成）".to_owned()
+                }
+            };
+            warn!(%addr, %error, "连接地址尝试失败");
+            errors.push(format!("{addr}：{error}"));
         }
-        Err(last_err)
+        let details = if errors.is_empty() {
+            "没有可用的网络地址".to_owned()
+        } else {
+            errors.join("；")
+        };
+        Err(ConnectFailure { kind, details })
     }
 
     fn hello(&self, trusts_you: bool) -> Message {
@@ -1857,7 +1940,18 @@ impl Engine {
                 r.name = name;
                 r.os = os;
                 if initiator {
-                    r.last_addrs = vec![conn.remote_address()];
+                    // 双栈端点会把 IPv4 显示为 ::ffff:x.x.x.x；保存原生 IPv4，
+                    // 下次系统禁用 IPv6、回退到 IPv4 端点后仍能用缓存地址重连。
+                    let remote = conn.remote_address();
+                    let remote = match remote {
+                        SocketAddr::V6(addr) => addr
+                            .ip()
+                            .to_ipv4_mapped()
+                            .map(|ip| SocketAddr::new(ip.into(), addr.port()))
+                            .unwrap_or(remote),
+                        _ => remote,
+                    };
+                    r.last_addrs = vec![remote];
                 }
             }
             self.save(&st);
@@ -2936,6 +3030,11 @@ mod tests {
         .await;
         assert!(Config::load(&a.dir).unwrap().is_trusted(&idb));
         assert!(Config::load(&b.dir).unwrap().is_trusted(&ida));
+        assert_eq!(
+            Config::load(&a.dir).unwrap().peer(&idb).unwrap().last_addrs,
+            vec![addr(&b.engine)],
+            "双栈连接的 IPv4 地址应保存为原生 IPv4，兼容之后的 IPv4 回退"
+        );
 
         // 移除后对方也删除可信记录
         a.engine.remove_device(&idb);
@@ -2950,6 +3049,47 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("移除了与本机的配对"))
         );
+    }
+
+    #[tokio::test]
+    async fn address_errors_do_not_hide_an_earlier_ipv4_timeout() {
+        let a = node("address-errors").await;
+        let silent = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let ipv4 = silent.local_addr().unwrap();
+        let invalid_ipv6 = "[::1]:0".parse().unwrap();
+        let error = a
+            .engine
+            .try_connect(&DeviceId("peer".into()), &[ipv4, invalid_ipv6], false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ConnectFailureKind::Timeout);
+        let notice = error.notice("B", true, true);
+        assert!(notice.contains("已发现「B」，但连接超时"), "{notice}");
+        assert!(notice.contains("重新连接两台电脑的 Wi-Fi"), "{notice}");
+        assert!(notice.contains("「配对」"), "{notice}");
+        assert!(!notice.contains("invalid remote address"), "{notice}");
+        let error = error.to_string();
+        assert!(error.contains(&ipv4.to_string()), "{error}");
+        assert!(error.contains("UDP 握手未完成"), "{error}");
+        assert!(error.contains(&invalid_ipv6.to_string()), "{error}");
+        a.engine.shutdown();
+    }
+
+    #[test]
+    fn connection_notices_explain_identity_and_address_failures_separately() {
+        let failure = |kind| ConnectFailure {
+            kind,
+            details: "internal details".into(),
+        };
+        let identity = failure(ConnectFailureKind::Identity).notice("B", true, false);
+        assert!(identity.contains("身份校验失败"));
+        assert!(!identity.contains("Wi-Fi"));
+        assert!(!identity.contains("internal details"));
+        let address = failure(ConnectFailureKind::Address).notice("B", true, true);
+        assert!(address.contains("地址暂时不可用"));
+        let offline = failure(ConnectFailureKind::Timeout).notice("B", false, false);
+        assert!(!offline.contains("已发现"));
+        assert!(offline.contains("「连接」"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3055,7 +3195,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|n| n.contains("已停止自动连接"))
+                .any(|n| n.contains("已暂停自动重试"))
         );
 
         // B 重新上线（不会主动连 A），A 也不再自动连

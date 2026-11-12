@@ -44,7 +44,8 @@ export default function App() {
   const toast = useCallback((text: string) => {
     const id = ++toastId.current;
     setToasts((t) => [...t.slice(-2), { id, text }]);
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+    const duration = Math.min(18000, Math.max(4200, text.length * 100));
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), duration);
   }, []);
 
   useEffect(() => {
@@ -202,13 +203,6 @@ export default function App() {
             </div>
           )}
 
-          <div className="toasts">
-            {toasts.map((t) => (
-              <div key={t.id} className="toast">
-                {t.text}
-              </div>
-            ))}
-          </div>
         </section>
 
         <aside className="side">
@@ -321,6 +315,16 @@ export default function App() {
         />
       )}
       {pairing && <PairingDialog pairing={pairing} />}
+      <div className="toasts" aria-live="polite" aria-atomic="false">
+        {toasts.map((t) => (
+          <div key={t.id} className="toast" role="status">
+            <span>{t.text}</span>
+            <button className="toast-close" aria-label="关闭提示" onClick={() => setToasts((items) => items.filter((item) => item.id !== t.id))}>
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
