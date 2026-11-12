@@ -1,5 +1,7 @@
 // 跨屏与剪贴板的设置控件：主界面侧栏和设置页共用同一套。
 
+import { useEffect, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { api } from "./api";
 import type { HoldKey, MacModifier, Settings, WinKeysPreset, WinToMacKeys } from "./types";
 import { Segmented, Toggle, isMac } from "./ui";
 
@@ -9,6 +11,23 @@ const HOLD_OPTIONS: { value: HoldKey; label: string }[] = [
   { value: "alt", label: isMac ? "⌥" : "Alt" },
   { value: "shift", label: isMac ? "⇧" : "Shift" },
 ];
+
+/** 设备名称输入框的行为（侧栏和设置页共用）：失去焦点或按回车时保存，名字没变不保存。 */
+export function useDeviceNameInput(current: string) {
+  const [value, setValue] = useState(current);
+  useEffect(() => setValue(current), [current]);
+  return {
+    value,
+    maxLength: 40,
+    onChange: (e: ChangeEvent<HTMLInputElement>) => setValue(e.target.value),
+    onBlur: () => {
+      if (value.trim() !== current) api.setDeviceName(value);
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter") e.currentTarget.blur();
+    },
+  };
+}
 
 interface Props {
   settings: Settings;

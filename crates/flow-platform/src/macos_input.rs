@@ -9,8 +9,9 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -84,6 +85,7 @@ unsafe extern "C" {
     ) -> CGEventRef;
     fn CGEventPost(tap: u32, event: CGEventRef);
     fn CGEventSourceCreate(state: i32) -> *mut c_void;
+    fn CGEventSourceFlagsState(state: i32) -> u64;
     fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut c_void, seconds: f64);
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGMainDisplayID() -> u32;
@@ -106,10 +108,11 @@ unsafe extern "C" {
     fn CFMachPortInvalidate(port: *mut c_void);
     fn CFRunLoopGetCurrent() -> *mut c_void;
     fn CFRunLoopAddSource(rl: *mut c_void, source: *mut c_void, mode: CFStringRef);
-    fn CFRunLoopRun();
+    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source: u8) -> i32;
     fn CFRunLoopStop(rl: *mut c_void);
     fn CFRelease(cf: *const c_void);
     static kCFRunLoopCommonModes: CFStringRef;
+    static kCFRunLoopDefaultMode: CFStringRef;
 }
 
 // CGEventType
@@ -149,6 +152,10 @@ const FLAG_SHIFT: u64 = 0x2_0000;
 const FLAG_CTRL: u64 = 0x4_0000;
 const FLAG_ALT: u64 = 0x8_0000;
 const FLAG_CMD: u64 = 0x10_0000;
+const FLAG_CAPS: u64 = 0x1_0000;
+/// 系统创建键盘事件时按键位自动带上的标志（小键盘、方向键 / Fn 区），注入时要保留。
+const FLAG_NUMPAD: u64 = 0x20_0000;
+const FLAG_FN: u64 = 0x80_0000;
 
 /// 修饰键对应的 (通用标志, 设备标志)。
 fn modifier_flags(code: KeyCode) -> Option<(u64, u64)> {
@@ -199,7 +206,7 @@ unsafe extern "C" fn tap_callback(
     // 回调里 panic 会直接终止进程：兜住，出错时放行并恢复光标。
     let verdict = catch_unwind(AssertUnwindSafe(|| {
         let mut verdict = Verdict::Pass;
-        for ev in translate(state, kind, event) {
+        for ev in translate(state, kind, event).into_iter().flatten() {
             if (state.handler)(ev) == Verdict::Suppress {
                 verdict = Verdict::Suppress;
             }
@@ -217,18 +224,26 @@ unsafe extern "C" fn tap_callback(
 }
 
 /// 系统事件 → 平台无关事件。一个系统事件可能对应 0 个（不关心的键）或 2 个（Caps Lock）事件。
-fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> Vec<CapturedEvent> {
+/// 回调里每个鼠标事件都会走到这里，用定长数组返回，不分配内存。
+fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> [Option<CapturedEvent>; 2] {
     // SAFETY: 以下读取的都是回调期间有效的 event 的字段。
     unsafe {
         match kind {
             MOUSE_MOVED | LEFT_DRAGGED | RIGHT_DRAGGED | OTHER_DRAGGED => {
                 let p = CGEventGetLocation(event);
-                vec![CapturedEvent::MouseMove {
-                    x: p.x,
-                    y: p.y,
-                    dx: CGEventGetDoubleValueField(event, FIELD_DELTA_X),
-                    dy: CGEventGetDoubleValueField(event, FIELD_DELTA_Y),
-                }]
+                let dx = CGEventGetDoubleValueField(event, FIELD_DELTA_X);
+                let dy = CGEventGetDoubleValueField(event, FIELD_DELTA_Y);
+                // 事件里是移动后的位置；按约定上报移动前的位置（见 CapturedEvent::MouseMove）。
+                // 直接上报移动后的位置会让调用方把位移算两遍，快速甩动时没到边就判成推出边缘。
+                [
+                    Some(CapturedEvent::MouseMove {
+                        x: p.x - dx,
+                        y: p.y - dy,
+                        dx,
+                        dy,
+                    }),
+                    None,
+                ]
             }
             LEFT_DOWN | LEFT_UP | RIGHT_DOWN | RIGHT_UP | OTHER_DOWN | OTHER_UP => {
                 let button = match kind {
@@ -238,11 +253,11 @@ fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> Vec<Captured
                         2 => MouseButton::Middle,
                         3 => MouseButton::Back,
                         4 => MouseButton::Forward,
-                        _ => return Vec::new(),
+                        _ => return [None, None],
                     },
                 };
                 let down = matches!(kind, LEFT_DOWN | RIGHT_DOWN | OTHER_DOWN);
-                vec![CapturedEvent::Button { button, down }]
+                [Some(CapturedEvent::Button { button, down }), None]
             }
             SCROLL_WHEEL => {
                 // 单位是"行"（触控板为小数），换算成 1/120 格并累积不足一个单位的余数。
@@ -254,54 +269,63 @@ fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> Vec<Captured
                 state.scroll.0 -= dx;
                 state.scroll.1 -= dy;
                 if dx == 0.0 && dy == 0.0 {
-                    return Vec::new();
+                    return [None, None];
                 }
-                vec![CapturedEvent::Wheel {
-                    dx: dx as i32,
-                    dy: dy as i32,
-                }]
+                [
+                    Some(CapturedEvent::Wheel {
+                        dx: dx as i32,
+                        dy: dy as i32,
+                    }),
+                    None,
+                ]
             }
             KEY_DOWN | KEY_UP => {
                 let vk = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as u16;
                 let Some(code) = keymap::from_mac(vk) else {
-                    return Vec::new();
+                    return [None, None];
                 };
-                vec![CapturedEvent::Key {
-                    code,
-                    down: kind == KEY_DOWN,
-                    repeat: CGEventGetIntegerValueField(event, FIELD_AUTOREPEAT) != 0,
-                }]
+                [
+                    Some(CapturedEvent::Key {
+                        code,
+                        down: kind == KEY_DOWN,
+                        repeat: CGEventGetIntegerValueField(event, FIELD_AUTOREPEAT) != 0,
+                    }),
+                    None,
+                ]
             }
             FLAGS_CHANGED => {
                 let vk = CGEventGetIntegerValueField(event, FIELD_KEYCODE) as u16;
                 let Some(code) = keymap::from_mac(vk) else {
-                    return Vec::new();
+                    return [None, None];
                 };
                 if code == KeyCode::CAPS_LOCK {
                     // Caps Lock 每按一次只产生一个 flagsChanged，当作一次完整的按下 + 抬起。
-                    return vec![
-                        CapturedEvent::Key {
+                    return [
+                        Some(CapturedEvent::Key {
                             code,
                             down: true,
                             repeat: false,
-                        },
-                        CapturedEvent::Key {
+                        }),
+                        Some(CapturedEvent::Key {
                             code,
                             down: false,
                             repeat: false,
-                        },
+                        }),
                     ];
                 }
                 let Some((_, device_bit)) = modifier_flags(code) else {
-                    return Vec::new();
+                    return [None, None];
                 };
-                vec![CapturedEvent::Key {
-                    code,
-                    down: CGEventGetFlags(event) & device_bit != 0,
-                    repeat: false,
-                }]
+                [
+                    Some(CapturedEvent::Key {
+                        code,
+                        down: CGEventGetFlags(event) & device_bit != 0,
+                        repeat: false,
+                    }),
+                    None,
+                ]
             }
-            _ => Vec::new(),
+            _ => [None, None],
         }
     }
 }
@@ -310,6 +334,9 @@ fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> Vec<Captured
 pub struct MacCapture {
     run_loop: Option<usize>,
     thread: Option<JoinHandle<()>>,
+    /// 通知输入线程退出。`CFRunLoopStop` 对还没开始运行的 run loop 不起作用，
+    /// 只靠它的话，刚启动就停止会永远等不到线程结束。
+    stop: Arc<AtomicBool>,
 }
 
 impl InputCapture for MacCapture {
@@ -325,7 +352,11 @@ impl InputCapture for MacCapture {
         let (tx, rx) = mpsc::channel::<Result<usize, PlatformError>>();
         let thread = std::thread::Builder::new()
             .name("flowacross-event-tap".into())
-            .spawn(move || run_tap(handler, tx))
+            .spawn({
+                self.stop = Arc::new(AtomicBool::new(false));
+                let stop = self.stop.clone();
+                move || run_tap(handler, tx, stop)
+            })
             .map_err(|e| PlatformError::Os(format!("无法创建输入线程：{e}")))?;
         match rx.recv() {
             Ok(Ok(rl)) => {
@@ -342,6 +373,7 @@ impl InputCapture for MacCapture {
     }
 
     fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         if let Some(rl) = self.run_loop.take() {
             // SAFETY: rl 是输入线程的 CFRunLoop，线程退出前一直有效；CFRunLoopStop 可跨线程调用。
             unsafe { CFRunLoopStop(rl as *mut c_void) };
@@ -359,7 +391,11 @@ impl Drop for MacCapture {
     }
 }
 
-fn run_tap(handler: CaptureHandler, ready: mpsc::Sender<Result<usize, PlatformError>>) {
+fn run_tap(
+    handler: CaptureHandler,
+    ready: mpsc::Sender<Result<usize, PlatformError>>,
+    stop: Arc<AtomicBool>,
+) {
     let events = mask(MOUSE_MOVED)
         | mask(LEFT_DRAGGED)
         | mask(RIGHT_DRAGGED)
@@ -402,7 +438,11 @@ fn run_tap(handler: CaptureHandler, ready: mpsc::Sender<Result<usize, PlatformEr
         CFRunLoopAddSource(rl, source, kCFRunLoopCommonModes);
         CGEventTapEnable(tap, true);
         let _ = ready.send(Ok(rl as usize));
-        CFRunLoopRun();
+        // 分段运行并检查退出标志：stop() 在 run loop 开始运行前调用时 CFRunLoopStop 是空操作，
+        // 靠标志保证最多半秒后退出；正常情况下 CFRunLoopStop 让这次调用立即返回。
+        while !stop.load(Ordering::Relaxed) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.5, 0);
+        }
         CGEventTapEnable(tap, false);
         CFMachPortInvalidate(tap);
         CFRelease(source);
@@ -459,6 +499,11 @@ pub struct MacInjector {
     buttons: HashSet<MouseButton>,
     modifiers: HashSet<KeyCode>,
     last_click: Option<(MouseButton, Instant, CGPoint, i64)>,
+    /// 高精度滚动里还不够 1 像素的余量（1/120 格），累计到下一次，慢速滚动才不会被丢掉。
+    scroll_rem: (i32, i32),
+    /// Caps Lock 是否打开。注入的 Caps Lock 按键不会改变系统的大写锁定状态，
+    /// 所以自己记着，给之后的事件带上大写锁定标志。
+    caps: bool,
 }
 
 // SAFETY: CGEventSource 可以在任意线程使用；注入器同一时间只被一个线程持有（外层有锁）。
@@ -487,6 +532,9 @@ impl MacInjector {
                 buttons: HashSet::new(),
                 modifiers: HashSet::new(),
                 last_click: None,
+                scroll_rem: (0, 0),
+                // 从本机当前的大写锁定状态开始。
+                caps: CGEventSourceFlagsState(1) & FLAG_CAPS != 0,
             })
         }
     }
@@ -495,7 +543,9 @@ impl MacInjector {
         self.modifiers
             .iter()
             .filter_map(|&k| modifier_flags(k))
-            .fold(0, |acc, (g, d)| acc | g | d)
+            .fold(if self.caps { FLAG_CAPS } else { 0 }, |acc, (g, d)| {
+                acc | g | d
+            })
     }
 
     /// 打上流界标记、带上当前修饰键后发送，并释放事件。
@@ -506,7 +556,10 @@ impl MacInjector {
         // SAFETY: event 由 CGEventCreate* 返回（+1），发送后释放。
         unsafe {
             CGEventSetIntegerValueField(event, FIELD_USER_DATA, INJECTED_MARK as i64);
-            CGEventSetFlags(event, self.flags());
+            // 修饰键以远端按下的为准（不混入本机键盘的状态），但保留系统按键位加上的小键盘 / Fn 标志，
+            // 否则方向键、Home/End、小键盘在部分程序里行为不对。
+            let keep = CGEventGetFlags(event) & (FLAG_NUMPAD | FLAG_FN);
+            CGEventSetFlags(event, self.flags() | keep);
             CGEventPost(HID_TAP, event);
             CFRelease(event);
         }
@@ -616,9 +669,13 @@ impl InputInjector for MacInjector {
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), PlatformError> {
         // 整格滚动按"行"发送；高精度滚动（触控板）按像素发送，约 10 像素一行。
         let (units, wy, wx) = if dx % 120 == 0 && dy % 120 == 0 {
+            self.scroll_rem = (0, 0);
             (1, dy / 120, -dx / 120)
         } else {
-            (0, dy / 12, -dx / 12)
+            // 不足 1 像素（12 个单位）的部分留到下一次，否则慢速滚动每次都被整除成 0。
+            let (ax, ay) = (self.scroll_rem.0 + dx, self.scroll_rem.1 + dy);
+            self.scroll_rem = (ax % 12, ay % 12);
+            (0, ay / 12, -ax / 12)
         };
         if wx == 0 && wy == 0 {
             return Ok(());
@@ -632,8 +689,17 @@ impl InputInjector for MacInjector {
         let Some(vk) = keymap::to_mac(code) else {
             return Ok(());
         };
-        let is_modifier = modifier_flags(code).is_some();
-        if is_modifier {
+        // Caps Lock：系统里每按一次只有一个 flagsChanged（捕获端也是这样拆成按下 + 抬起的）。
+        // 按下时切换状态并发一个 flagsChanged，抬起不发。
+        let is_caps = code == KeyCode::CAPS_LOCK;
+        if is_caps {
+            if !down || repeat {
+                return Ok(());
+            }
+            self.caps = !self.caps;
+        }
+        let is_modifier = is_caps || modifier_flags(code).is_some();
+        if modifier_flags(code).is_some() {
             if down {
                 self.modifiers.insert(code);
             } else {

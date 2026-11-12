@@ -15,8 +15,7 @@ export interface Api {
   updateSettings(settings: Settings): Promise<void>;
   setLocked(locked: boolean): Promise<void>;
   setDevicePaused(device: string, paused: boolean): Promise<void>;
-  /** 失败时以字符串原因 reject。 */
-  /** `snap`：吸附距离（布局逻辑点）。 */
+  /** `snap`：吸附距离（布局逻辑点）。失败时以字符串原因 reject。 */
   moveDevice(device: string, dx: number, dy: number, snap?: number): Promise<void>;
   pairWith(device: string): Promise<void>;
   respondPairing(device: string, accept: boolean): Promise<void>;

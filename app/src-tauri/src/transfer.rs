@@ -60,9 +60,16 @@ pub fn io_text(path: &Path, e: &std::io::Error) -> String {
 /// 目录里的符号链接跳过，避免循环。`.DS_Store` 这类系统文件不传。
 pub fn walk(roots: &[PathBuf]) -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
+    // 从不同文件夹复制的两项可能同名（a/报告.pdf 和 b/报告.pdf）：后一个改名，否则到了对方会互相覆盖。
+    let mut tops: Vec<String> = Vec::new();
     for root in roots {
         let meta = std::fs::metadata(root).map_err(|e| io_text(root, &e))?;
-        let rel = sanitize_component(&display_name(root));
+        let rel = unique_name(
+            &sanitize_component(&display_name(root)),
+            meta.is_dir(),
+            |n| tops.iter().any(|t| t.eq_ignore_ascii_case(n)),
+        );
+        tops.push(rel.clone());
         walk_into(root, rel, 1, &meta, &mut out)?;
     }
     Ok(out)
@@ -185,7 +192,8 @@ pub async fn send(
     let entries = tokio::task::spawn_blocking(move || walk(&roots))
         .await
         .map_err(|e| e.to_string())??;
-    let mut buf = vec![0u8; CHUNK_SIZE];
+    // 整个传输复用同一条消息里的缓冲区：直接读进去再发，不用每块分配并复制一次。
+    let mut chunk = Message::FileChunk(Vec::with_capacity(CHUNK_SIZE));
     for e in entries {
         let msg = Message::FileEntry {
             path: e.rel.clone(),
@@ -205,17 +213,21 @@ pub async fn send(
         let mut left = e.size;
         while left > 0 {
             let want = left.min(CHUNK_SIZE as u64) as usize;
+            let Message::FileChunk(buf) = &mut chunk else {
+                unreachable!("chunk 始终是 FileChunk");
+            };
+            buf.resize(want, 0);
             let n = tokio::select! {
-                r = file.read(&mut buf[..want]) => r.map_err(|err| io_text(&e.abs, &err))?,
+                r = file.read(&mut buf[..]) => r.map_err(|err| io_text(&e.abs, &err))?,
                 _ = ticket.cancelled() => return Err(CANCELED.into()),
             };
+            buf.truncate(n);
             if n == 0 {
                 return Err(format!(
                     "「{}」在传输过程中被修改了，请重新复制。",
                     display_name(&e.abs)
                 ));
             }
-            let chunk = Message::FileChunk(buf[..n].to_vec());
             tokio::select! {
                 r = tx.send(&chunk) => r.map_err(|_| peer_gone())?,
                 _ = ticket.cancelled() => return Err(CANCELED.into()),
@@ -234,11 +246,21 @@ fn peer_gone() -> String {
     "对方取消了接收，或连接已断开。".into()
 }
 
+/// 实际收到的字节数最多可以比清单声明的多出这么多（清单发出后文件可能又变大了一点）。
+/// 再多就中止：否则对方可以声明 1 字节骗过"超过 1 GB 手动接收"，然后一直发到磁盘写满。
+pub fn receive_limit(declared: u64) -> u64 {
+    declared
+        .saturating_add(declared / 4)
+        .saturating_add(64 * 1024 * 1024)
+}
+
 /// 请求编号为 `id` 的文件并收进 `root`。成功时返回移进 `root` 之后的顶层路径（重名时已改名）。
+/// `declared` 是清单里声明的总字节数，实际内容超过 [`receive_limit`] 就中止。
 pub async fn receive(
     tx: &mut LinkSender,
     rx: &mut LinkReceiver,
     id: u64,
+    declared: u64,
     root: &Path,
     ticket: &Ticket,
     on_progress: impl Fn(),
@@ -252,7 +274,7 @@ pub async fn receive(
         .unwrap_or_default();
     let staging = root.join(format!("{STAGING_PREFIX}{id}-{nonce}"));
     let result = tokio::select! {
-        r = receive_into(tx, rx, id, &staging, ticket, &on_progress) => r,
+        r = receive_into(tx, rx, id, declared, &staging, ticket, &on_progress) => r,
         _ = ticket.cancelled() => Err(CANCELED.into()),
     };
     let result = match result {
@@ -262,7 +284,15 @@ pub async fn receive(
             Err(e)
         }
     };
-    let _ = tokio::fs::remove_dir_all(&staging).await;
+    // 取消时还开着的文件要等后台线程关闭；Windows 上文件没关就删不掉目录，稍等重试几次。
+    for _ in 0..5 {
+        match tokio::fs::remove_dir_all(&staging).await {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            _ => break,
+        }
+    }
     result
 }
 
@@ -270,6 +300,7 @@ async fn receive_into(
     tx: &mut LinkSender,
     rx: &mut LinkReceiver,
     id: u64,
+    declared: u64,
     staging: &Path,
     ticket: &Ticket,
     on_progress: &impl Fn(),
@@ -281,6 +312,8 @@ async fn receive_into(
         .await
         .map_err(net_text)?;
     let mut incoming = Incoming::default();
+    let limit = receive_limit(declared);
+    let mut received: u64 = 0;
     // 顶层条目（名称，是否目录），按收到的顺序。
     let mut tops: Vec<(String, bool)> = Vec::new();
     let mut file: Option<(tokio::fs::File, PathBuf)> = None;
@@ -318,6 +351,13 @@ async fn receive_into(
                 let Some((f, p)) = file.as_mut() else {
                     return Err("传输数据格式错误".into());
                 };
+                received += data.len() as u64;
+                if received > limit {
+                    return Err(
+                        "对方发来的内容比它声明的大得多，已停止接收。请在对方电脑上重新复制后再试。"
+                            .into(),
+                    );
+                }
                 f.write_all(data).await.map_err(|e| io_text(p, &e))?;
                 ticket.add(data.len());
                 if last {
@@ -351,9 +391,17 @@ async fn finalize(
     for (name, dir) in tops {
         let target = unique_name(name, *dir, |n| root.join(n).exists());
         let to = root.join(&target);
-        tokio::fs::rename(staging.join(name), &to)
-            .await
-            .map_err(|e| io_text(&to, &e))?;
+        if let Err(e) = tokio::fs::rename(staging.join(name), &to).await {
+            // 这次传输算失败：把已经移出来的也撤掉，不在接收文件夹里留下不完整的一批。
+            for (done, (_, was_dir)) in out.iter().zip(tops) {
+                let _ = if *was_dir {
+                    tokio::fs::remove_dir_all(done).await
+                } else {
+                    tokio::fs::remove_file(done).await
+                };
+            }
+            return Err(io_text(&to, &e));
+        }
         out.push(to);
     }
     Ok(out)
@@ -572,6 +620,27 @@ mod tests {
 
         assert!(walk(&[root.join("不存在")]).unwrap_err().contains("找不到"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn same_named_roots_do_not_collide_and_limit_has_slack() {
+        let root = temp("dup");
+        for d in ["a", "b"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+            std::fs::write(root.join(d).join("报告.pdf"), d).unwrap();
+        }
+        let roots = vec![
+            root.join("a").join("报告.pdf"),
+            root.join("b").join("报告.pdf"),
+        ];
+        let rels: Vec<_> = walk(&roots).unwrap().into_iter().map(|e| e.rel).collect();
+        assert_eq!(rels, ["报告.pdf", "报告 (1).pdf"]);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        // 声明 1 字节的清单最多收 64 MB 出头；大文件留四分之一的余量；不会溢出。
+        assert_eq!(receive_limit(1), 1 + 64 * 1024 * 1024);
+        assert_eq!(receive_limit(4 << 30), (5 << 30) + 64 * 1024 * 1024);
+        assert_eq!(receive_limit(u64::MAX), u64::MAX);
     }
 
     #[test]

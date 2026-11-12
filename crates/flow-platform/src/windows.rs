@@ -1,9 +1,11 @@
 //! Windows 实现：EnumDisplayMonitors + GetDpiForMonitor 枚举显示器。
 //!
-//! 应用以 Per-Monitor DPI Aware v2 运行（Tauri 默认清单），`rcMonitor` 是物理像素，
-//! 除以该显示器的缩放即得到逻辑点。
+//! 应用以 Per-Monitor DPI Aware v2 运行（Tauri 默认清单），`rcMonitor` 是物理像素。
+//! 尺寸除以该显示器的缩放得到逻辑尺寸；位置由 `flow_core::layout::logical_arrangement`
+//! 按相贴关系排出来，缩放不同的屏幕在逻辑空间里仍然贴在一起。
 
 use flow_core::Rect;
+use flow_core::layout::{PhysDisplay, logical_arrangement};
 use flow_core::protocol::DisplayInfo;
 use windows_sys::Win32::Foundation::{LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -119,14 +121,21 @@ pub(crate) fn monitors() -> Result<Vec<Monitor>, PlatformError> {
             index: i,
             phys: (r.left, r.top, r.right, r.bottom),
             scale,
-            logical: Rect::new(
-                r.left as f64 / scale,
-                r.top as f64 / scale,
-                (r.right - r.left) as f64 / scale,
-                (r.bottom - r.top) as f64 / scale,
-            ),
+            // 先占位，下面统一排布。
+            logical: Rect::new(0.0, 0.0, 0.0, 0.0),
             primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
         });
+    }
+    let phys: Vec<PhysDisplay> = out
+        .iter()
+        .map(|m| PhysDisplay {
+            rect: m.phys,
+            scale: m.scale,
+            primary: m.primary,
+        })
+        .collect();
+    for (m, logical) in out.iter_mut().zip(logical_arrangement(&phys)) {
+        m.logical = logical;
     }
     Ok(out)
 }

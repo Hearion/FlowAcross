@@ -1,12 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { PermissionList } from "./Dialogs";
-import { ClipboardSetting, CrossScreenSettings, WinKeysSetting } from "./SettingsControls";
+import { ClipboardSetting, CrossScreenSettings, WinKeysSetting, useDeviceNameInput } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
 import { ChevronLeftIcon, Logo, SETTINGS_ICONS, Toggle } from "./ui";
 import { ProgressBar, type Updater } from "./Updater";
 
-export type SettingsSection = "general" | "permissions" | "crossing" | "clipboard" | "updates" | "account" | "about";
+export type SettingsSection = "general" | "permissions" | "crossing" | "clipboard" | "updates" | "about";
 
 const NAV: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "通用" },
@@ -14,7 +14,6 @@ const NAV: { id: SettingsSection; label: string }[] = [
   { id: "crossing", label: "跨屏与键鼠" },
   { id: "clipboard", label: "剪贴板" },
   { id: "updates", label: "软件更新" },
-  { id: "account", label: "账号" },
   { id: "about", label: "关于" },
 ];
 
@@ -145,19 +144,6 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <p className="settings-note">
               更新时流界会先断开与其他电脑的键鼠共享，安装完成后自动重新打开并重新连接。两台电脑请尽量保持相同版本。
             </p>
-          </Section>
-        )}
-
-        {section === "account" && (
-          <Section title="账号">
-            <div className="account-empty">
-              <Logo size={40} />
-              <strong>无需账号即可使用全部基础功能</strong>
-              <span>同一局域网内的电脑直接配对、加密直连。账号与跨网络同步将在后续版本提供。</span>
-              <button className="btn" disabled>
-                登录（即将推出）
-              </button>
-            </div>
           </Section>
         )}
 
@@ -389,25 +375,14 @@ function UpdateStatus({ version, updater }: { version: string; updater: Updater 
 }
 
 function NameSetting({ current }: { current: string }) {
-  const [value, setValue] = useState(current);
-  useEffect(() => setValue(current), [current]);
-  const commit = () => {
-    if (value.trim() !== current) api.setDeviceName(value);
-  };
+  const input = useDeviceNameInput(current);
   return (
     <div className="setting inline">
       <div className="setting-text">
         <span>设备名称</span>
         <small>其他电脑会用这个名字找到这台电脑</small>
       </div>
-      <input
-        className="text-input"
-        value={value}
-        maxLength={40}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-      />
+      <input className="text-input" {...input} />
     </div>
   );
 }

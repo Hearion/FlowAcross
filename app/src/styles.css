@@ -1950,31 +1950,6 @@ kbd {
   letter-spacing: 0.04em;
 }
 
-.account-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 24px;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--r-group);
-}
-
-.account-empty strong {
-  margin-top: 8px;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.account-empty span {
-  max-width: 36em;
-  color: var(--fg-2);
-  font-size: 13px;
-}
-
-.account-empty .btn {
-  margin-top: 10px;
-}
 
 .about-head {
   display: flex;

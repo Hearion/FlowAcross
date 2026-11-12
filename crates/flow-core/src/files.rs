@@ -121,6 +121,10 @@ pub fn sanitize_component(name: &str) -> String {
             end -= 1;
         }
         s.truncate(end);
+        // 截断后结尾可能又露出点或空格。
+        while s.ends_with(['.', ' ']) {
+            s.pop();
+        }
     }
     s
 }
@@ -317,6 +321,14 @@ impl OfferBook {
         self.pending.as_ref()
     }
 
+    /// 取出来的清单这次没能去取（比如此刻暂停了共享）：放回去，等用户手动接收。
+    /// 期间已经来了新的清单就以新的为准。
+    pub fn restore(&mut self, from: DeviceId, offer: FileOffer) {
+        if self.pending.is_none() {
+            self.pending = Some((from, offer));
+        }
+    }
+
     /// 用户点了「接收」。
     pub fn take(&mut self) -> Option<(DeviceId, FileOffer)> {
         self.pending.take()
@@ -382,6 +394,9 @@ mod tests {
         let long = "长".repeat(100); // 300 字节
         let s = sanitize_component(&long);
         assert!(s.len() <= 255 && s.chars().all(|c| c == '长'));
+        // 截断处正好露出点和空格：也要去掉。
+        let s = sanitize_component(&format!("{}. .txt", "a".repeat(253)));
+        assert_eq!(s, "a".repeat(253));
     }
 
     #[test]
@@ -553,6 +568,21 @@ mod tests {
         assert_eq!(book.on_offer(dev("a"), big.clone(), true, 0), None);
         assert_eq!(book.on_arrive(10), None);
         assert_eq!(book.take(), Some((dev("a"), big)));
+    }
+
+    #[test]
+    fn restored_offer_waits_and_does_not_replace_a_newer_one() {
+        let mut book = OfferBook::default();
+        book.on_offer(dev("a"), offer(1, 10), false, 0);
+        let (from, o) = book.on_arrive(5).unwrap();
+        // 这次没能去取：放回去，界面上还能手动接收，键鼠下次来到时也会再试。
+        book.restore(from.clone(), o.clone());
+        assert_eq!(book.pending().map(|(_, o)| o.id), Some(1));
+        assert!(book.on_arrive(9_000).is_some());
+        // 期间来了新的清单：不被旧的顶掉。
+        book.on_offer(dev("b"), offer(2, 10), false, 20_000);
+        book.restore(from, o);
+        assert_eq!(book.pending().map(|(_, o)| o.id), Some(2));
     }
 
     #[test]

@@ -222,6 +222,8 @@ pub struct WinCapture {
 impl InputCapture for WinCapture {
     fn start(&mut self, handler: CaptureHandler) -> Result<(), PlatformError> {
         self.stop();
+        // 停止期间错过的抬起（锁屏、重装钩子时按着键）不能留到下一次，否则那个键再按下会被当成连发。
+        *PRESSED.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Ok(list) = monitors() {
             update_monitors(list);
         }
@@ -426,7 +428,6 @@ pub fn set_cursor_captured(captured: bool, at: Option<(f64, f64)>) {
 // 注入
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
 pub struct WinInjector;
 
 fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
@@ -443,6 +444,13 @@ fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
             },
         },
     }
+}
+
+/// 像素位置 → `MOUSEEVENTF_ABSOLUTE` 的 0..65535 坐标。系统按 `n * size / 65536` 向下取整换回像素，
+/// 所以这里向上取整，换回来才是同一个像素（向下取整会经常偏左、偏上 1 像素）。
+fn normalize_abs(offset: i32, size: i32) -> i32 {
+    let size = size.max(1) as i64;
+    ((offset as i64 * 65536 + size - 1) / size) as i32
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), PlatformError> {
@@ -488,13 +496,11 @@ impl InputInjector for WinInjector {
             (
                 GetSystemMetrics(SM_XVIRTUALSCREEN),
                 GetSystemMetrics(SM_YVIRTUALSCREEN),
-                GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2),
-                GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
             )
         };
-        // 绝对坐标归一化到 0..65535（覆盖整个虚拟桌面）。
-        let nx = ((px - vx) as i64 * 65535 / (vw - 1) as i64) as i32;
-        let ny = ((py - vy) as i64 * 65535 / (vh - 1) as i64) as i32;
+        let (nx, ny) = (normalize_abs(px - vx, vw), normalize_abs(py - vy, vh));
         send(&[mouse_input(
             nx,
             ny,
@@ -537,7 +543,18 @@ impl InputInjector for WinInjector {
         let Some((scan, extended)) = keymap::to_win(code) else {
             return Ok(());
         };
-        let mut flags = KEYEVENTF_SCANCODE;
+        // Pause 和 Num Lock 在钩子里报告的扫描码（0x45 / E0 45）和硬件扫描码语义相反：按扫描码注入时
+        // 0x45 是 Num Lock，Pause 是 E1 1D 45 序列。这两个键改按虚拟键码注入。
+        let vk: u16 = match code.0 {
+            0x48 => 0x13, // VK_PAUSE
+            0x53 => 0x90, // VK_NUMLOCK
+            _ => 0,
+        };
+        let (scan, mut flags) = if vk != 0 {
+            (0, 0)
+        } else {
+            (scan, KEYEVENTF_SCANCODE)
+        };
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
@@ -548,7 +565,7 @@ impl InputInjector for WinInjector {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: 0,
+                    wVk: vk,
                     wScan: scan,
                     dwFlags: flags,
                     time: 0,
@@ -596,9 +613,10 @@ pub struct WinClipboard;
 impl crate::ClipboardAccess for WinClipboard {
     fn get_text(&mut self) -> Result<Option<String>, PlatformError> {
         use windows_sys::Win32::System::DataExchange::GetClipboardData;
-        use windows_sys::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+        use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
         let _guard = OpenClipboardGuard::open()?;
-        // SAFETY: 剪贴板已打开；数据句柄归剪贴板所有，只锁定读取，不释放。
+        // SAFETY: 剪贴板已打开；数据句柄归剪贴板所有，只锁定读取，不释放；按 GlobalSize 限定读取范围
+        // （别的程序放进来的文本不一定带结尾的 0）。
         unsafe {
             let handle = GetClipboardData(CF_UNICODETEXT);
             if handle.is_null() {
@@ -608,8 +626,9 @@ impl crate::ClipboardAccess for WinClipboard {
             if ptr.is_null() {
                 return Ok(None);
             }
+            let max = GlobalSize(handle) / 2;
             let mut len = 0;
-            while *ptr.add(len) != 0 {
+            while len < max && *ptr.add(len) != 0 {
                 len += 1;
             }
             let text = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import type { DeviceView, Display, Layout } from "./types";
-import { CursorIcon, OsIcon, hueOf, resolution } from "./ui";
+import { CursorIcon, OsIcon, hueOf, resolution, statusText } from "./ui";
 
 interface Props {
   layout: Layout;
@@ -91,13 +91,6 @@ function leadDisplays(displays: Display[]): Set<Display> {
   }
   return new Set(best.values());
 }
-
-const STATUS_CHIP: Record<DeviceView["status"], string> = {
-  local: "本机",
-  connected: "在线",
-  connecting: "连接中",
-  offline: "离线",
-};
 
 export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserveBottom = 0 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
@@ -192,7 +185,7 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
                       键鼠在这里
                     </span>
                   ) : (
-                    <span className={`screen-chip ${dev.status}`}>{STATUS_CHIP[dev.status]}</span>
+                    <span className={`screen-chip ${dev.status}`}>{statusText(dev)}</span>
                   )}
                 </div>
               )}

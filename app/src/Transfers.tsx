@@ -6,6 +6,9 @@ import type { FileOfferView, StateView, TransferView } from "./types";
 import { CloseIcon, FolderIcon, TransferIcon } from "./ui";
 import { ProgressBar } from "./Updater";
 
+/** 与 flow-core 的 files::AUTO_FETCH_LIMIT 一致：超过它的文件不自动接收。 */
+const AUTO_FETCH_LIMIT = 1024 * 1024 * 1024;
+
 /** 1.2 KB / 34.5 MB / 3.2 GB。 */
 export function formatBytes(n: number): string {
   if (n < 1000) return `${n} B`;
@@ -42,7 +45,8 @@ function OfferCard({ offer }: { offer: FileOfferView }) {
           {offer.peer_name}复制了「{offer.label}」
         </span>
         <small>
-          {offer.files} 个文件，{formatBytes(offer.bytes)}。较大，不会自动传输
+          {offer.files} 个文件，{formatBytes(offer.bytes)}。
+          {offer.bytes > AUTO_FETCH_LIMIT ? "较大，不会自动传输" : "还没有接收"}
         </small>
       </div>
       <button className="btn small primary" onClick={() => api.acceptFiles()}>

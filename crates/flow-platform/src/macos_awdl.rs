@@ -4,7 +4,7 @@
 //! 信道，网络停顿 60–100ms，跨屏就会周期性卡顿。关闭 `awdl0` 需要 root，所以第一次开启时请用户
 //! 授权一次，安装一个很小的系统后台服务（launchd 守护进程）。它只做一件事：
 //!
-//! - 标志文件 [`FLAG`] 存在、且流界正在运行时，保持 `awdl0` 关闭（被重新打开会在半秒内再关掉）；
+//! - 标志文件 [`FLAG`] 存在（且属于当前登录用户）、流界正在运行时，保持 `awdl0` 关闭（被重新打开会在半秒内再关掉）；
 //! - 否则，如果是它关掉的，就恢复打开。
 //!
 //! 流界在"开启了低延迟模式且有设备连着"时创建标志文件，其余时候删除。标志文件放在 /tmp，
@@ -26,8 +26,12 @@ const SCRIPT: &str = r#"#!/bin/sh
 # 流界低延迟模式：流界运行且标志文件存在时保持 awdl0 关闭，否则恢复。由流界安装，可在流界设置里移除。
 FLAG=/tmp/app.flowacross.lowlatency
 DOWNED=0
+# /tmp 谁都能写：只认当前登录用户创建的标志文件，别的用户放一个同名文件不能让 AWDL 一直关着。
+mine() {
+  [ "$(stat -f %u "$FLAG" 2>/dev/null)" = "$(stat -f %u /dev/console 2>/dev/null)" ]
+}
 while true; do
-  if [ -e "$FLAG" ] && pgrep -ix flowacross >/dev/null 2>&1; then
+  if [ -e "$FLAG" ] && mine && pgrep -ix flowacross >/dev/null 2>&1; then
     if ifconfig awdl0 2>/dev/null | head -n 1 | grep -q '<UP'; then
       ifconfig awdl0 down && DOWNED=1
     fi

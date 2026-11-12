@@ -49,6 +49,13 @@ impl ClipboardSync {
         self.seen.remove(device);
     }
 
+    /// 调用方已经用别的办法（比如剪贴板变化计数）认出了自己写入的那次变化，不会再为它调用
+    /// [`Self::on_local_change`]：忘掉记下的内容。否则它一直留着，用户之后自己复制同样的文字
+    /// 会被当成回声吞掉；写入失败时也要调用，那段文字根本没进剪贴板。
+    pub fn forget_applied(&mut self) {
+        self.last_applied = None;
+    }
+
     /// 收到远端剪贴板内容时调用，返回需要写入本机剪贴板的文本。
     pub fn on_remote(&mut self, origin: &DeviceId, seq: u64, text: &str) -> Option<String> {
         if !self.enabled || origin == &self.local || text.len() > MAX_CLIPBOARD_TEXT {
@@ -91,6 +98,16 @@ mod tests {
         // 写入本机剪贴板后，系统通知"剪贴板变了"——不回传
         assert!(c.on_local_change("hello").is_none());
         // 之后用户自己再复制同样内容，正常同步
+        assert!(c.on_local_change("hello").is_some());
+    }
+
+    #[test]
+    fn forgetting_applied_lets_the_same_text_sync_later() {
+        let mut c = ClipboardSync::new(dev("b"));
+        assert!(c.on_remote(&dev("a"), 1, "hello").is_some());
+        // 调用方自己认出了这次写入（没有再报"剪贴板变了"）。
+        c.forget_applied();
+        // 之后用户自己复制同样的内容：照常同步，不会被当成回声。
         assert!(c.on_local_change("hello").is_some());
     }
 

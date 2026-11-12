@@ -7,12 +7,6 @@ use crate::geometry::{EDGE_EPSILON, Edge, Point};
 use crate::layout::{DisplayId, EdgeMapping, Layout};
 use crate::switching::EdgeContact;
 
-/// 物理像素位移 → 逻辑点位移。源设备捕获的是物理像素，除以源显示器缩放后，
-/// 在任何缩放比例的目标屏幕上移动的"视觉距离"都一致。
-pub fn physical_to_logical(dx: f64, dy: f64, source_scale: f64) -> (f64, f64) {
-    (dx / source_scale, dy / source_scale)
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct VirtualCursor {
     pub display: DisplayId,
@@ -120,12 +114,6 @@ mod tests {
     use super::*;
     use crate::geometry::{Rect, assert_near};
     use crate::layout::tests::{display, id, mac_and_pc};
-
-    #[test]
-    fn logical_delta_is_scale_independent() {
-        assert_eq!(physical_to_logical(200.0, -40.0, 2.0), (100.0, -20.0));
-        assert_eq!(physical_to_logical(150.0, 0.0, 1.5), (100.0, 0.0));
-    }
 
     #[test]
     fn moves_inside_display() {

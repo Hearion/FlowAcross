@@ -60,11 +60,6 @@ impl Display {
     pub fn to_local(&self, p: Point) -> Point {
         Point::new(p.x - self.rect.x, p.y - self.rect.y)
     }
-
-    /// 显示器内的逻辑坐标 → 布局空间坐标。
-    pub fn from_local(&self, p: Point) -> Point {
-        Point::new(p.x + self.rect.x, p.y + self.rect.y)
-    }
 }
 
 /// 光标跨边时沿边方向的坐标如何换算。
@@ -109,10 +104,6 @@ impl Layout {
 
     pub fn display(&self, id: &DisplayId) -> Option<&Display> {
         self.displays.iter().find(|d| &d.id == id)
-    }
-
-    pub fn display_at(&self, p: Point) -> Option<&Display> {
-        self.displays.iter().find(|d| d.rect.contains(p))
     }
 
     pub fn displays_of<'a>(&'a self, device: &'a DeviceId) -> impl Iterator<Item = &'a Display> {
@@ -334,10 +325,137 @@ impl Layout {
     }
 }
 
+/// 一块显示器在系统里的物理像素矩形和缩放（Windows 的虚拟桌面是物理像素）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhysDisplay {
+    /// 物理像素：left, top, right, bottom。
+    pub rect: (i32, i32, i32, i32),
+    /// 物理像素 / 逻辑点。
+    pub scale: f64,
+    pub primary: bool,
+}
+
+/// 把缩放各不相同的显示器从物理像素排布换算成逻辑点排布，返回与输入一一对应的逻辑矩形。
+///
+/// 每块屏各自"原点 ÷ 自己的缩放"得不到连续的排布：150% 的主屏右边接一块 100% 的副屏，
+/// 副屏的逻辑原点会落在主屏右边很远处，中间空出一截，光标过不去；缩放反过来则互相重叠。
+/// 这里从主屏出发，逐块把物理上相贴的屏幕贴到已放好的邻居的逻辑边上，沿边方向的错位按
+/// 邻居的缩放换算。物理上没有和任何屏幕相贴的（理论上不会出现）退回"原点 ÷ 自己的缩放"。
+pub fn logical_arrangement(displays: &[PhysDisplay]) -> Vec<Rect> {
+    let scale = |d: &PhysDisplay| if d.scale > 0.0 { d.scale } else { 1.0 };
+    let size = |d: &PhysDisplay| {
+        let (l, t, r, b) = d.rect;
+        ((r - l) as f64 / scale(d), (b - t) as f64 / scale(d))
+    };
+    let own = |d: &PhysDisplay| {
+        let (w, h) = size(d);
+        Rect::new(d.rect.0 as f64 / scale(d), d.rect.1 as f64 / scale(d), w, h)
+    };
+    let mut placed: Vec<Option<Rect>> = vec![None; displays.len()];
+    let Some(start) = displays
+        .iter()
+        .position(|d| d.primary)
+        .or(if displays.is_empty() { None } else { Some(0) })
+    else {
+        return Vec::new();
+    };
+    placed[start] = Some(own(&displays[start]));
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(a) = queue.pop_front() {
+        let pa = &displays[a];
+        let la = placed[a].expect("queued displays are placed");
+        let (al, at, ar, ab) = pa.rect;
+        for (b, pb) in displays.iter().enumerate() {
+            if placed[b].is_some() {
+                continue;
+            }
+            let (bl, bt, br, bb) = pb.rect;
+            let (w, h) = size(pb);
+            let rows_overlap = at.max(bt) < ab.min(bb);
+            let cols_overlap = al.max(bl) < ar.min(br);
+            let along_x = la.x + (bl - al) as f64 / scale(pa);
+            let along_y = la.y + (bt - at) as f64 / scale(pa);
+            let origin = if bl == ar && rows_overlap {
+                Some((la.right(), along_y))
+            } else if br == al && rows_overlap {
+                Some((la.x - w, along_y))
+            } else if bt == ab && cols_overlap {
+                Some((along_x, la.bottom()))
+            } else if bb == at && cols_overlap {
+                Some((along_x, la.y - h))
+            } else {
+                None
+            };
+            if let Some((x, y)) = origin {
+                placed[b] = Some(Rect::new(x, y, w, h));
+                queue.push_back(b);
+            }
+        }
+    }
+    placed
+        .into_iter()
+        .zip(displays)
+        .map(|(r, d)| r.unwrap_or_else(|| own(d)))
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::geometry::assert_near;
+
+    fn phys(rect: (i32, i32, i32, i32), scale: f64, primary: bool) -> PhysDisplay {
+        PhysDisplay {
+            rect,
+            scale,
+            primary,
+        }
+    }
+
+    #[test]
+    fn mixed_scale_displays_stay_touching_in_logical_space() {
+        // 2560×1440@150% 主屏，右边接 1920×1080@100%：逻辑上必须紧贴主屏右边，不能留空。
+        let r = logical_arrangement(&[
+            phys((0, 0, 2560, 1440), 1.5, true),
+            phys((2560, 300, 4480, 1380), 1.0, false),
+        ]);
+        assert_eq!(r[0], Rect::new(0.0, 0.0, 2560.0 / 1.5, 960.0));
+        assert_eq!(r[1], Rect::new(2560.0 / 1.5, 200.0, 1920.0, 1080.0));
+        assert!(!r[0].intersects(&r[1]));
+        // 缩放反过来（副屏 150%）原来会和主屏重叠。
+        let r = logical_arrangement(&[
+            phys((0, 0, 1920, 1080), 1.0, true),
+            phys((1920, 0, 4480, 1440), 1.5, false),
+        ]);
+        assert_eq!(r[1].x, 1920.0);
+        assert!(!r[0].intersects(&r[1]));
+    }
+
+    #[test]
+    fn arrangement_handles_left_above_chains_and_order() {
+        // 主屏不在列表第一位；左边一块 200%，它上面再接一块 100%（经由左屏间接相连）。
+        let r = logical_arrangement(&[
+            phys((-3840, 0, 0, 2160), 2.0, false),
+            phys((0, 0, 1920, 1080), 1.0, true),
+            phys((-3840, -1080, -1920, 0), 1.0, false),
+        ]);
+        assert_eq!(r[1], Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(r[0], Rect::new(-1920.0, 0.0, 1920.0, 1080.0));
+        assert_eq!(r[2], Rect::new(-1920.0, -1080.0, 1920.0, 1080.0));
+        // 同一缩放时和"各自除以缩放"的结果一致。
+        let same = logical_arrangement(&[
+            phys((0, 0, 3840, 2160), 2.0, true),
+            phys((3840, 0, 7680, 2160), 2.0, false),
+        ]);
+        assert_eq!(same[1], Rect::new(1920.0, 0.0, 1920.0, 1080.0));
+        // 没有相贴的屏幕退回各自换算；空列表不出错。
+        let apart = logical_arrangement(&[
+            phys((0, 0, 1000, 1000), 1.0, true),
+            phys((5000, 5000, 6000, 6000), 2.0, false),
+        ]);
+        assert_eq!(apart[1], Rect::new(2500.0, 2500.0, 500.0, 500.0));
+        assert!(logical_arrangement(&[]).is_empty());
+    }
 
     #[test]
     fn device_id_validation_and_short_never_panics() {

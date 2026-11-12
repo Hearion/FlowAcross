@@ -13,6 +13,15 @@ export function hueOf(devices: DeviceView[], id: string): number {
   return (i < 0 ? 0 : i) % HUE_COUNT;
 }
 
+/** 设备的连接状态文字，侧栏和布局图共用（"键鼠在这里 / 控制中"由各处自己显示）。 */
+export function statusText(d: DeviceView): string {
+  if (d.status === "local") return "本机";
+  if (d.paused) return "已暂停";
+  if (d.status === "connected") return d.remote_paused ? "对方已暂停" : "在线";
+  if (d.status === "connecting") return "连接中";
+  return d.manual ? "已断开" : "离线";
+}
+
 const size = (w: number, h: number) => `${Math.round(w)}×${Math.round(h)}`;
 
 /**
@@ -226,12 +235,6 @@ export const SETTINGS_ICONS: Record<string, () => ReactNode> = {
     <Line>
       <path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
       <path d="M19.5 4.5v4h-4" />
-    </Line>
-  ),
-  account: () => (
-    <Line>
-      <circle cx="12" cy="8.5" r="3.5" />
-      <path d="M5 19.5c1.3-3.2 4-4.8 7-4.8s5.7 1.6 7 4.8" />
     </Line>
   ),
   about: () => (

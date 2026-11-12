@@ -219,10 +219,6 @@ impl PressedState {
         self.keys.contains(&code)
     }
 
-    pub fn has_button(&self, button: MouseButton) -> bool {
-        self.buttons.contains(&button)
-    }
-
     pub fn any_button(&self) -> bool {
         !self.buttons.is_empty()
     }
@@ -285,10 +281,6 @@ pub struct InputRouter {
 }
 
 impl InputRouter {
-    pub fn is_remote(&self) -> bool {
-        self.remote_active
-    }
-
     /// 当前物理上按住的修饰键（本机 + 远端）。
     pub fn held_modifiers(&self) -> Modifiers {
         self.local.modifiers() | self.remote.modifiers()

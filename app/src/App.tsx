@@ -3,27 +3,27 @@ import { api, inTauri } from "./api";
 import { AddDeviceDialog, ConfirmDialog, OS_TEXT, PERMISSION_TEXT, PairingDialog } from "./Dialogs";
 import { LayoutMap } from "./LayoutMap";
 import { Onboarding } from "./Onboarding";
-import { ClipboardSetting, CrossScreenSettings } from "./SettingsControls";
+import { ClipboardSetting, CrossScreenSettings, useDeviceNameInput } from "./SettingsControls";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { FileTransfers } from "./Transfers";
 import type { DeviceView, Settings, StateView } from "./types";
 import { UpdateBanner, useUpdater } from "./Updater";
-import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution } from "./ui";
+import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
 
 function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
-  if (d.status === "local") return <span className="chip">本机</span>;
-  if (d.paused) return <span className="chip muted">已暂停</span>;
+  const text = statusText(d);
+  if (d.status === "local") return <span className="chip">{text}</span>;
+  if (d.paused) return <span className="chip muted">{text}</span>;
   if (d.status === "connected" && d.remote_paused)
     return (
       <span className="chip muted" title="对方暂停了共享或锁定了键鼠，恢复后可以再切过去">
-        对方已暂停
+        {text}
       </span>
     );
-  if (d.status === "connected") return <span className="chip ok">在线</span>;
-  if (d.status === "connecting") return <span className="chip">连接中</span>;
-  if (d.manual) return <span className="chip muted">已断开</span>;
-  return <span className="chip muted">离线</span>;
+  if (d.status === "connected") return <span className="chip ok">{text}</span>;
+  if (d.status === "connecting") return <span className="chip">{text}</span>;
+  return <span className="chip muted">{text}</span>;
 }
 
 interface Toast {
@@ -330,21 +330,11 @@ export default function App() {
 }
 
 function RenameField({ current }: { current: string }) {
-  const [value, setValue] = useState(current);
-  useEffect(() => setValue(current), [current]);
-  const commit = () => {
-    if (value.trim() !== current) api.setDeviceName(value);
-  };
+  const input = useDeviceNameInput(current);
   return (
     <label className="field compact">
       <span>设备名称</span>
-      <input
-        value={value}
-        maxLength={40}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
-      />
+      <input {...input} />
     </label>
   );
 }

@@ -286,6 +286,8 @@ struct Inner {
     controller: Arc<Mutex<Controller>>,
     capture: Mutex<Option<Box<dyn InputCapture>>>,
     capture_warned: AtomicBool,
+    /// `shutdown()` 之后为 true：后台循环退出，不再重连、不再重新安装键鼠捕获。
+    stopped: AtomicBool,
     /// 系统接口失败后，下次重试的时间（避免频繁调用系统接口）。
     capture_retry_at: Mutex<Option<Instant>>,
     /// 被控制方：当前控制本机的设备，以及它按下的键（失败时据此释放）。
@@ -343,6 +345,9 @@ struct ClipboardState {
 struct FilesState {
     /// 本机剪贴板里的文件：发给其他设备的清单和对应的本机路径。
     local: Option<(FileOffer, Vec<PathBuf>)>,
+    /// 复制文件时没有能收文件的设备连着：先只记下路径和当时剪贴板的代，
+    /// 等设备连上再整理清单发过去（见 `run_session`）。
+    unoffered: Option<(Vec<PathBuf>, u64)>,
     next_offer: u64,
     /// 其他设备复制的文件，决定什么时候去取。
     book: OfferBook,
@@ -357,6 +362,9 @@ struct Controlled {
     by_os: Os,
     session: u32,
     pressed: PressedState,
+    /// 对方按下的键（它发来的键码）→ 当时换算后注入的键码。抬起时按这里的记录注入，
+    /// 中途改了「Windows 键盘的修饰键」设置也不会按下一个键、抬起另一个键（卡键）。
+    mapped: HashMap<KeyCode, KeyCode>,
     last_seen: Instant,
 }
 
@@ -438,7 +446,14 @@ struct Backoff {
 }
 
 /// 默认设备名：macOS 用系统设置里的电脑名称（如"小严的 MacBook Pro"），其他系统用主机名并去掉 `.local`。
+///
+/// 只在第一次调用时查询：macOS 上要启动 `scutil` 子进程，而用户没起名字时每次刷新界面都会用到它。
 pub fn system_device_name() -> String {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(query_system_device_name).clone()
+}
+
+fn query_system_device_name() -> String {
     #[cfg(target_os = "macos")]
     {
         let name = std::process::Command::new("scutil")
@@ -483,8 +498,6 @@ fn permission_kind(p: Permission) -> &'static str {
     }
 }
 
-/// macOS 按"负责进程"记录权限：没有打包成 .app 运行时（`npm run tauri dev`），
-/// 权限会算在启动它的终端或编辑器上，系统设置的列表里看不到流界。
 /// 平台错误里给用户看的部分（去掉"系统调用失败："之类的前缀）。
 fn platform_reason(e: &PlatformError) -> String {
     match e {
@@ -493,7 +506,15 @@ fn platform_reason(e: &PlatformError) -> String {
     }
 }
 
+/// macOS 按"负责进程"记录权限：没有打包成 .app 运行时（`npm run tauri dev`），
+/// 权限会算在启动它的终端或编辑器上，系统设置的列表里看不到流界。
 fn permission_hint() -> Option<String> {
+    // 只取决于程序自己的路径，运行期间不会变；每次刷新界面都会用到，算一次就够了。
+    static HINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    HINT.get_or_init(compute_permission_hint).clone()
+}
+
+fn compute_permission_hint() -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -674,6 +695,7 @@ impl Engine {
                 controller: Arc::new(Mutex::new(controller)),
                 capture: Mutex::new(None),
                 capture_warned: AtomicBool::new(false),
+                stopped: AtomicBool::new(false),
                 capture_retry_at: Mutex::new(None),
                 controlled: Mutex::new(None),
                 injector: Mutex::new(None),
@@ -724,7 +746,11 @@ impl Engine {
     }
 
     /// 退出前调用：立即通知所有对端断开，让对方马上释放按键、显示离线。
+    /// 可以重复调用（托盘「退出」和应用退出事件都会调到），只有第一次生效。
     pub fn shutdown(&self) {
+        if self.inner.stopped.swap(true, Ordering::SeqCst) {
+            return;
+        }
         self.controller().force_local();
         if let Some(mut c) = self.inner.capture.lock().expect("capture").take() {
             c.stop();
@@ -779,6 +805,12 @@ impl Engine {
         self.sync_availability();
         self.sync_input();
         self.sync_low_latency();
+        self.emit_view();
+    }
+
+    /// 只把当前状态推给界面，不重新同步控制器、可用状态和低延迟模式。
+    /// 用于只有显示内容变化的场合（传输进度每秒推好几次，没必要每次都重建布局）。
+    fn emit_view(&self) {
         let view = self.view();
         (self.inner.notify)(EngineEvent::State(Box::new(view)));
     }
@@ -1121,7 +1153,13 @@ impl Engine {
     pub fn update_settings(&self, settings: Settings) {
         *self.inner.win_keys.lock().expect("win_keys") = settings.win_to_mac_keys();
         let mut st = self.lock();
-        st.config.settings = settings;
+        // 低延迟模式要先装好后台服务才能开，只能通过 `set_low_latency` 改；
+        // 界面传来的是整份设置的快照，这一项以引擎里的为准。
+        let low_latency = st.config.settings.low_latency;
+        st.config.settings = Settings {
+            low_latency,
+            ..settings
+        };
         self.save(&st);
         drop(st);
         self.emit();
@@ -1250,6 +1288,14 @@ impl Engine {
         }
     }
 
+    /// 重试也不会成功（版本不兼容、对方已不信任本机）：停止自动重连，等用户处理后手动连接。
+    /// 否则同一条提示会随着每次自动重试反复弹出，最后再弹一条「已暂停自动重试」。
+    fn stop_auto_reconnect(&self, id: &DeviceId) {
+        let mut st = self.lock();
+        st.backoff.remove(id);
+        st.manual.insert(id.clone());
+    }
+
     /// 移除已配对设备：双方都会删除对方的可信记录。
     pub fn remove_device(&self, id: &DeviceId) {
         let session = {
@@ -1257,9 +1303,12 @@ impl Engine {
             st.config.peers.retain(|p| &p.id != id);
             st.backoff.remove(id);
             st.manual.remove(id);
+            st.remote_blocked.remove(id);
             self.save(&st);
             st.sessions.remove(id)
         };
+        // 会话已经从表里拿掉，它结束时不会再清理，这里把它等待接收的文件清单一并撤掉。
+        self.inner.files.lock().expect("files").book.clear_from(id);
         if let Some(s) = session {
             let _ = s.tx.send(Message::Bye {
                 reason: ByeReason::Removed,
@@ -1329,11 +1378,16 @@ impl Engine {
         let mut tick: u64 = 0;
         loop {
             tokio::time::sleep(TICK).await;
+            if self.stopped() {
+                // 已经关闭（退出，或更新安装失败后等用户重新打开）：端点关了，再重连只会刷失败提示。
+                return;
+            }
             tick += 1;
             if tick % 3 == 0 {
                 self.refresh_displays();
             }
             self.ensure_capture();
+            self.stop_idle_capture();
             let targets = {
                 let mut st = self.lock();
                 let now = Instant::now();
@@ -1609,9 +1663,16 @@ impl Engine {
                 })
                 .await;
             linger_close(&link.conn, b"version").await;
-            self.notice(format!(
-                "「{name}」的流界版本与本机不兼容，请把两台电脑都升级到最新版本。"
-            ));
+            // 对方还没通过认证：只有本机主动去连、或它是已配对的设备时才提示，
+            // 否则局域网里任何人都能反复连过来刷提示。
+            if initiator || we_trust {
+                if we_trust {
+                    self.stop_auto_reconnect(&peer);
+                }
+                self.notice(format!(
+                    "「{name}」的流界版本与本机不兼容，请把两台电脑都升级到最新版本。"
+                ));
+            }
             return Ok(());
         }
         self.lock().connecting.remove(&peer);
@@ -1659,6 +1720,7 @@ impl Engine {
                 .await;
             linger_close(&link.conn, b"unpaired").await;
             if we_trust {
+                self.stop_auto_reconnect(&peer_info.id);
                 self.notice(format!("「{name}」已不再信任本机，需要重新配对。"));
             }
         } else {
@@ -1958,9 +2020,12 @@ impl Engine {
             let _ = tx.send(Message::Displays(st.local_displays.clone()));
             // 连上之前本机已经复制了文件：补发清单。
             if files && st.files_allowed(&peer) {
-                let local = self.inner.files.lock().expect("files").local.clone();
-                if let Some((offer, _)) = local {
-                    let _ = tx.send(Message::FileOffer(offer));
+                let mut f = self.inner.files.lock().expect("files");
+                if let Some((offer, _)) = &f.local {
+                    let _ = tx.send(Message::FileOffer(offer.clone()));
+                } else if let Some((paths, epoch)) = f.unoffered.take() {
+                    // 复制时还没有设备连着，清单没整理过：现在整理并发给所有能收的设备。
+                    tokio::spawn(self.clone().offer_files(paths, epoch));
                 }
             }
         }
@@ -1984,6 +2049,8 @@ impl Engine {
             let epoch = Instant::now();
             let now = || epoch.elapsed().as_millis() as u64;
             let mut throttle = MoveThrottle::new(MOUSE_SEND_INTERVAL_MS);
+            // 最近一次用数据报发出、还没在可靠流上确认过的鼠标位置。
+            let mut last_datagram_move: Option<Message> = None;
             loop {
                 let out = match throttle.deadline() {
                     Some(due) => {
@@ -2002,7 +2069,24 @@ impl Engine {
                     },
                 };
                 for m in out {
-                    if !moves.try_send(&m) && sender.send(&m).await.is_err() {
+                    if matches!(m, Message::MouseMove { .. }) {
+                        if moves.try_send(&m) {
+                            last_datagram_move = Some(m);
+                            continue;
+                        }
+                        last_datagram_move = None;
+                    } else if matches!(
+                        m,
+                        Message::Button { .. } | Message::Wheel { .. } | Message::Key { .. }
+                    ) && let Some(pos) = last_datagram_move.take()
+                    {
+                        // 位置走数据报、点击和按键走可靠流，两条通道之间没有先后保证，数据报还可能丢。
+                        // 在可靠流上补发一次最新位置，保证"先移到那里再点"。
+                        if sender.send(&pos).await.is_err() {
+                            return;
+                        }
+                    }
+                    if sender.send(&m).await.is_err() {
                         return;
                     }
                 }
@@ -2139,8 +2223,26 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// 有已连接的设备时启动键鼠捕获；失败（通常是缺少权限）只提示一次，之后定时重试。
+    fn stopped(&self) -> bool {
+        self.inner.stopped.load(Ordering::SeqCst)
+    }
+
+    /// 没有设备连着时卸掉键鼠捕获：钩子 / 事件监听挂在系统每一个输入事件的路径上，
+    /// 没有可切过去的设备就不该留着。有设备连上时 `ensure_capture` 会重新安装。
+    fn stop_idle_capture(&self) {
+        if !self.lock().sessions.is_empty() {
+            return;
+        }
+        let taken = self.inner.capture.lock().expect("capture").take();
+        if let Some(mut c) = taken {
+            self.controller().force_local();
+            c.stop();
+            info!("没有已连接的设备，键鼠捕获已停止");
+        }
+    }
+
     fn ensure_capture(&self) {
-        if !self.inner.input || self.lock().sessions.is_empty() {
+        if !self.inner.input || self.stopped() || self.lock().sessions.is_empty() {
             return;
         }
         let mut cap = self.inner.capture.lock().expect("capture");
@@ -2152,14 +2254,9 @@ impl Engine {
             return;
         }
         let ctl = self.inner.controller.clone();
-        let handler: flow_platform::CaptureHandler = Box::new(move |ev| match ctl.lock() {
-            Ok(mut c) => c.handle(ev),
-            Err(_) => {
-                // 控制器出错：至少保证本机键鼠可用。
-                flow_platform::set_cursor_captured(false, None);
-                flow_platform::Verdict::Pass
-            }
-        });
+        // 和 `Engine::controller()` 一样：某次持锁时 panic 不能让键鼠捕获从此失效，锁中毒时照常使用。
+        let handler: flow_platform::CaptureHandler =
+            Box::new(move |ev| ctl.lock().unwrap_or_else(|e| e.into_inner()).handle(ev));
         let mut capture = flow_platform::input_capture();
         match capture.start(handler) {
             Ok(()) => {
@@ -2187,25 +2284,25 @@ impl Engine {
         let mut was_remote = false;
         while let Some(ev) = rx.recv().await {
             if let ControlEvent::Lost(id) = &ev {
-                let (name, refused) = {
+                // 用户自己移除或暂停了正在控制的设备：键鼠回到本机是预期的，不提示"连接中断"。
+                let (by_user, name, refused) = {
                     let st = self.lock();
-                    let name = st
-                        .config
-                        .peer(id)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_default();
+                    let peer = st.config.peer(id);
                     (
-                        name,
+                        peer.is_none_or(|p| p.paused),
+                        peer.map(|p| p.name.clone()).unwrap_or_default(),
                         st.remote_blocked.contains(id) && st.sessions.contains_key(id),
                     )
                 };
-                self.notice(if refused {
-                    format!(
-                        "「{name}」暂停了共享或锁定了键鼠，键鼠已回到本机。对方恢复后可以再切过去。"
-                    )
-                } else {
-                    format!("与「{name}」的连接中断，键鼠已回到本机。")
-                });
+                if !by_user {
+                    self.notice(if refused {
+                        format!(
+                            "「{name}」暂停了共享或锁定了键鼠，键鼠已回到本机。对方恢复后可以再切过去。"
+                        )
+                    } else {
+                        format!("与「{name}」的连接中断，键鼠已回到本机。")
+                    });
+                }
             }
             let remote = self.controller().active_device().is_some();
             if remote {
@@ -2226,6 +2323,9 @@ impl Engine {
     async fn input_loop(self) {
         loop {
             tokio::time::sleep(INPUT_TICK).await;
+            if self.stopped() {
+                return;
+            }
             self.controller().tick();
             let stale = self
                 .inner
@@ -2267,7 +2367,7 @@ impl Engine {
             .filter(|(id, _)| st.config.peer(id).is_some_and(|p| !p.paused))
             .map(|(id, s)| (s.tx.clone(), s.files && st.files_allowed(id)))
             .collect();
-        (!peers.is_empty()).then_some(peers)
+        Some(peers)
     }
 
     /// 定时检查本机剪贴板：新的文本发给其他设备；复制了文件则发文件清单。
@@ -2277,7 +2377,16 @@ impl Engine {
         }
         loop {
             tokio::time::sleep(CLIPBOARD_POLL).await;
+            if self.stopped() {
+                return;
+            }
+            // `None`：共享剪贴板关着或暂停了；空列表：开着但现在没有设备连着。
             let peers = self.clipboard_peers();
+            let files_on = {
+                let st = self.lock();
+                let s = &st.config.settings;
+                s.clipboard && s.clipboard_files && !s.sharing_paused
+            };
             let (epoch, withdrawn, files, msg, peers) = {
                 let mut cb = self.inner.clipboard.lock().expect("clipboard");
                 cb.sync.enabled = peers.is_some();
@@ -2307,15 +2416,14 @@ impl Engine {
                     let mut f = self.inner.files.lock().expect("files");
                     f.epoch += 1;
                     f.book.clear();
+                    f.unoffered = None;
                     (f.epoch, f.local.take().map(|(o, _)| o.id))
-                };
-                let Some(peers) = peers else {
-                    continue;
                 };
                 let Some(access) = cb.access.as_mut() else {
                     continue;
                 };
-                let files = if peers.iter().any(|(_, f)| *f) {
+                let capable = peers.as_ref().is_some_and(|p| p.iter().any(|(_, f)| *f));
+                let mut files = if capable || files_on {
                     match access.get_files() {
                         Ok(f) => f,
                         Err(e) => {
@@ -2325,6 +2433,16 @@ impl Engine {
                     }
                 } else {
                     None
+                };
+                if !capable && let Some(paths) = files.take() {
+                    // 现在没有能收文件的设备：记下来，之后连上的设备会收到清单。
+                    self.inner.files.lock().expect("files").unoffered = Some((paths, epoch));
+                }
+                let Some(peers) = peers.filter(|p| !p.is_empty()) else {
+                    continue;
+                };
+                let Some(access) = cb.access.as_mut() else {
+                    continue;
                 };
                 let text = match access.get_text() {
                     Ok(t) => t,
@@ -2397,10 +2515,13 @@ impl Engine {
                 f.epoch += 1;
                 f.book.clear();
                 f.local = None;
+                f.unoffered = None;
                 debug!(device = %short(peer), "已写入远端剪贴板内容");
             }
             Err(e) => warn!(error = %e, "写入剪贴板失败"),
         }
+        // 自己写入的那次变化已经靠计数认出来了（失败时则根本没写进去），不再靠内容比对。
+        cb.sync.forget_applied();
     }
 
     // -----------------------------------------------------------------------
@@ -2422,7 +2543,7 @@ impl Engine {
             due
         };
         if due {
-            self.emit();
+            self.emit_view();
         }
     }
 
@@ -2506,10 +2627,19 @@ impl Engine {
             .expect("files")
             .book
             .on_arrive(self.now_ms());
-        if let Some((from, offer)) = fetch
-            && self.lock().files_allowed(&from)
-        {
+        let Some((from, offer)) = fetch else {
+            return;
+        };
+        if self.lock().files_allowed(&from) {
             self.start_fetch(from, offer);
+        } else {
+            // 此刻暂停了共享或这台设备：清单留着，恢复后可以在侧栏手动接收。
+            self.inner
+                .files
+                .lock()
+                .expect("files")
+                .book
+                .restore(from, offer);
         }
     }
 
@@ -2582,9 +2712,15 @@ impl Engine {
                 let (mut tx, mut rx) = flow_net::link::open_stream(&conn)
                     .await
                     .map_err(|e| format!("无法开始传输：{e}"))?;
-                transfer::receive(&mut tx, &mut rx, offer.id, &root, &ticket, || {
-                    engine.progress()
-                })
+                transfer::receive(
+                    &mut tx,
+                    &mut rx,
+                    offer.id,
+                    offer.bytes,
+                    &root,
+                    &ticket,
+                    || engine.progress(),
+                )
                 .await
             }
             .await;
@@ -2776,7 +2912,13 @@ impl Engine {
                 Message::Wheel { dx, dy } => Some(Remote::Wheel(dx, dy)),
                 Message::Key { code, down, repeat } => {
                     let win_keys = *self.inner.win_keys.lock().expect("win_keys");
-                    let code = map_key(c.by_os, Os::current(), win_keys, code);
+                    let now = map_key(c.by_os, Os::current(), win_keys, code);
+                    let code = if down {
+                        // 连发沿用按下时的换算。
+                        *c.mapped.entry(code).or_insert(now)
+                    } else {
+                        c.mapped.remove(&code).unwrap_or(now)
+                    };
                     c.pressed.on_key(code, down);
                     Some(Remote::Key(code, down, repeat))
                 }
@@ -2798,7 +2940,10 @@ impl Engine {
                     .lock()
                     .expect("controlled")
                     .as_mut()
-                    .map(|c| c.pressed.release_all())
+                    .map(|c| {
+                        c.mapped.clear();
+                        c.pressed.release_all()
+                    })
                     .unwrap_or_default();
                 self.inject_releases(events);
             }
@@ -2851,6 +2996,7 @@ impl Engine {
             by_os: peer_os,
             session,
             pressed: PressedState::default(),
+            mapped: HashMap::new(),
             last_seen: Instant::now(),
         });
         self.inject(|i| i.move_to(display, x, y));

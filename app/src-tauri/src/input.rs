@@ -155,10 +155,19 @@ impl Controller {
     pub fn configure(&mut self, cfg: ControllerConfig) {
         self.switcher.policy = cfg.policy.clone();
         self.cfg = cfg;
+        if !self.cfg.enabled {
+            // 暂停前开始的贴边停留计时不能在暂停后到期触发切换。
+            self.switcher.reset();
+        }
         let Some(a) = &self.active else {
             return;
         };
-        let reachable = self.cfg.outputs.contains_key(&a.device);
+        // 会话被重复连接替换后，发送通道换成了新的；继续用旧通道的话，本机输入全被拦截却到不了对方。
+        let reachable = self
+            .cfg
+            .outputs
+            .get(&a.device)
+            .is_some_and(|tx| tx.same_channel(&a.tx));
         if !reachable || !self.cfg.enabled {
             let device = a.device.clone();
             self.leave_to_local(None);
@@ -304,6 +313,17 @@ impl Controller {
         let p = d.rect.clamp(p);
         self.last_local = Some(p);
         if !self.cfg.enabled || self.cfg.outputs.is_empty() {
+            return;
+        }
+        // 绝大多数移动离屏幕边缘很远，不可能贴边：直接返回，不必为每个鼠标事件克隆显示器 ID。
+        let r = d.rect;
+        let (tx, ty) = (p.x + dx, p.y + dy);
+        if tx > r.left() + 1.0
+            && tx < r.right() - 1.0
+            && ty > r.top() + 1.0
+            && ty < r.bottom() - 1.0
+        {
+            self.switcher.reset();
             return;
         }
         let (dx, dy) = nudge(d.rect, p, dx, dy);

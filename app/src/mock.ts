@@ -1,6 +1,7 @@
 // 浏览器预览用的内存模拟后端：不在 Tauri 窗口里时使用，方便调样式。行为尽量贴近真实引擎。
 
 import type { Api } from "./api";
+import pkg from "../package.json";
 import type { StateView, UpdateProgress } from "./types";
 
 export function createMock(): Api {
@@ -32,7 +33,7 @@ export function createMock(): Api {
     permission_hint: null,
     controlled_by: null,
     low_latency: { supported: true, installed: false, active: false },
-    about: { version: "0.1.0", protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
+    about: { version: pkg.version, protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
     transfers: [],
     file_offer: null,
     receive_dir: "~/Downloads/流界",
@@ -66,7 +67,7 @@ export function createMock(): Api {
   const progressListeners = new Set<(p: UpdateProgress) => void>();
   // ?autostart-error：看开机启动开关失败时的提示。
   let autostart = false;
-  const mockUpdate ={ version: "0.2.0", current: "0.1.0", notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
+  const mockUpdate = { version: "9.9.9", current: pkg.version, notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
 
   return {
     getState: async () => structuredClone(state),

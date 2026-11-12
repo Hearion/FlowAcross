@@ -93,7 +93,8 @@ pub enum Message {
         /// 发送方是否已把接收方列为可信设备。双方都为 true 才直接建立会话，否则进入配对。
         trusts_you: bool,
     },
-    /// 发起方请求配对。双方各自根据两端证书指纹计算配对码并显示给用户核对。
+    /// 发起方请求配对。之后按 [`crate::pairing`] 的流程交换承诺和随机数（`PairCommit` / `PairNonce`），
+    /// 双方各自算出配对码并显示给用户核对。
     PairRequest,
     /// 本端用户已确认配对码一致。双方都确认后互相保存为可信设备。
     PairConfirm,

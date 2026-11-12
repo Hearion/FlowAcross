@@ -42,6 +42,9 @@ pub struct Discovery {
     advert: Advert,
 }
 
+/// 同时记住的 mDNS 服务名上限，远多于一个局域网里会有的流界设备数。
+const MAX_TRACKED_SERVICES: usize = 256;
+
 fn instance_name(device: &DeviceId) -> String {
     let end = device
         .0
@@ -57,10 +60,6 @@ fn service_info(a: &Advert) -> Result<ServiceInfo, NetError> {
         ("id".to_owned(), a.device.0.clone()),
         ("name".to_owned(), a.name.clone()),
         ("os".to_owned(), a.os.clone()),
-        (
-            "v".to_owned(),
-            flow_core::protocol::PROTOCOL_VERSION.to_string(),
-        ),
     ]);
     Ok(ServiceInfo::new(
         SERVICE_TYPE,
@@ -132,6 +131,12 @@ impl Discovery {
                             let device = DeviceId(id.to_owned());
                             // mDNS 可以被任何人伪造：ID 不是合法指纹的直接丢弃。
                             if device == me || !device.is_well_formed() {
+                                continue;
+                            }
+                            // 局域网里任何人都能广播任意多个服务名：记录数封顶，超出的新名字不理会。
+                            if by_fullname.len() >= MAX_TRACKED_SERVICES
+                                && !by_fullname.contains_key(&s.fullname)
+                            {
                                 continue;
                             }
                             let addrs = resolved_addrs(s.addresses.into_iter(), s.port);
