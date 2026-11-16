@@ -2,6 +2,7 @@
 //!
 //! - macOS：虚拟键码（`kVK_*`，与键盘布局无关的物理位置）。
 //! - Windows：扫描码（Set 1）。带 `0xE0` 前缀的扩展键记作 `0xE0xx`。
+//! - Linux：evdev 键码（`KEY_*`）。X11 的键码是它加 8。
 //!
 //! 只做物理位置映射，字符由目标电脑当前的键盘布局和输入法决定，所以中文输入法照常工作。
 
@@ -177,6 +178,77 @@ pub fn to_win(code: KeyCode) -> Option<(u16, bool)> {
         .map(|e| (e.2 & 0xFF, e.2 & 0xE000 == 0xE000))
 }
 
+/// Linux 的 evdev 键码沿用了 AT 键盘 Set 1 扫描码：不带扩展前缀、不超过 `0x58` 的键和 Windows 一列相同，
+/// 其余的（扩展键、F13 以后、日文键等）单独列在这里：(HID, evdev)。
+const LINUX_SPECIAL: &[(u16, u16)] = &[
+    (0x46, 99),  // Print Screen
+    (0x48, 119), // Pause
+    (0x49, 110), // Insert
+    (0x4A, 102), // Home
+    (0x4B, 104), // Page Up
+    (0x4C, 111), // Delete
+    (0x4D, 107), // End
+    (0x4E, 109), // Page Down
+    (0x4F, 106), // →
+    (0x50, 105), // ←
+    (0x51, 108), // ↓
+    (0x52, 103), // ↑
+    (0x53, 69),  // Num Lock
+    (0x54, 98),  // 小键盘 /
+    (0x58, 96),  // 小键盘 Enter
+    (0x65, 127), // 菜单键
+    (0x67, 117), // 小键盘 =
+    (0x68, 183), // F13
+    (0x69, 184),
+    (0x6A, 185),
+    (0x6B, 186),
+    (0x6C, 187),
+    (0x6D, 188),
+    (0x6E, 189),
+    (0x6F, 190), // F20
+    (0x7F, 113), // 静音
+    (0x80, 115), // 音量 +
+    (0x81, 114), // 音量 -
+    (0x87, 89),  // ろ
+    (0x88, 93),  // かな
+    (0x89, 124), // ¥
+    (0x8A, 92),  // 変換
+    (0x8B, 94),  // 無変換
+    (0x91, 123), // 英数
+    (0xE3, 125), // 左 Super
+    (0xE4, 97),  // 右 Ctrl
+    (0xE6, 100), // 右 Alt
+    (0xE7, 126), // 右 Super
+];
+
+/// 和 Windows 扫描码相同的那部分 evdev 键码的上限（F12）。
+const LINUX_SAME_AS_WIN_MAX: u16 = 0x58;
+
+/// `evdev` 为 Linux 的 `KEY_*` 键码（X11 键码减 8）。
+pub fn from_linux(evdev: u16) -> Option<KeyCode> {
+    if let Some(e) = LINUX_SPECIAL.iter().find(|e| e.1 == evdev) {
+        return Some(KeyCode(e.0));
+    }
+    if evdev == 0 || evdev > LINUX_SAME_AS_WIN_MAX {
+        return None;
+    }
+    TABLE
+        .iter()
+        .find(|e| e.2 == evdev && LINUX_SPECIAL.iter().all(|s| s.0 != e.0))
+        .map(|e| KeyCode(e.0))
+}
+
+/// 返回 evdev 键码（X11 键码要再加 8）。
+pub fn to_linux(code: KeyCode) -> Option<u16> {
+    if let Some(e) = LINUX_SPECIAL.iter().find(|e| e.0 == code.0) {
+        return Some(e.1);
+    }
+    TABLE
+        .iter()
+        .find(|e| e.0 == code.0 && e.2 <= LINUX_SAME_AS_WIN_MAX)
+        .map(|e| e.2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,6 +283,42 @@ mod tests {
                 assert_eq!(from_win(scan, ext), Some(code));
             }
         }
+    }
+
+    #[test]
+    fn linux_round_trips_without_duplicates() {
+        let mut seen = HashSet::new();
+        let mut mapped = 0;
+        for &(h, _, _) in TABLE {
+            let code = KeyCode(h);
+            let Some(evdev) = to_linux(code) else {
+                continue;
+            };
+            mapped += 1;
+            assert!(seen.insert(evdev), "evdev 键码重复：{evdev}（HID {h:#x}）");
+            assert_eq!(from_linux(evdev), Some(code), "HID {h:#x}");
+        }
+        // 表里的键在 Linux 上都有对应。
+        assert_eq!(mapped, TABLE.len());
+        for &(h, _) in LINUX_SPECIAL {
+            assert!(TABLE.iter().any(|e| e.0 == h), "HID {h:#x} 不在总表里");
+        }
+    }
+
+    #[test]
+    fn linux_common_keys() {
+        assert_eq!(to_linux(KeyCode::A), Some(30));
+        assert_eq!(to_linux(KeyCode::LEFT_CTRL), Some(29));
+        assert_eq!(to_linux(KeyCode::LEFT_META), Some(125));
+        assert_eq!(to_linux(KeyCode::LEFT), Some(105));
+        assert_eq!(to_linux(KeyCode::RIGHT), Some(106));
+        // 69 是 Num Lock，Pause 是 119（Windows 钩子里两者的扫描码语义相反）。
+        assert_eq!(from_linux(69), Some(KeyCode(0x53)));
+        assert_eq!(from_linux(119), Some(KeyCode(0x48)));
+        // 小键盘 4 和方向键 ← 是不同的键码。
+        assert_eq!(from_linux(75), Some(KeyCode(0x5C)));
+        assert_eq!(from_linux(0), None);
+        assert_eq!(from_linux(240), None);
     }
 
     #[test]

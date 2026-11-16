@@ -7,7 +7,7 @@
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 核心逻辑 | Rust（`crates/flow-core`） | 无 IO 的纯逻辑：布局、坐标换算、切换判定、按键状态、协议编解码。可在任何平台单测。 |
-| 平台层 | Rust + 各平台系统 API（`crates/flow-platform`） | macOS：CGEventTap / CGEventPost / NSPasteboard；Windows：低级键鼠钩子 / SendInput / 剪贴板（两边都按变化计数轮询，见第 7 节；不用 Raw Input，原因见第 4 节）。 |
+| 平台层 | Rust + 各平台系统 API（`crates/flow-platform`） | macOS：CGEventTap / CGEventPost / NSPasteboard；Windows：低级键鼠钩子 / SendInput / 剪贴板（两边都按变化计数轮询，见第 7 节；不用 Raw Input，原因见第 4 节）。Linux 只支持 X11：XInput2 / XTest / RandR / X 选区，用纯 Rust 的 x11rb，见第 12 节。 |
 | 网络层 | Rust：QUIC（quinn + rustls）+ mDNS（mdns-sd）（`crates/flow-net`） | QUIC 自带 TLS 1.3 加密；可靠流传按键，不可靠数据报传鼠标绝对坐标；剪贴板走独立流，大文本不会阻塞输入。 |
 | 桌面外壳 | Tauri 2（`app/src-tauri`） | 体积小、常驻内存低，托盘/菜单栏、开机启动、单实例都有官方插件。 |
 | 界面 | React + TypeScript + Vite（`app/src`） | 设备布局图需要拖拽交互，Web 技术实现最省力。视觉规范见 `docs/design.md`。 |
@@ -139,6 +139,7 @@
 | macOS | 输入监控（Input Monitoring） | 捕获键盘事件 |
 | macOS | 本地网络 | mDNS 发现与局域网连接 |
 | Windows | 防火墙放行 | 首次监听端口时系统弹窗 |
+| Linux | 无需授权；必须是 X11 会话 | X11 下任何程序都能监听和注入键鼠。开着防火墙（ufw / firewalld）时要手动放行流界的端口 |
 
 首次引导页逐项检测并给出"打开系统设置"按钮。
 
@@ -159,6 +160,7 @@
 - **签名**：更新包用 minisign 私钥签名（私钥只在 GitHub Secrets 和开发者本机），公钥写在 `tauri.conf.json`，App 下载后先验签再安装。本地打包不生成更新包，不需要私钥（CI 打包前才打开 `createUpdaterArtifacts`）。
 - **App 端**（`app/src-tauri/src/updater.rs`，`tauri-plugin-updater`）：发布版启动 15 秒后、之后每 6 小时检查一次（设置里可关），只提示不自动安装。用户确认后：下载（引擎照常工作，失败不影响使用）→ `Engine::shutdown()` 释放远端按键、恢复本机输入、断开连接（之后重连、键鼠捕获、剪贴板等后台循环全部停止，可重复调用）→ 安装 → 重新打开。安装失败时提示原因并提供「重新打开流界」。
 - **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。
+- **测试版**：版本号带后缀的标签（如 `v0.2.2-beta.1`）发布成 Pre-release，不成为 latest，已安装的流界收不到更新提示；另外多打一份 Linux 安装包（deb、AppImage，不带更新包）。
 - 发版步骤和一次性配置见 `docs/release.md`。
 
 ### 开机启动与单实例
@@ -177,7 +179,7 @@ FlowAcross/
 ├── Cargo.toml              # Rust workspace
 ├── crates/
 │   ├── flow-core/          # 纯逻辑（已实现第一版并有单测）
-│   ├── flow-platform/      # 平台抽象 trait + macOS/Windows 实现（M1）
+│   ├── flow-platform/      # 平台抽象 trait + macOS / Windows / Linux（X11）实现（M1）
 │   └── flow-net/           # 发现、配对、QUIC 传输（M2）
 ├── app/
 │   ├── src/                # React 界面
@@ -191,3 +193,20 @@ FlowAcross/
     ├── windows.md          # 在 Windows 上调试
     └── release.md          # 发版与自动更新配置
 ```
+
+## 12. Linux（X11）
+
+只支持 X11 会话。Wayland 没有全局键鼠捕获和注入的统一接口（GNOME / KDE 要走 portal，wlroots 系是另一套协议），决定不做；在 Wayland 会话里键鼠捕获、注入和剪贴板返回 `PlatformError::Unsupported`，界面提示注销后改选 X11 会话，显示器仍通过 XWayland 枚举，布局图照常显示。代码在 `crates/flow-platform/src/linux*.rs`，X 协议用纯 Rust 的 x11rb，不链接 libxcb / libX11。
+
+- **显示器与缩放**（`linux.rs`）：RandR 1.5 的 monitor 列表，没有时把整个根窗口当一块屏幕；镜像的屏幕只算一块。X11 没有可靠的每屏缩放，桌面环境把整体缩放写在 `Xft.dpi`（GNOME、KDE 都是 96 × 缩放），所有屏幕共用这个值，逻辑坐标 = 像素 ÷ 缩放。
+- **捕获**（`linux_input.rs`）：在根窗口上选 XInput2 原始事件。X11 不能逐个事件决定放行还是拦截，捕获回调返回的 `Verdict` 在这里不起作用，拦截靠抓取：`set_cursor_captured(true)` 时抓住主键盘和主指针（`XIGrabDevice`）并隐藏光标（XFixes），本机程序此后收不到输入，回到本机时放开并把光标放到跨回来的位置。抓取期间根窗口上的原始事件不再送给抓取者自己（实测），所以鼠标的原始事件写在抓取掩码里；键盘则改收抓取送来的普通按键事件，因为原始事件没有长按连发，而它带连发标记。同一次按键两种事件都到时按（键码、时间戳）去重。
+  - 相对设备用原始事件里加速后的位移，贴着屏幕边继续推也有读数；绝对设备（虚拟机鼠标集成、数位板）用前后两次光标位置的差，贴边后推不出去，只能靠"碰到边"切换。
+  - 别的程序正抓着键鼠时（打开着的菜单、全屏游戏）抓不到，这期间每来一个事件重试一次；重试成功之前本机仍能收到输入。
+  - 在本机按 Ctrl+Alt+←/→ 切换时，这次按键本机的前台程序也会收到（抓取在按键之后才生效）。从远端切回来时不会。
+- **注入**：XTest。注入的事件来自 X 服务的 XTEST 虚拟设备，捕获时按来源设备跳过（相当于另外两个系统的注入标记）；别的 XTest 工具（xdotool 等）注入的输入因此也不会转发到远端。长按连发交给本机 X 服务产生，对方发来的连发事件不注入。滚轮是按钮 4–7，一次点击一格，不足一格的先攒着。
+- **键码**：evdev 键码（X 键码减 8）↔ HID，`keymap::from_linux` / `to_linux`。evdev 的主键区沿用 AT Set 1 扫描码，和 Windows 一列相同，只有扩展键、F13 以后、日文键等单独列表。修饰键换算和 Windows 相同（`map_key` 只区分 Mac 与非 Mac）。
+- **剪贴板**（`linux_clipboard.rs`）：X11 的剪贴板不存数据，谁复制谁就是选区的所有者，别人粘贴时再向它要。所以有一个进程内唯一的后台服务（自己的连接、不可见窗口和事件线程）负责应答，`X11Clipboard` 只是句柄。读：`ConvertSelection`，文本和文件清单最多等 0.5 秒（引擎是持锁读的），图片 5 秒；写：保存各格式的数据并成为所有者。两个方向超过 1 MB 都按 ICCCM 的 `INCR` 分块。变化计数来自 XFixes 的所有者变化通知，自己写入时直接加一。格式：文本 `UTF8_STRING` / `text/plain;charset=utf-8`，文件 `text/uri-list` 加 `x-special/gnome-copied-files`，图片只认 `image/png`。流界退出后它写入的内容会消失（除非桌面有剪贴板管理器）。
+- **边缘浮光**（`linux_glow.rs`）：32 位色深的 override-redirect 窗口，输入区域设为空（鼠标穿透），在单独的线程里逐帧 `PutImage`，像素由 `glow::render` 算。依赖窗口合成器，没有时不显示。暂不跟随系统的「减少动态效果」。
+- **测试**：纯计算的部分是普通单元测试；需要 X 服务的测试标了 `#[ignore]`，CI 的 Ubuntu 任务用 Xvfb 跑（`xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1`，xclip 充当"别的程序"）。Xvfb 里没有真实键鼠，测试用 XTest 模拟并让捕获接受 XTEST 设备。
+- **外壳**：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；安装包只随测试版提供，应用内自动更新还没接入。
+

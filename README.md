@@ -28,6 +28,8 @@ docs/                  架构与路线图
 - Rust stable（≥ 1.85）：<https://rustup.rs>
 - Node.js ≥ 20
 - macOS：Xcode Command Line Tools；Windows：Visual Studio C++ 生成工具 + WebView2
+- Linux（只支持 X11 会话，尚未在真机上验证、也还没有安装包，见 [路线图](docs/roadmap.md)）：`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev build-essential`。
+  需要 X 服务的测试默认跳过，要跑的话：`sudo apt install xvfb xclip`，然后 `xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1`
 
 ## 常用命令
 

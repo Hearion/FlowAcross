@@ -1,15 +1,28 @@
 //! 平台层抽象。
 //!
-//! 这里定义 Engine 依赖的接口，并按 `cfg(target_os)` 选择 macOS / Windows 实现。
+//! 这里定义 Engine 依赖的接口，并按 `cfg(target_os)` 选择 macOS / Windows / Linux 实现。
 //!
-//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本、文件和图片（macOS、Windows），系统权限检测（macOS）。
+//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本、文件和图片（macOS、Windows、Linux X11），
+//! 系统权限检测（macOS）。Linux 只支持 X11 会话，Wayland 会话里键鼠和剪贴板报"暂不支持"。
 
 // Windows 位图和 PNG 互转（纯字节处理）。只有 Windows 用到，但在所有平台编译，方便单元测试。
 #[cfg_attr(not(windows), allow(dead_code))]
 mod dib;
-// 屏幕边缘浮光的形状和节奏（纯计算）。逐帧渲染只有 Windows 用到，同样在所有平台编译。
+// 屏幕边缘浮光的形状和节奏（纯计算）。逐帧渲染只有 Windows 和 Linux 用到，同样在所有平台编译。
+#[cfg_attr(
+    not(any(target_os = "macos", windows, target_os = "linux")),
+    allow(dead_code)
+)]
 mod glow;
 pub mod keymap;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod linux_clipboard;
+#[cfg(target_os = "linux")]
+mod linux_glow;
+#[cfg(target_os = "linux")]
+mod linux_input;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -37,7 +50,9 @@ pub fn input_capture() -> Box<dyn InputCapture> {
     return Box::new(macos_input::MacCapture::default());
     #[cfg(windows)]
     return Box::new(windows_input::WinCapture::default());
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return Box::new(linux_input::X11Capture::default());
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Box::new(Unsupported);
 }
 
@@ -47,7 +62,9 @@ pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
     return Ok(Box::new(macos_input::MacInjector::new()?));
     #[cfg(windows)]
     return Ok(Box::new(windows_input::WinInjector));
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return Ok(Box::new(linux_input::X11Injector::new()?));
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Err(PlatformError::Unsupported("键鼠注入"));
 }
 
@@ -57,31 +74,38 @@ pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     return Ok(Box::new(macos_input::MacClipboard));
     #[cfg(windows)]
     return Ok(Box::new(windows_input::WinClipboard));
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return Ok(Box::new(linux_clipboard::X11Clipboard::new()?));
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Err(PlatformError::Unsupported("剪贴板"));
 }
 
 /// 控制远端期间隐藏并固定本机光标（捕获仍持续上报相对位移）；结束时恢复显示。
-/// `restore_at`（本机系统坐标，逻辑点）：开始时是离开处（Windows 把光标锁在这里，macOS 忽略），
-/// 结束时是光标要放回的位置。
+/// `restore_at`（本机系统坐标，逻辑点）：开始时是离开处（Windows 把光标锁在这里，macOS 和 Linux 忽略），
+/// 结束时是光标要放回的位置。Linux 上同时抓住键盘和鼠标，本机程序在此期间收不到输入。
 pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     #[cfg(target_os = "macos")]
     macos_input::set_cursor_captured(captured, restore_at);
     #[cfg(windows)]
     windows_input::set_cursor_captured(captured, restore_at);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    linux_input::set_cursor_captured(captured, restore_at);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (captured, restore_at);
 }
 
 /// 键鼠从别的设备来到本机时，在它进来的那条屏幕边上闪一道浮光（约 0.75 秒，不抢焦点、鼠标可穿透）。
 /// `display_local_id`：本机显示器；`along`：进入点在这条边上的位置，0..1（左右边从上往下，上下边从左往右）。
-/// macOS 上必须在主线程调用（其他线程调用时忽略）；Windows 上任意线程都可以，动画在单独的线程里播。
+/// macOS 上必须在主线程调用（其他线程调用时忽略）；Windows 和 Linux 上任意线程都可以，动画在单独的线程里播。
+/// Linux 上需要桌面开着窗口合成（现在的桌面环境默认都开），没有时不显示。
 pub fn edge_glow(display_local_id: &str, edge: flow_core::geometry::Edge, along: f64) {
     #[cfg(target_os = "macos")]
     macos_glow::show(display_local_id, edge, along);
     #[cfg(windows)]
     windows_glow::show(display_local_id, edge, along);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    linux_glow::show(display_local_id, edge, along);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (display_local_id, edge, along);
 }
 
@@ -91,7 +115,9 @@ pub fn display_provider() -> Box<dyn DisplayProvider> {
     return Box::new(macos::MacDisplays);
     #[cfg(windows)]
     return Box::new(windows::WinDisplays);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(target_os = "linux")]
+    return Box::new(linux::X11Displays);
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Box::new(Unsupported);
 }
 

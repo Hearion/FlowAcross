@@ -2,6 +2,9 @@ name: 发布新版本
 
 # 推送 v* 标签时运行：校验版本号 → 打包 Windows 和 macOS → 发布到公开的发布仓库。
 # 已安装的流界从发布仓库的 latest.json 检查更新。一次性配置和发版步骤见 docs/release.md。
+#
+# 版本号带后缀的标签（如 v0.2.2-beta.1）是测试版：发布成 Pre-release，不会成为 latest，
+# 已安装的流界收不到更新提示；另外多打一份 Linux 安装包（Linux 目前只随测试版提供）。
 on:
   push:
     tags: ["v*"]
@@ -25,6 +28,8 @@ jobs:
     outputs:
       release_id: ${{ steps.release.outputs.id }}
       notes: ${{ steps.notes.outputs.notes }}
+      # 版本号带后缀（-beta.1、-rc.1 …）就是测试版。
+      prerelease: ${{ contains(github.ref_name, '-') }}
     steps:
       - uses: actions/checkout@v5
 
@@ -73,12 +78,14 @@ jobs:
         uses: actions/github-script@v8
         env:
           NOTES: ${{ steps.notes.outputs.notes }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
         with:
           github-token: ${{ secrets.RELEASES_TOKEN }}
           script: |
             const owner = process.env.RELEASE_OWNER;
             const repo = process.env.RELEASE_REPO;
             const tag = context.ref.replace('refs/tags/', '');
+            const prerelease = process.env.PRERELEASE === 'true';
             const { data: info } = await github.rest.repos.get({ owner, repo });
             // 重新运行时复用同一个草稿。
             const releases = await github.paginate(github.rest.repos.listReleases, { owner, repo });
@@ -91,9 +98,11 @@ jobs:
               owner,
               repo,
               tag_name: tag,
-              name: `流界 ${tag}`,
+              name: prerelease ? `流界 ${tag}（测试版）` : `流界 ${tag}`,
               body: process.env.NOTES,
               draft: true,
+              // 草稿一开始就标成测试版，任何时候都不会被当成 latest。
+              prerelease,
               target_commitish: info.default_branch,
             })).data;
             core.setOutput('id', release.id);
@@ -218,18 +227,70 @@ jobs:
           repo: ${{ env.RELEASE_REPO }}
           releaseId: ${{ needs.prepare.outputs.release_id }}
           releaseBody: ${{ needs.prepare.outputs.notes }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
+  # Linux 安装包只随测试版提供：X11 平台层还没有在真机上充分验证，也没有接入应用内自动更新。
+  build-linux:
+    name: 打包 Linux（仅测试版）
+    needs: prepare
+    if: needs.prepare.outputs.prerelease == 'true'
+    # 用较老的系统打包，装得上的发行版更多（glibc 向后兼容，不向前兼容）。
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
+            patchelf file
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装前端依赖
+        working-directory: app
+        run: npm ci
+
+      # 不生成更新包、不写 latest.json：Linux 版不走应用内自动更新。
+      - name: 打包并上传
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        with:
+          projectPath: app
+          owner: ${{ env.RELEASE_OWNER }}
+          repo: ${{ env.RELEASE_REPO }}
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          releaseBody: ${{ needs.prepare.outputs.notes }}
+          prerelease: true
+          includeUpdaterJson: false
+          args: --bundles deb,appimage
+
   publish:
     name: 检查并正式发布
-    needs: [prepare, build]
+    needs: [prepare, build, build-linux]
+    # 正式版不打 Linux 包（任务被跳过），不能因此不发布；测试版则要等 Linux 包也打完。
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.build.result == 'success' &&
+      (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - name: 检查 latest.json 后发布
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
         with:
           github-token: ${{ secrets.RELEASES_TOKEN }}
           script: |
@@ -253,6 +314,21 @@ jobs:
             const missing = required.filter((p) => !platforms.includes(p));
             if (missing.length) {
               core.setFailed(`latest.json 缺少 ${missing.join(', ')}，草稿未发布。在 Actions 页面重新运行全部任务即可。`);
+              return;
+            }
+            if (process.env.PRERELEASE === 'true') {
+              // 测试版要带 Linux 安装包。
+              const names = assets.map((a) => a.name);
+              const lacking = ['.deb', '.AppImage'].filter((ext) => !names.some((n) => n.endsWith(ext)));
+              if (lacking.length) {
+                core.setFailed(`草稿里缺少 Linux 安装包（${lacking.join('、')}），草稿未发布。请检查「打包 Linux」的日志。`);
+                return;
+              }
+              // 测试版：不成为 latest，releases/latest/download/latest.json 仍指向上一个正式版。
+              const { data: published } = await github.rest.repos.updateRelease({
+                owner, repo, release_id, draft: false, prerelease: true, make_latest: 'false',
+              });
+              core.notice(`已发布测试版 ${latest.version}：${published.html_url}`);
               return;
             }
             await github.rest.repos.updateRelease({ owner, repo, release_id, draft: false, make_latest: 'true' });

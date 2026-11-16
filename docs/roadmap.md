@@ -69,3 +69,8 @@
 - 跨屏拖拽传输（复制文件的传输通道已就绪）
 - 文件传输进度显示在系统通知 / 托盘里（窗口隐藏时也能看到）
 - Linux 支持
+  - [x] 第 0 步：工程在 Linux 上能编译，CI 加 Ubuntu
+  - [x] 第 1 步：X11 平台层（`crates/flow-platform/src/linux*.rs`）：XInput2 捕获 + 抓取锁定、XTest 注入、RandR 显示器、X 选区剪贴板（文本、文件、图片）、边缘浮光。在容器里的虚拟 X 屏幕（Xvfb）上测过：注入落点、捕获键鼠和滚轮、抓取与放开、剪贴板和别的程序（xclip）双向互通（含 4 MB 图片分块）、浮光的显示与消失；CI 的 Ubuntu 任务每次都跑这些测试。**没有在真实的 Linux 桌面和真实键鼠上验证**，和 Mac / Windows 的互控也没有测过
+  - [ ] Linux 真机验证：GNOME / KDE 的 X11 会话下与 Mac、Windows 互控（点击、滚动、拖拽、打字、中文输入法、复制文件和图片、多显示器、高分屏缩放）
+  - [ ] 打包（deb / AppImage）与自动更新：测试版（版本号带后缀，如 `v0.2.2-beta.1`）会打 x86_64 的 deb 和 AppImage 并发布成 Pre-release，见 `docs/release.md`；正式版还不带 Linux 包，应用内自动更新没有接入
+  - Wayland 不做：它没有全局键鼠捕获和注入的统一接口，要按桌面环境分别适配。Wayland 会话里流界会提示改用 X11 会话

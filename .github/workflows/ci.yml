@@ -11,10 +11,19 @@ jobs:
       fail-fast: false
       matrix:
         # ARM 托管构建机容量紧张，使用标准 Intel 构建机避免排队超时。
-        os: [macos-15-intel, windows-latest]
+        # Linux 只支持 X11；除了常规检查，还在虚拟 X 屏幕上跑平台层的测试（见最后一步）。
+        os: [macos-15-intel, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: 安装 Linux 系统依赖（Tauri）
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
+            xvfb xauth xclip
 
       - uses: actions/setup-node@v5
         with:
@@ -42,3 +51,8 @@ jobs:
 
       - name: 测试
         run: cargo test --workspace
+
+      # 键鼠注入与捕获、抓取、剪贴板要连 X 服务，平时标了 ignore；它们共用一个光标和键盘，必须串行。
+      - name: X11 平台层测试（Xvfb）
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo test -p flow-platform -- --ignored --test-threads=1

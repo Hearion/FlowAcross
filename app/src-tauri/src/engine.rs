@@ -604,6 +604,10 @@ fn capture_error_text(e: &PlatformError) -> String {
              请在 设置 › 系统权限 中授权，授权后重新打开流界。"
                 .to_owned()
         }
+        // 这个系统或会话类型本来就不支持（例如 Linux 的 Wayland 会话），重新打开也没用。
+        PlatformError::Unsupported(what) => {
+            format!("当前系统暂不支持：{what}。键鼠无法切到其他电脑。")
+        }
         other => {
             format!("无法监听键鼠（{other}），键鼠暂时无法切到其他电脑。请重新打开流界后再试。")
         }

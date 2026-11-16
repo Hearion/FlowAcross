@@ -1,7 +1,7 @@
 //! 屏幕边缘浮光的形状和节奏：两个系统共用的参数和纯计算，不调用系统 API。
 //!
 //! 浮光由两部分叠成：整条边上一道很浅的光带，加上进入点处一团更亮的光，亮的那团沿着边向两侧散开。
-//! macOS 用 Core Animation 的渐变图层按这里的参数画；Windows 没有现成的，用 [`render`] 逐帧算像素。
+//! macOS 用 Core Animation 的渐变图层按这里的参数画；Windows 和 Linux 没有现成的，用 [`render`] 逐帧算像素。
 
 use flow_core::geometry::Edge;
 
@@ -30,7 +30,7 @@ pub fn spot_radius(scale: f64, edge_len: f64) -> f64 {
 }
 
 /// `t`（0..1）时刻的整体不透明度，按 [`FADE`] 线性插值。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn envelope(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     for pair in FADE.windows(2) {
@@ -43,7 +43,7 @@ pub fn envelope(t: f64) -> f64 {
 }
 
 /// `t`（0..1）时刻那团光的缩放：先快后慢地散开。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn spread(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     let eased = 1.0 - (1.0 - t).powi(3);
@@ -52,7 +52,7 @@ pub fn spread(t: f64) -> f64 {
 
 /// 一个点的不透明度。`depth`：离屏幕边缘的距离 / 浮光深度（0 贴边，1 最里面）；
 /// `along`：沿边方向离进入点的距离 / 那团光此刻的半径。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn alpha_at(depth: f64, along: f64) -> f64 {
     let band = BAND_ALPHA * (1.0 - depth).max(0.0).powi(3);
     let r = (depth * depth + along * along).sqrt();
@@ -66,7 +66,7 @@ fn alpha_at(depth: f64, along: f64) -> f64 {
 
 /// 画一帧：`buf` 是 `width × height` 的 32 位位图（BGRA、预乘透明度、第一行在最上面），
 /// 窗口贴着 `edge` 这条屏幕边。`spot`：进入点在沿边方向上的像素位置；`radius`：那团光此刻的半径（像素）。
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn render(buf: &mut [u8], width: usize, height: usize, edge: Edge, spot: f64, radius: f64) {
     if width == 0 || height == 0 || buf.len() < width * height * 4 {
         return;

@@ -70,10 +70,29 @@ git push origin main v0.2.0
 - 打开源码仓库的 Actions 页面看进度，一次大约 15–25 分钟。完成后在 https://github.com/Hearion/FlowAcross-releases/releases 能看到新版本。
 - 私有仓库每月有 2000 分钟免费 Actions 时长，macOS 按 10 倍、Windows 按 2 倍计费，一次发版大约用掉 200–300 分钟。
 
+## 发测试版（Pre-release）
+
+版本号带后缀的标签就是测试版，例如 `v0.2.2-beta.1`、`v0.3.0-rc.1`：
+
+```bash
+node scripts/bump-version.mjs 0.2.2-beta.1
+git commit -am "发布 v0.2.2-beta.1（测试版）"
+git tag -a v0.2.2-beta.1 -m "测试版：Linux（X11）支持"
+git push origin main v0.2.2-beta.1
+```
+
+和正式版的区别：
+
+- 在发布仓库里标成 **Pre-release**，不会成为 latest。`releases/latest/download/latest.json` 仍指向上一个正式版，**已安装的流界收不到更新提示**，测试的人要到发布页手动下载安装。
+- 多打一份 **Linux 安装包**（x86_64 的 `.deb` 和 `.AppImage`，在 ubuntu-22.04 上打包）。Linux 目前只随测试版提供，没有应用内自动更新，只支持 X11 会话。
+- 装了测试版的 Windows / macOS，之后发布同号或更高的正式版（如 0.2.2）时会正常收到更新提示（`0.2.2-beta.1` 低于 `0.2.2`）。
+- 测试完直接发正式版即可（把版本号改成不带后缀的），不需要撤回测试版；想清理就在发布仓库把它删掉。
+
 ## 常见问题
 
 - **「标签和版本号不一致」**：忘了运行 `bump-version.mjs`。删掉标签（`git tag -d v0.2.0 && git push origin :refs/tags/v0.2.0`），改好版本号提交后重新打标签。
 - **「latest.json 缺少 …」**：两个打包任务同时写 `latest.json` 时偶尔会互相覆盖。在 Actions 页面点 **Re-run all jobs**，会复用同一个草稿。
 - **「已经发布过 vX」**：同一个版本号不能发两次，改用新的版本号。
+- **「草稿里缺少 Linux 安装包」**：测试版要等 Linux 包打完才发布。看「打包 Linux（仅测试版）」的日志，修好后重新运行失败的任务。
 - **只想要一个 Windows 测试包**：Actions 页面手动运行「Windows 测试包」，安装包在运行结果的附件里，不会触发自动更新。
 - **想撤回一个有问题的版本**：在发布仓库把它删掉或改回草稿，`latest/download` 会指向上一个正式版本；已经更新的用户需要等下一个版本。
