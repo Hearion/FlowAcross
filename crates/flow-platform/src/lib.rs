@@ -23,6 +23,16 @@ mod linux_clipboard;
 mod linux_glow;
 #[cfg(target_os = "linux")]
 mod linux_input;
+#[cfg(target_os = "linux")]
+mod linux_portal;
+#[cfg(target_os = "linux")]
+mod linux_wl;
+#[cfg(target_os = "linux")]
+mod linux_wl_clipboard;
+#[cfg(target_os = "linux")]
+mod linux_wl_glow;
+#[cfg(target_os = "linux")]
+mod linux_wlr_input;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -51,7 +61,7 @@ pub fn input_capture() -> Box<dyn InputCapture> {
     #[cfg(windows)]
     return Box::new(windows_input::WinCapture::default());
     #[cfg(target_os = "linux")]
-    return Box::new(linux_input::X11Capture::default());
+    return linux::input_capture();
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Box::new(Unsupported);
 }
@@ -63,7 +73,7 @@ pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
     #[cfg(windows)]
     return Ok(Box::new(windows_input::WinInjector));
     #[cfg(target_os = "linux")]
-    return Ok(Box::new(linux_input::X11Injector::new()?));
+    return linux::input_injector();
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Err(PlatformError::Unsupported("键鼠注入"));
 }
@@ -75,7 +85,7 @@ pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     #[cfg(windows)]
     return Ok(Box::new(windows_input::WinClipboard));
     #[cfg(target_os = "linux")]
-    return Ok(Box::new(linux_clipboard::X11Clipboard::new()?));
+    return linux::clipboard();
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Err(PlatformError::Unsupported("剪贴板"));
 }
@@ -89,9 +99,20 @@ pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     #[cfg(windows)]
     windows_input::set_cursor_captured(captured, restore_at);
     #[cfg(target_os = "linux")]
-    linux_input::set_cursor_captured(captured, restore_at);
+    linux::set_cursor_captured(captured, restore_at);
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (captured, restore_at);
+}
+
+/// 告诉平台层哪些屏幕边通往别的电脑：(本机显示器, 边)。布局或已连接的设备变化时由引擎调用。
+///
+/// 只有 Linux 的 Wayland 用得到：那里看不到全局的鼠标移动，只能在屏幕边上放一条很窄的窗口来感知
+/// "光标推到了边上"，而这条窗口会挡住最外一圈像素的点击，所以只放在确实能切过去的边上。其他系统无操作。
+pub fn set_switch_edges(edges: &[(String, flow_core::geometry::Edge)]) {
+    #[cfg(target_os = "linux")]
+    linux::set_switch_edges(edges);
+    #[cfg(not(target_os = "linux"))]
+    let _ = edges;
 }
 
 /// 键鼠从别的设备来到本机时，在它进来的那条屏幕边上闪一道浮光（约 0.75 秒，不抢焦点、鼠标可穿透）。
@@ -104,7 +125,7 @@ pub fn edge_glow(display_local_id: &str, edge: flow_core::geometry::Edge, along:
     #[cfg(windows)]
     windows_glow::show(display_local_id, edge, along);
     #[cfg(target_os = "linux")]
-    linux_glow::show(display_local_id, edge, along);
+    linux::edge_glow(display_local_id, edge, along);
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let _ = (display_local_id, edge, along);
 }
@@ -116,7 +137,7 @@ pub fn display_provider() -> Box<dyn DisplayProvider> {
     #[cfg(windows)]
     return Box::new(windows::WinDisplays);
     #[cfg(target_os = "linux")]
-    return Box::new(linux::X11Displays);
+    return Box::new(linux::LinuxDisplays);
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     return Box::new(Unsupported);
 }

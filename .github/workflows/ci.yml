@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         # ARM 托管构建机容量紧张，使用标准 Intel 构建机避免排队超时。
-        # Linux 只支持 X11；除了常规检查，还在虚拟 X 屏幕上跑平台层的测试（见最后一步）。
+        # Linux：除了常规检查，还在虚拟 X 屏幕（Xvfb）和无头的 sway 里跑平台层的集成测试（见最后两步）。
         os: [macos-15-intel, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
@@ -23,7 +23,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
-            xvfb xauth xclip
+            libxkbcommon-dev xvfb xauth xclip sway wl-clipboard grim
 
       - uses: actions/setup-node@v5
         with:
@@ -55,4 +55,9 @@ jobs:
       # 键鼠注入与捕获、抓取、剪贴板要连 X 服务，平时标了 ignore；它们共用一个光标和键盘，必须串行。
       - name: X11 平台层测试（Xvfb）
         if: runner.os == 'Linux'
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo test -p flow-platform -- --ignored --test-threads=1
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo test -p flow-platform -- --ignored --test-threads=1 linux_input linux_clipboard
+
+      # wlroots 系（Sway、Hyprland）的注入、边缘捕获、剪贴板、浮光。GNOME / KDE 的 portal 实现在 CI 里测不了。
+      - name: Wayland 平台层测试（无头 sway）
+        if: runner.os == 'Linux'
+        run: scripts/test-wayland.sh

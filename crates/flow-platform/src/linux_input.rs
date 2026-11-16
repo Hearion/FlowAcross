@@ -40,7 +40,7 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-use crate::linux::{self, ensure_x11, os_err};
+use crate::linux::{self, os_err};
 use crate::{CaptureHandler, CapturedEvent, InputCapture, InputInjector, PlatformError, keymap};
 
 /// XInput2 里表示"所有主设备"的设备号。
@@ -202,7 +202,6 @@ impl X11Capture {
 impl InputCapture for X11Capture {
     fn start(&mut self, handler: CaptureHandler) -> Result<(), PlatformError> {
         self.stop();
-        ensure_x11()?;
         let shared = Arc::new(open(self.accept_xtest)?);
         if let Ok(list) = linux::monitors_on(&shared.conn, 0) {
             linux::update_monitors(list);
@@ -576,7 +575,6 @@ pub struct X11Injector {
 
 impl X11Injector {
     pub fn new() -> Result<Self, PlatformError> {
-        ensure_x11()?;
         let (conn, screen) = linux::connect()?;
         let root = conn.setup().roots[screen].root;
         conn.xtest_get_version(2, 2)
@@ -611,7 +609,7 @@ impl X11Injector {
 }
 
 /// 把累计的滚动量拆成整格数和余量。
-fn take_notches(rest: &mut i32, delta: i32) -> i32 {
+pub(crate) fn take_notches(rest: &mut i32, delta: i32) -> i32 {
     *rest = rest.saturating_add(delta);
     let notches = *rest / WHEEL_NOTCH;
     *rest -= notches * WHEEL_NOTCH;
@@ -627,7 +625,7 @@ impl InputInjector for X11Injector {
         };
         let mut target = linux::with_monitors(find);
         if target.is_none()
-            && let Ok(list) = linux::monitors()
+            && let Ok(list) = linux::x11_monitors()
         {
             // 显示器配置变了（插拔、改分辨率）：刷新后再找一次。
             target = find(&list);

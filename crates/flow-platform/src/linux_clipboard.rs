@@ -29,7 +29,7 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
-use crate::linux::{self, ensure_x11, os_err};
+use crate::linux::{self, os_err};
 use crate::{ClipboardAccess, ClipboardImage, PlatformError};
 
 x11rb::atom_manager! {
@@ -480,7 +480,7 @@ impl Service {
 // ---------------------------------------------------------------------------
 
 /// 路径转成 `file://` 地址：除了字母、数字和 `-._~/` 以外的字节都写成 `%XX`。
-fn path_to_uri(path: &Path) -> Option<String> {
+pub(crate) fn path_to_uri(path: &Path) -> Option<String> {
     use std::os::unix::ffi::OsStrExt;
     if !path.is_absolute() {
         return None;
@@ -526,7 +526,7 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
 
 /// 解析 `text/uri-list`（每行一个地址，`#` 开头是注释）或 `x-special/gnome-copied-files`
 /// （第一行是 `copy` / `cut`，后面每行一个地址）。不是 `file://` 的行跳过。
-fn parse_file_list(data: &[u8]) -> Vec<PathBuf> {
+pub(crate) fn parse_file_list(data: &[u8]) -> Vec<PathBuf> {
     String::from_utf8_lossy(data)
         .split(['\n', '\r', '\0'])
         .filter(|l| !l.starts_with('#'))
@@ -534,7 +534,7 @@ fn parse_file_list(data: &[u8]) -> Vec<PathBuf> {
         .collect()
 }
 
-fn decode_text(mut bytes: Vec<u8>) -> Option<String> {
+pub(crate) fn decode_text(mut bytes: Vec<u8>) -> Option<String> {
     while bytes.last() == Some(&0) {
         bytes.pop();
     }
@@ -552,7 +552,6 @@ pub struct X11Clipboard {
 
 impl X11Clipboard {
     pub fn new() -> Result<Self, PlatformError> {
-        ensure_x11()?;
         Ok(Self {
             service: service()?,
         })

@@ -1,6 +1,6 @@
 [package]
 name = "flow-platform"
-description = "流界平台层：键鼠捕获/注入、显示器、剪贴板、系统权限（macOS / Windows / Linux X11）"
+description = "流界平台层：键鼠捕获/注入、显示器、剪贴板、系统权限（macOS / Windows / Linux）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -43,3 +43,15 @@ windows-sys = { version = "0.61", features = [
 # x11rb 是纯 Rust 的 X11 协议实现，不链接 libxcb / libX11。
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xinput", "xtest", "randr", "xfixes", "shape"] }
+# Wayland（wlroots 系）：虚拟指针 / 虚拟键盘注入、layer-shell 边缘窗口和浮光、data-control 剪贴板。
+# wayland-client 默认用纯 Rust 的协议实现，不链接 libwayland。
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+# 虚拟键盘要自己提供键盘映射、自己算修饰键状态（链接系统的 libxkbcommon，打包时依赖 libxkbcommon-dev）。
+xkbcommon = { version = "0.8", default-features = false }
+ashpd = { version = "0.12.3", default-features = false, features = ["tokio"] }
+reis = { version = "0.7.1", features = ["tokio"] }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time", "macros"] }
+futures-util = { version = "0.3.34", default-features = false }

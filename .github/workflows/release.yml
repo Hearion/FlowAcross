@@ -231,7 +231,7 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-  # Linux 安装包只随测试版提供：X11 平台层还没有在真机上充分验证，也没有接入应用内自动更新。
+  # Linux 安装包只随测试版提供：平台层还没有在真机上充分验证，也没有接入应用内自动更新。
   build-linux:
     name: 打包 Linux（仅测试版）
     needs: prepare
@@ -246,7 +246,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev \
-            patchelf file
+            libxkbcommon-dev patchelf file
 
       - uses: actions/setup-node@v5
         with:

@@ -956,6 +956,10 @@ impl Engine {
         layout
             .displays
             .retain(|d| d.id.device == local || outputs.contains_key(&d.id.device));
+        // 平台层只在通往别的电脑的屏幕边上感知"推到边上"（Linux 的 Wayland 需要，其他系统无操作）。
+        if self.inner.input {
+            flow_platform::set_switch_edges(&layout.switch_edges(&local));
+        }
         let cfg = ControllerConfig {
             layout,
             local_offset: st.config.local_offset,

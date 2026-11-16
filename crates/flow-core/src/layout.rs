@@ -141,6 +141,24 @@ impl Layout {
             .collect()
     }
 
+    /// `device` 的哪些屏幕边紧贴着别的设备的屏幕：(显示器的本机标识, 边)。
+    /// 光标只有从这些边才可能切到别的设备。
+    pub fn switch_edges(&self, device: &DeviceId) -> Vec<(String, Edge)> {
+        let mut out = Vec::new();
+        for d in self.displays_of(device) {
+            for edge in Edge::ALL {
+                if self
+                    .neighbors(&d.id, edge)
+                    .iter()
+                    .any(|n| n.id.device != *device)
+                {
+                    out.push((d.id.local.clone(), edge));
+                }
+            }
+        }
+        out
+    }
+
     /// 光标在 `from` 的 `edge` 边上的 `at` 点继续向外移动时，会进入哪块屏幕的哪个点。
     /// 返回 `None` 表示这里没有可进入的屏幕（光标停在边上）。
     pub fn cross_edge(
@@ -498,6 +516,40 @@ pub(crate) mod tests {
             display("mac", "0", Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0),
             display("pc", "0", Rect::new(1440.0, 0.0, 2560.0, 1440.0), 1.5),
         ])
+    }
+
+    #[test]
+    fn switch_edges_are_the_ones_facing_other_devices() {
+        let l = mac_and_pc();
+        let mac = DeviceId("mac".into());
+        let pc = DeviceId("pc".into());
+        assert_eq!(l.switch_edges(&mac), vec![("0".to_owned(), Edge::Right)]);
+        assert_eq!(l.switch_edges(&pc), vec![("0".to_owned(), Edge::Left)]);
+        assert!(l.switch_edges(&DeviceId("nobody".into())).is_empty());
+
+        // 自己的两块屏幕之间的边不算；外接的那块右边贴着 PC，才算。
+        let l = Layout::new(vec![
+            display("mac", "built-in", Rect::new(0.0, 0.0, 1440.0, 900.0), 2.0),
+            display(
+                "mac",
+                "external",
+                Rect::new(1440.0, 0.0, 1920.0, 1080.0),
+                1.0,
+            ),
+            display("pc", "0", Rect::new(3360.0, 0.0, 2560.0, 1440.0), 1.5),
+        ]);
+        assert_eq!(
+            l.switch_edges(&mac),
+            vec![("external".to_owned(), Edge::Right)]
+        );
+        // 只有自己时没有可切换的边。
+        let alone = Layout::new(vec![display(
+            "mac",
+            "0",
+            Rect::new(0.0, 0.0, 1440.0, 900.0),
+            2.0,
+        )]);
+        assert!(alone.switch_edges(&mac).is_empty());
     }
 
     #[test]

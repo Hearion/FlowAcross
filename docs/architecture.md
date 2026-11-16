@@ -7,7 +7,7 @@
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 核心逻辑 | Rust（`crates/flow-core`） | 无 IO 的纯逻辑：布局、坐标换算、切换判定、按键状态、协议编解码。可在任何平台单测。 |
-| 平台层 | Rust + 各平台系统 API（`crates/flow-platform`） | macOS：CGEventTap / CGEventPost / NSPasteboard；Windows：低级键鼠钩子 / SendInput / 剪贴板（两边都按变化计数轮询，见第 7 节；不用 Raw Input，原因见第 4 节）。Linux 只支持 X11：XInput2 / XTest / RandR / X 选区，用纯 Rust 的 x11rb，见第 12 节。 |
+| 平台层 | Rust + 各平台系统 API（`crates/flow-platform`） | macOS：CGEventTap / CGEventPost / NSPasteboard；Windows：低级键鼠钩子 / SendInput / 剪贴板（两边都按变化计数轮询，见第 7 节；不用 Raw Input，原因见第 4 节）。Linux：X11、Wayland（wlroots 系）、Wayland（GNOME / KDE 走 portal）三套实现，见第 12 节。 |
 | 网络层 | Rust：QUIC（quinn + rustls）+ mDNS（mdns-sd）（`crates/flow-net`） | QUIC 自带 TLS 1.3 加密；可靠流传按键，不可靠数据报传鼠标绝对坐标；剪贴板走独立流，大文本不会阻塞输入。 |
 | 桌面外壳 | Tauri 2（`app/src-tauri`） | 体积小、常驻内存低，托盘/菜单栏、开机启动、单实例都有官方插件。 |
 | 界面 | React + TypeScript + Vite（`app/src`） | 设备布局图需要拖拽交互，Web 技术实现最省力。视觉规范见 `docs/design.md`。 |
@@ -139,7 +139,7 @@
 | macOS | 输入监控（Input Monitoring） | 捕获键盘事件 |
 | macOS | 本地网络 | mDNS 发现与局域网连接 |
 | Windows | 防火墙放行 | 首次监听端口时系统弹窗 |
-| Linux | 无需授权；必须是 X11 会话 | X11 下任何程序都能监听和注入键鼠。开着防火墙（ufw / firewalld）时要手动放行流界的端口 |
+| Linux | X11、Sway、Hyprland 无需授权；GNOME / KDE 的 Wayland 会话要在系统弹窗里同意 | X11 下任何程序都能监听和注入键鼠，wlroots 系靠合成器开放的协议；GNOME / KDE 走 portal，注入的授权可以记住，捕获的授权每次启动都要点。开着防火墙（ufw / firewalld）时要手动放行流界的端口 |
 
 首次引导页逐项检测并给出"打开系统设置"按钮。
 
@@ -179,7 +179,7 @@ FlowAcross/
 ├── Cargo.toml              # Rust workspace
 ├── crates/
 │   ├── flow-core/          # 纯逻辑（已实现第一版并有单测）
-│   ├── flow-platform/      # 平台抽象 trait + macOS / Windows / Linux（X11）实现（M1）
+│   ├── flow-platform/      # 平台抽象 trait + macOS / Windows / Linux（X11、Wayland）实现（M1）
 │   └── flow-net/           # 发现、配对、QUIC 传输（M2）
 ├── app/
 │   ├── src/                # React 界面
@@ -194,9 +194,20 @@ FlowAcross/
     └── release.md          # 发版与自动更新配置
 ```
 
-## 12. Linux（X11）
+## 12. Linux
 
-只支持 X11 会话。Wayland 没有全局键鼠捕获和注入的统一接口（GNOME / KDE 要走 portal，wlroots 系是另一套协议），决定不做；在 Wayland 会话里键鼠捕获、注入和剪贴板返回 `PlatformError::Unsupported`，界面提示注销后改选 X11 会话，显示器仍通过 XWayland 枚举，布局图照常显示。代码在 `crates/flow-platform/src/linux*.rs`，X 协议用纯 Rust 的 x11rb，不链接 libxcb / libX11。
+Linux 上有三套实现，启动时按桌面会话选一套（`linux_wl.rs` 的 `backend()`，只判断一次），入口和分发在 `linux.rs`：
+
+| 会话 | 实现 | 文件 |
+|---|---|---|
+| X11 | XInput2 / XTest / RandR / X 选区（纯 Rust 的 x11rb，不链接 libxcb / libX11） | `linux.rs`、`linux_input.rs`、`linux_clipboard.rs`、`linux_glow.rs` |
+| Wayland，合成器有 wlroots 的虚拟输入和 layer-shell 协议（Sway、Hyprland 等） | 虚拟指针 / 虚拟键盘、layer-shell、data-control（纯 Rust 的 wayland-client；xkbcommon 链接系统库） | `linux_wl.rs`、`linux_wlr_input.rs`、`linux_wl_clipboard.rs`、`linux_wl_glow.rs` |
+| Wayland，其他合成器（GNOME、KDE） | xdg-desktop-portal（ashpd）+ libei 协议（纯 Rust 的 reis） | `linux_portal.rs`，剪贴板和浮光尽量复用上一行的 |
+
+Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不到别的窗口的输入，也不知道光标在哪，所以两套 Wayland 实现和其他系统有几处共同的不同（下面各节细说）：只在通往别的电脑的屏幕边上感知"光标推到了边上"（引擎用 `flow_platform::set_switch_edges` 告知是哪些边，由 `flow_core::Layout::switch_edges` 算出）；没切到远端时看不到键盘，「按住修饰键才切换」和本机上的 Ctrl+Alt+←/→ 不起作用。
+
+### X11
+
 
 - **显示器与缩放**（`linux.rs`）：RandR 1.5 的 monitor 列表，没有时把整个根窗口当一块屏幕；镜像的屏幕只算一块。X11 没有可靠的每屏缩放，桌面环境把整体缩放写在 `Xft.dpi`（GNOME、KDE 都是 96 × 缩放），所有屏幕共用这个值，逻辑坐标 = 像素 ÷ 缩放。
 - **捕获**（`linux_input.rs`）：在根窗口上选 XInput2 原始事件。X11 不能逐个事件决定放行还是拦截，捕获回调返回的 `Verdict` 在这里不起作用，拦截靠抓取：`set_cursor_captured(true)` 时抓住主键盘和主指针（`XIGrabDevice`）并隐藏光标（XFixes），本机程序此后收不到输入，回到本机时放开并把光标放到跨回来的位置。抓取期间根窗口上的原始事件不再送给抓取者自己（实测），所以鼠标的原始事件写在抓取掩码里；键盘则改收抓取送来的普通按键事件，因为原始事件没有长按连发，而它带连发标记。同一次按键两种事件都到时按（键码、时间戳）去重。
@@ -208,5 +219,34 @@ FlowAcross/
 - **剪贴板**（`linux_clipboard.rs`）：X11 的剪贴板不存数据，谁复制谁就是选区的所有者，别人粘贴时再向它要。所以有一个进程内唯一的后台服务（自己的连接、不可见窗口和事件线程）负责应答，`X11Clipboard` 只是句柄。读：`ConvertSelection`，文本和文件清单最多等 0.5 秒（引擎是持锁读的），图片 5 秒；写：保存各格式的数据并成为所有者。两个方向超过 1 MB 都按 ICCCM 的 `INCR` 分块。变化计数来自 XFixes 的所有者变化通知，自己写入时直接加一。格式：文本 `UTF8_STRING` / `text/plain;charset=utf-8`，文件 `text/uri-list` 加 `x-special/gnome-copied-files`，图片只认 `image/png`。流界退出后它写入的内容会消失（除非桌面有剪贴板管理器）。
 - **边缘浮光**（`linux_glow.rs`）：32 位色深的 override-redirect 窗口，输入区域设为空（鼠标穿透），在单独的线程里逐帧 `PutImage`，像素由 `glow::render` 算。依赖窗口合成器，没有时不显示。暂不跟随系统的「减少动态效果」。
 - **测试**：纯计算的部分是普通单元测试；需要 X 服务的测试标了 `#[ignore]`，CI 的 Ubuntu 任务用 Xvfb 跑（`xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1`，xclip 充当"别的程序"）。Xvfb 里没有真实键鼠，测试用 XTest 模拟并让捕获接受 XTEST 设备。
-- **外壳**：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；安装包只随测试版提供，应用内自动更新还没接入。
+- **外壳**（三套实现相同）：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；安装包只随测试版提供，应用内自动更新还没接入。
 
+### Wayland：显示器（`linux_wl.rs`）
+
+用 `wl_output` 加 `xdg-output`：位置和尺寸取合成器的逻辑坐标，它本身就是与缩放无关的逻辑点；缩放 = 当前分辨率 ÷ 逻辑尺寸，分数缩放也能算对；没有 xdg-output 时退回整数缩放。显示器标识用输出名（`DP-1`、`eDP-1`）。Wayland 没有主屏的概念，取左上角在原点的那块。每块输出还记着它的全局对象编号（对所有连接都一样），其他模块据此在自己的连接里找到同一块输出。
+
+### Wayland：wlroots 系（Sway、Hyprland）
+
+- **注入**（`linux_wlr_input.rs`）：`zwlr_virtual_pointer`，每块显示器建一个绑定到该输出的虚拟指针（协议第 2 版），坐标就是这块屏幕内的逻辑点（按 1/16 点上报）；不能绑定输出时按全部显示器的外接矩形算。`zwp_virtual_keyboard` 要客户端自己上传键盘映射、自己上报修饰键状态：映射取本机键盘当前用的那份（没接键盘时用系统默认布局），修饰键状态用 xkbcommon 跟着按键算。注入的是物理键位，字符仍由本机布局和输入法决定。长按连发由收到按键的程序自己产生，对方发来的连发事件不注入。
+- **捕获**：在通往别的电脑的屏幕边上各放一条 1 个逻辑点宽的透明 layer-shell 窗口（最上层），光标碰到它就合成一次向外推的移动（位置在边上、位移向外 3 个点）交给控制器。控制器决定切换后：把这条窗口铺满整块屏幕并独占键盘焦点，再锁定指针（`pointer-constraints`）、用 `relative-pointer` 读位移、请合成器不再处理快捷键（`keyboard-shortcuts-inhibit`）。铺满是为了不依赖合成器肯不肯锁：老版本的 sway 只给普通窗口锁定指针（实测 1.7），铺满之后光标怎么动都在窗口里，位移和按钮照样收得到，本机的其他窗口也收不到点击。回到本机时窗口缩回去、放开键盘，再用一个临时的虚拟指针把光标放到跨回来的位置（离屏幕边留 4 个点，之后 250 毫秒内碰边不算）。
+  - 边缘窗口会挡住屏幕最外一圈像素的点击，所以只放在通往别的电脑的边上。
+  - Wayland 的事件不带来源：流界刚注入过鼠标移动的 150 毫秒内，光标碰到边不算（它是被远端推过去的）。
+  - 按键事件没有连发，由流界按合成器给的重复速度自己产生（修饰键和 Caps Lock 不连发）。
+  - 合成器不锁定指针且有多块显示器时，看不见的光标可能移到另一块屏幕上，那时收不到鼠标事件，移回来才恢复。
+- **剪贴板**（`linux_wl_clipboard.rs`）：`zwlr_data_control`，后台也能读写。结构和 X11 的一样：进程内唯一的后台服务负责应答。读：让数据源把某个格式写进套接字的一端，从另一端读到结束（文本和文件清单最多等 0.5 秒，图片 5 秒）；写：建数据源、声明格式、设为选区，收到请求时在单独的线程里写。自己写入时变化计数直接加一，合成器随后回报的那一次不再重复计数。格式名和 X11 相同。
+- **边缘浮光**（`linux_wl_glow.rs`）：layer-shell 窗口，输入区域为空，按逻辑点的分辨率逐帧把 `glow::render` 的像素写进共享内存缓冲区。
+- **测试**：`scripts/test-wayland.sh` 起一个无头的 sway（`WLR_BACKENDS=headless`、pixman 渲染），在里面串行跑标了 `#[ignore]` 的集成测试：注入的移动撞到屏幕边 → 上报向外推 → 锁定 → 位移、按键、按钮、滚轮、长按连发 → 放开后光标回位；只在指定的边上有反应；剪贴板和 wl-clipboard 双向互通（含 4 MB 图片）；浮光用 grim 截屏比对像素。CI 的 Ubuntu 任务每次都跑。无头合成器里没有真实键鼠，用虚拟指针和虚拟键盘模拟，并让捕获接受"自己注入的移动"。
+
+### Wayland：GNOME / KDE（`linux_portal.rs`）
+
+这两个桌面不提供 wlroots 的虚拟输入协议，对外的正式接口是 xdg-desktop-portal（D-Bus）加 libei。portal 和 libei 都是异步接口，注入和捕获各用一个专门的线程跑单线程的 tokio 运行时，对外仍是同步的句柄。
+
+- **注入**：`RemoteDesktop` 会话。第一次要用户在系统弹窗里同意；拿到的恢复令牌存在 `$XDG_STATE_HOME/flowacross/remote-desktop.token`（权限 0600），之后不再弹窗。通过 `ConnectToEIS` 拿到连接后作为发送方，用合成器给的绝对指针、按钮、滚轮、键盘设备发事件；坐标是合成器的全局逻辑坐标，和显示器枚举是同一个坐标系。
+- **捕获**：`InputCapture` 会话。在通往别的电脑的屏幕边上设屏障，光标撞上时合成器开始把键鼠交给流界（`Activated`），这时合成一次向外推的移动交给控制器；控制器不切换就立刻 `Release`。之后的位移、按钮、滚轮、按键从 EIS 连接（接收方）读，回到本机时 `Release` 并告诉合成器光标该放在哪。这个 portal 没有记住授权的机制，每次启动流界都会弹窗。
+  - 撞上屏障的那一刻合成器就已经开始捕获，等不了「停留一会儿才切换」，这项设置在这里不起作用。
+  - 合成器可以单方面结束捕获（GNOME / KDE 都留了强制退出的快捷键），流界不会立刻知道，要等心跳超时或再次撞到屏幕边。
+- **剪贴板**：KDE 有 data-control，直接用上一节的实现；GNOME 没有，用挂在 `RemoteDesktop` 会话上的 `Clipboard` portal（读写都是 portal 给的文件描述符），所以 GNOME 上剪贴板要等用户同意远程桌面的弹窗之后才能用。
+- **边缘浮光**：KDE 有 layer-shell，用上一节的实现；GNOME 没有，不显示。
+- **启动**：弹窗可能很久没人点，启动只等 3 秒：很快失败的（没有 portal、桌面版本太旧）当场报错，其余在后台继续，期间注入的输入直接丢弃。捕获启动时顺便把注入用的会话也启动起来，让授权弹窗在用户还坐在这台电脑前时出现。
+- **版本要求**：`InputCapture` 和 `ConnectToEIS` 需要 GNOME 45 / KDE Plasma 6.1 以上。
+- **验证情况**：这一部分只做到编译通过和纯计算部分的单元测试（屏障坐标、滚动量换算、令牌路径）。portal 的授权弹窗要人来点，无头环境里跑不起来，**整条链路没有运行过**，需要在 GNOME 和 KDE 的真机上验证。

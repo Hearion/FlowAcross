@@ -1,10 +1,9 @@
-//! Linux（X11）实现：RandR 枚举显示器，以及各模块共用的连接和会话检查。
-//!
-//! 只支持 X11。Wayland 没有全局键鼠捕获和注入的统一接口，在 Wayland 会话里键鼠、剪贴板一律报"暂不支持"，
-//! 并提示改用 X11 会话；显示器仍通过 XWayland 枚举，布局图能照常显示。
+//! Linux 实现的入口：按当前桌面会话选 X11、Wayland（wlroots 系）或 Wayland（portal）的实现，
+//! 以及它们共用的显示器快照。本文件其余部分是 X11 的显示器枚举和连接。
 //!
 //! X11 没有可靠的每屏缩放：桌面环境把整体缩放写在 `Xft.dpi` 里（GNOME、KDE 都是 96 × 缩放），
 //! 所有显示器共用这一个值。逻辑坐标 = 像素 ÷ 缩放，各屏之间的相对位置不变。
+//! Wayland 的显示器枚举见 `linux_wl.rs`。
 
 use std::sync::Mutex;
 
@@ -15,23 +14,73 @@ use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, Window};
 use x11rb::rust_connection::RustConnection;
 
-use crate::{DisplayProvider, PlatformError};
+use crate::linux_wl::{self, Backend};
+use crate::{
+    ClipboardAccess, DisplayProvider, InputCapture, InputInjector, PlatformError, linux_clipboard,
+    linux_glow, linux_input, linux_portal, linux_wl_clipboard, linux_wl_glow, linux_wlr_input,
+};
 
-const WAYLAND_TEXT: &str = "Wayland 会话（请注销后在登录界面改选「Xorg」或「X11」会话）";
+// ---------------------------------------------------------------------------
+// 按会话类型分发
+// ---------------------------------------------------------------------------
+
+pub fn input_capture() -> Box<dyn InputCapture> {
+    match linux_wl::backend() {
+        Backend::X11 => Box::new(linux_input::X11Capture::default()),
+        Backend::Wlr => Box::new(linux_wlr_input::WlrCapture::default()),
+        Backend::Portal => Box::new(linux_portal::PortalCapture::default()),
+    }
+}
+
+pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
+    Ok(match linux_wl::backend() {
+        Backend::X11 => Box::new(linux_input::X11Injector::new()?),
+        Backend::Wlr => Box::new(linux_wlr_input::WlrInjector::new()?),
+        Backend::Portal => Box::new(linux_portal::PortalInjector::new()?),
+    })
+}
+
+pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
+    Ok(match linux_wl::backend() {
+        Backend::X11 => Box::new(linux_clipboard::X11Clipboard::new()?),
+        Backend::Wlr => Box::new(linux_wl_clipboard::WlClipboard::new()?),
+        // KDE 也有 data-control，直接用；GNOME 没有。
+        Backend::Portal if linux_wl_clipboard::available() => {
+            Box::new(linux_wl_clipboard::WlClipboard::new()?)
+        }
+        // GNOME：挂在远程桌面会话上的剪贴板 portal。
+        Backend::Portal => Box::new(linux_wl_clipboard::WlClipboard::with_backend(
+            linux_portal::selection()?,
+        )),
+    })
+}
+
+pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
+    match linux_wl::backend() {
+        Backend::X11 => linux_input::set_cursor_captured(captured, restore_at),
+        Backend::Wlr => linux_wlr_input::set_cursor_captured(captured, restore_at),
+        Backend::Portal => linux_portal::set_cursor_captured(captured, restore_at),
+    }
+}
+
+pub fn set_switch_edges(edges: &[(String, flow_core::geometry::Edge)]) {
+    // 两种 Wayland 实现共用同一份设置；变了才通知。
+    let changed = linux_wlr_input::set_switch_edges(edges);
+    if changed && linux_wl::backend() == Backend::Portal {
+        linux_portal::edges_changed();
+    }
+}
+
+pub fn edge_glow(display_local_id: &str, edge: flow_core::geometry::Edge, along: f64) {
+    match linux_wl::backend() {
+        Backend::X11 => linux_glow::show(display_local_id, edge, along),
+        // 合成器没有 layer-shell（GNOME）时它自己什么都不做。
+        Backend::Wlr | Backend::Portal => linux_wl_glow::show(display_local_id, edge, along),
+    }
+}
 
 pub(crate) fn os_err(what: &str, e: impl std::fmt::Display) -> PlatformError {
     PlatformError::Os(format!("{what}：{e}"))
-}
-
-/// 键鼠和剪贴板只在 X11 会话里工作；Wayland 会话里即使有 XWayland 也只能看到 X11 程序的输入。
-pub(crate) fn ensure_x11() -> Result<(), PlatformError> {
-    let session_is_wayland =
-        std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"));
-    let has_wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-    if session_is_wayland || has_wayland_display {
-        return Err(PlatformError::Unsupported(WAYLAND_TEXT));
-    }
-    Ok(())
 }
 
 /// 连接 `DISPLAY` 指向的 X 服务，返回连接和默认屏幕的序号。
@@ -50,6 +99,8 @@ pub(crate) struct Monitor {
     pub scale: f64,
     pub logical: Rect,
     pub primary: bool,
+    /// Wayland：这块输出的 `wl_output` 全局对象编号（对所有连接都一样）；X11 上是 0。
+    pub wl_global: u32,
 }
 
 impl Monitor {
@@ -134,9 +185,18 @@ fn read_scale(conn: &RustConnection, root: Window) -> f64 {
     scale_from_dpi(resources.as_deref().and_then(parse_xft_dpi))
 }
 
-pub(crate) fn monitors() -> Result<Vec<Monitor>, PlatformError> {
+/// X11 的显示器（X11 的捕获和注入用）。
+pub(crate) fn x11_monitors() -> Result<Vec<Monitor>, PlatformError> {
     let (conn, screen) = connect()?;
     monitors_on(&conn, screen)
+}
+
+/// 当前会话的显示器。
+pub(crate) fn monitors() -> Result<Vec<Monitor>, PlatformError> {
+    match linux_wl::backend() {
+        Backend::X11 => x11_monitors(),
+        Backend::Wlr | Backend::Portal => linux_wl::monitors(),
+    }
 }
 
 pub(crate) fn monitors_on(
@@ -203,13 +263,14 @@ pub(crate) fn monitors_on(
                 (phys.3 - phys.1) as f64 / scale,
             ),
             primary,
+            wl_global: 0,
         })
         .collect())
 }
 
-pub struct X11Displays;
+pub struct LinuxDisplays;
 
-impl DisplayProvider for X11Displays {
+impl DisplayProvider for LinuxDisplays {
     fn displays(&self) -> Result<Vec<DisplayInfo>, PlatformError> {
         let list = monitors()?;
         update_monitors(list.clone());
@@ -261,6 +322,7 @@ mod tests {
             scale: 2.0,
             logical: Rect::new(960.0, 0.0, 1920.0, 1080.0),
             primary: false,
+            wl_global: 0,
         };
         assert_eq!(m.logical_to_phys(960.0, 0.0), (1920, 0));
         assert_eq!(m.logical_to_phys(1060.0, 50.0), (2120, 100));

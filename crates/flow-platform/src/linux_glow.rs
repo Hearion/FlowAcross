@@ -59,7 +59,7 @@ fn window_rect(phys: (i32, i32, i32, i32), edge: Edge, depth: i32) -> (i32, i32,
 }
 
 /// 把一帧（预乘透明度的 BGRA）整体乘上不透明度。
-fn fade(buf: &mut [u8], opacity: f64) {
+pub(crate) fn fade(buf: &mut [u8], opacity: f64) {
     let k = (opacity.clamp(0.0, 1.0) * 256.0).round() as u32;
     for b in buf {
         *b = ((u32::from(*b) * k) >> 8) as u8;
