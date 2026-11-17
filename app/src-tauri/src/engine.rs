@@ -1006,6 +1006,7 @@ impl Engine {
             outputs,
             policy: switch_policy(&st.config.settings, st.locked, flow_platform::limits()),
             mapping: st.config.settings.mapping,
+            wheel_percent: st.config.settings.wheel_percent(),
             enabled: !st.config.settings.sharing_paused,
             acks: st
                 .sessions

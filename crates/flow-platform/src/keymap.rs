@@ -161,8 +161,14 @@ pub fn to_mac(code: KeyCode) -> Option<u16> {
         .map(|e| e.1)
 }
 
+/// 右 Shift 的扫描码。
+const RIGHT_SHIFT_SCAN: u16 = 0x36;
+
 /// `scan` 为钩子报告的扫描码，`extended` 为扩展键标记（E0 前缀）。
 pub fn from_win(scan: u16, extended: bool) -> Option<KeyCode> {
+    // 右 Shift 的扫描码是不带前缀的 0x36，但低级键盘钩子报告它时带着扩展键标记（Windows 的历史包袱）。
+    // 照常拼成 0xE036 的话表里查不到，右 Shift 就传不到对方，还会漏给本机（真机发现）。
+    let extended = extended && scan != RIGHT_SHIFT_SCAN;
     let key = if extended { 0xE000 | scan } else { scan };
     TABLE
         .iter()
@@ -329,6 +335,19 @@ mod tests {
             assert_eq!(to_win(code), None);
             assert_eq!(to_linux(code), None);
         }
+    }
+
+    #[test]
+    fn right_shift_is_recognised_with_or_without_the_extended_flag() {
+        // 低级键盘钩子报告右 Shift 时带扩展键标记，硬件扫描码本身不带。两种都要认。
+        assert_eq!(from_win(0x36, true), Some(KeyCode::RIGHT_SHIFT));
+        assert_eq!(from_win(0x36, false), Some(KeyCode::RIGHT_SHIFT));
+        // 注入时用不带前缀的扫描码。
+        assert_eq!(to_win(KeyCode::RIGHT_SHIFT), Some((0x36, false)));
+        // 左 Shift 不受影响；其他扩展键照旧区分。
+        assert_eq!(from_win(0x2A, false), Some(KeyCode::LEFT_SHIFT));
+        assert_eq!(from_win(0x1D, true), Some(KeyCode::RIGHT_CTRL));
+        assert_eq!(from_win(0x1D, false), Some(KeyCode::LEFT_CTRL));
     }
 
     #[test]

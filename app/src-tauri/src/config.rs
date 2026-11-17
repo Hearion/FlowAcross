@@ -64,9 +64,21 @@ pub struct Settings {
     pub win_keys: WinKeysPreset,
     /// `win_keys` 为 `Custom` 时的对应关系。
     pub win_keys_custom: WinToMacKeys,
+    /// 控制其他电脑时滚轮的速度，百分比：100 是原样，200 是两倍。由控制方在发出滚动之前换算，
+    /// 所以在手边这台电脑上设置，对所有被控制的电脑生效，对方不需要升级。
+    pub wheel_speed: u32,
 }
 
+/// 滚轮速度的可调范围（百分比）。
+pub const WHEEL_SPEED_RANGE: std::ops::RangeInclusive<u32> = 25..=400;
+
 impl Settings {
+    /// 生效的滚轮速度：配置文件里的值收进可调范围。
+    pub fn wheel_percent(&self) -> u32 {
+        self.wheel_speed
+            .clamp(*WHEEL_SPEED_RANGE.start(), *WHEEL_SPEED_RANGE.end())
+    }
+
     /// 当前生效的 PC 键盘 → Mac 修饰键对应关系。
     pub fn win_to_mac_keys(&self) -> WinToMacKeys {
         match self.win_keys {
@@ -93,6 +105,7 @@ impl Default for Settings {
             low_latency: false,
             win_keys: WinKeysPreset::Windows,
             win_keys_custom: WinToMacKeys::WINDOWS,
+            wheel_speed: 100,
         }
     }
 }
@@ -205,6 +218,23 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wheel_speed_defaults_to_normal_and_stays_in_range() {
+        // 旧版本的配置文件里没有这一项：按原样（100%）。
+        let old: Settings = serde_json::from_str(r#"{"dwell_ms": 300}"#).unwrap();
+        assert_eq!(old.wheel_speed, 100);
+        assert_eq!(old.wheel_percent(), 100);
+        assert_eq!(old.dwell_ms, 300);
+        // 手动改成离谱的值时收进可调范围。
+        let wild = |v| Settings {
+            wheel_speed: v,
+            ..Settings::default()
+        };
+        assert_eq!(wild(0).wheel_percent(), 25);
+        assert_eq!(wild(150).wheel_percent(), 150);
+        assert_eq!(wild(100_000).wheel_percent(), 400);
+    }
+
     use super::*;
 
     #[test]

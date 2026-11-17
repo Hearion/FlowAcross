@@ -95,6 +95,8 @@ export interface Settings {
   win_keys: WinKeysPreset;
   /** `win_keys` 为 "custom" 时的对应关系。 */
   win_keys_custom: WinToMacKeys;
+  /** 控制其他电脑时滚轮的速度，百分比：100 是原样，200 是两倍。在手边这台电脑上设置。 */
+  wheel_speed: number;
 }
 
 export type MacModifier = "control" | "option" | "command";

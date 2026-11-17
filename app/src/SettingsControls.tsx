@@ -29,6 +29,22 @@ export function useDeviceNameInput(current: string) {
   };
 }
 
+/** 滚轮速度的档位（百分比）。 */
+const WHEEL_SPEEDS: { value: string; label: string }[] = [
+  { value: "50", label: "0.5×" },
+  { value: "100", label: "1×" },
+  { value: "150", label: "1.5×" },
+  { value: "200", label: "2×" },
+  { value: "300", label: "3×" },
+];
+
+/** 配置文件里的值不在档位上时（手动改过），显示成最接近的一档。 */
+function nearestWheelSpeed(percent: number): string {
+  return WHEEL_SPEEDS.reduce((best, o) =>
+    Math.abs(Number(o.value) - percent) < Math.abs(Number(best.value) - percent) ? o : best,
+  ).value;
+}
+
 interface Props {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
@@ -81,6 +97,18 @@ export function CrossScreenSettings({ settings: s, update, unsupported: no }: Pr
             { value: "Proportional", label: "按比例" },
           ]}
           onChange={(v) => update({ mapping: v })}
+        />
+      </div>
+      <div className="setting">
+        <div className="setting-text">
+          <span>滚轮速度</span>
+          <small>控制其他电脑时滚轮滚得多快，在这台电脑上设置</small>
+        </div>
+        <Segmented
+          label="滚轮速度"
+          value={nearestWheelSpeed(s.wheel_speed)}
+          options={WHEEL_SPEEDS}
+          onChange={(v) => update({ wheel_speed: Number(v) })}
         />
       </div>
       <div className="setting inline">

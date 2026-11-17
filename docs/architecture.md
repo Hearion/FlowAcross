@@ -87,7 +87,8 @@
   - 控制方：macOS 和 Windows 由控制器在每次切过去时直接查系统的状态（`flow_platform::caps_lock_on`）；Linux 的 X11（查指针掩码里的锁定位）和 Hyprland / Sway（拿到键盘焦点时合成器报的修饰键状态）由捕获上报，控制期间变了还会再报。GNOME / KDE 的 Wayland 做控制方时还不上报。
   - 被控制方：macOS 改注入器自己记的状态；Windows、Linux 的 X11 和 Hyprland / Sway 是状态不同就按一下 Caps Lock。GNOME / KDE 的 Wayland 做被控制方时还不对齐。
   - Windows 的查询用 `GetKeyState`，仅通过交叉编译检查，待真机验证。Windows 做控制方时，控制期间按下的 Caps Lock 被钩子拦截、不改本机状态，所以下次再切过去时对方会被对齐回 Windows 这边的状态。
-- **滚轮**：消息里的单位是 1/120 格，一格对应 3 行（Windows 和多数 Linux 桌面的默认值）。macOS 的滚动事件以"行"为单位，捕获和注入都按 3 行 = 一格换算（`LINES_PER_NOTCH`）；非整格的注入按像素发，一格约 30 像素。早先两头都按 1 行 = 一格：Windows 控制 Mac 时一格只滚 1 行，翻网页要滚半天；Mac 控制 Windows 时滚 1 行对方就滚一整格，一直偏快。
+- **滚轮**：消息里的单位是 1/120 格，一格对应 3 行（Windows 和多数 Linux 桌面的默认值）。macOS 的滚动事件以"行"为单位，捕获和注入都按 3 行 = 一格换算（`LINES_PER_NOTCH`）；非整格的注入按像素发，一格约 30 像素。早先两头都按 1 行 = 一格：Windows 控制 Mac 时一格只滚 1 行，翻网页要滚半天；Mac 控制 Windows 时滚 1 行对方就滚一整格，一直偏快。设置里的「滚轮速度」（`Settings::wheel_speed`，百分比）由控制方在发出滚动之前换算，除不尽的部分攒到下一次；在手边这台电脑上设置，对所有被控制的电脑生效，对方不需要升级。
+- Windows 的低级键盘钩子报告右 Shift 时带着扩展键标记，而它的扫描码（0x36）本身不带前缀；`keymap::from_win` 对它忽略这个标记，否则查不到键码，右 Shift 传不到对方、还会漏给本机（真机发现）。
 - 已知系统限制：Windows 的 Ctrl+Alt+Del、UAC 安全桌面无法注入；向管理员权限窗口注入需要流界本身以管理员运行。在界面中给出说明。
 
 ## 6. 网络、发现与配对

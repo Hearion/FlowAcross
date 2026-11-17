@@ -53,6 +53,8 @@ pub struct ControllerConfig {
     pub outputs: HashMap<DeviceId, Output>,
     pub policy: SwitchPolicy,
     pub mapping: EdgeMapping,
+    /// 控制远端时滚轮速度的百分比（见 `Settings::wheel_speed`）；0 当作 100。
+    pub wheel_percent: u32,
     /// 共享未暂停。
     pub enabled: bool,
     /// 会回复心跳回执的设备（版本不低于 `SECURE_SINCE`）。只对它们做快速断线检测。
@@ -97,6 +99,8 @@ pub struct Controller {
     caps: Option<bool>,
     /// 直接查询本机大写锁定状态的办法（macOS、Windows 有；Linux 靠上面的事件）。
     caps_probe: Option<CapsProbe>,
+    /// 按滚轮速度换算后不足一个单位的余量（横向、纵向，单位是 1/100 个滚动单位）。
+    wheel_rest: (i32, i32),
 }
 
 /// 查询本机大写锁定是否打开；查不到时返回 `None`。
@@ -119,6 +123,15 @@ fn nudge(rect: flow_core::Rect, p: Point, dx: f64, dy: f64) -> (f64, f64) {
         d.1 = dy.min(rect.top() - p.y - 0.01);
     }
     d
+}
+
+/// 按滚轮速度（百分比，0 当作 100）换算一次滚动量。除不尽的部分留在 `rest` 里攒到下一次，
+/// 这样慢速滚动（触控板一次只有几个单位）乘上小于 1 的倍率也不会一直是 0。
+fn scale_wheel(delta: i32, percent: u32, rest: &mut i32) -> i32 {
+    let percent = if percent == 0 { 100 } else { percent as i64 };
+    let total = i64::from(delta) * percent + i64::from(*rest);
+    *rest = (total % 100) as i32;
+    (total / 100).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 
 /// 告诉对方本机大写锁定的状态。借用按键消息和保留键码（见 `KeyCode::CAPS_STATE_ON`），
@@ -162,6 +175,7 @@ impl Controller {
             away: false,
             caps: None,
             caps_probe: None,
+            wheel_rest: (0, 0),
         }
     }
 
@@ -291,7 +305,12 @@ impl Controller {
             }
             CapturedEvent::Wheel { dx, dy } => {
                 if self.active.is_some() {
-                    self.send(Message::Wheel { dx, dy });
+                    let percent = self.cfg.wheel_percent;
+                    let dx = scale_wheel(dx, percent, &mut self.wheel_rest.0);
+                    let dy = scale_wheel(dy, percent, &mut self.wheel_rest.1);
+                    if dx != 0 || dy != 0 {
+                        self.send(Message::Wheel { dx, dy });
+                    }
                     Verdict::Suppress
                 } else {
                     Verdict::Pass
@@ -660,6 +679,7 @@ mod tests {
             outputs,
             policy,
             mapping: EdgeMapping::Continuous,
+            wheel_percent: 100,
             enabled: true,
             acks: HashSet::new(),
         }
@@ -800,6 +820,43 @@ mod tests {
         // 控制期间状态变了：马上转告。
         r.ctl.handle(CapturedEvent::CapsLock(false));
         assert_eq!(drain(&mut r.pc_rx), vec![caps(false)]);
+    }
+
+    #[test]
+    fn wheel_speed_scales_what_is_sent_and_keeps_fractions() {
+        let mut rest = 0;
+        // 100% 和没设（0）都是原样。
+        assert_eq!(scale_wheel(-120, 100, &mut rest), -120);
+        assert_eq!(scale_wheel(120, 0, &mut rest), 120);
+        assert_eq!(scale_wheel(120, 200, &mut rest), 240);
+        assert_eq!(scale_wheel(-120, 150, &mut rest), -180);
+        assert_eq!(rest, 0);
+        // 一半速度下每次 3 个单位：1.5 攒起来，不丢。
+        let sent: i32 = (0..4).map(|_| scale_wheel(3, 50, &mut rest)).sum();
+        assert_eq!(sent, 6);
+        assert_eq!(rest, 0);
+        // 反方向同样。
+        let sent: i32 = (0..4).map(|_| scale_wheel(-3, 50, &mut rest)).sum();
+        assert_eq!(sent, -6);
+    }
+
+    #[test]
+    fn wheel_speed_setting_applies_only_while_controlling() {
+        let mut r = rig(SwitchPolicy::default());
+        let mut cfg = config(SwitchPolicy::default(), r.pc_tx.clone(), true);
+        cfg.wheel_percent = 200;
+        r.ctl.configure(cfg);
+        // 在本机：放行，不发给任何人。
+        let wheel = CapturedEvent::Wheel { dx: 0, dy: -120 };
+        assert_eq!(r.ctl.handle(wheel), Verdict::Pass);
+        assert!(drain(&mut r.pc_rx).is_empty());
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        drain(&mut r.pc_rx);
+        assert_eq!(r.ctl.handle(wheel), Verdict::Suppress);
+        assert_eq!(
+            drain(&mut r.pc_rx),
+            vec![Message::Wheel { dx: 0, dy: -240 }]
+        );
     }
 
     #[test]
