@@ -138,6 +138,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # 测试版用快一些的优化配置，正式版不设，按 Cargo.toml 里的来（全量 LTO、单个代码生成单元）。
+      # 发布构建三分之二的时间花在最后一步"整体优化"上（日志停在最后一个依赖 gethostname 那一行，其实是在编主程序）。
+      # 轻量 LTO 加多个代码生成单元能并行做这一步：本机实测总耗时减半，二进制大约 3.6 MB。
+      # 只能在测试版时才写入这两个变量：值为空的话 Cargo 不会忽略，会直接报错。
+      - name: 测试版用快速构建配置
+        if: needs.prepare.outputs.prerelease == 'true'
+        shell: bash
+        run: |
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+
       - name: 安装前端依赖
         working-directory: app
         run: npm ci
@@ -257,6 +268,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      # 测试版用快一些的优化配置，正式版不设，按 Cargo.toml 里的来（全量 LTO、单个代码生成单元）。
+      # 发布构建三分之二的时间花在最后一步"整体优化"上（日志停在最后一个依赖 gethostname 那一行，其实是在编主程序）。
+      # 轻量 LTO 加多个代码生成单元能并行做这一步：本机实测总耗时减半，二进制大约 3.6 MB。
+      # 只能在测试版时才写入这两个变量：值为空的话 Cargo 不会忽略，会直接报错。
+      - name: 测试版用快速构建配置
+        if: needs.prepare.outputs.prerelease == 'true'
+        shell: bash
+        run: |
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
 
       - name: 安装前端依赖
         working-directory: app

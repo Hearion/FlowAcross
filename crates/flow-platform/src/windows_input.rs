@@ -25,11 +25,11 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput, VK_CAPITAL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, EVENT_SYSTEM_FOREGROUND, GetCursorPos, GetMessageW, GetSystemMetrics, HHOOK,
@@ -471,7 +471,25 @@ fn send(inputs: &[INPUT]) -> Result<(), PlatformError> {
     }
 }
 
+/// 系统的大写锁定现在是否打开（`GetKeyState` 的最低位是切换状态）。
+///
+/// 仅通过交叉编译检查，待真机验证：`GetKeyState` 读的是调用线程自己的键盘状态快照，
+/// 在没有消息循环的线程上可能不是最新的。
+pub fn caps_lock_on() -> bool {
+    // SAFETY: 简单的系统查询。
+    (unsafe { GetKeyState(i32::from(VK_CAPITAL)) } & 1) != 0
+}
+
 impl InputInjector for WinInjector {
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
+        if caps_lock_on() != on {
+            // 状态不一样：按一下 Caps Lock。
+            self.key(KeyCode::CAPS_LOCK, true, false)?;
+            self.key(KeyCode::CAPS_LOCK, false, false)?;
+        }
+        Ok(())
+    }
+
     fn move_to(&mut self, display_local_id: &str, x: f64, y: f64) -> Result<(), PlatformError> {
         let mut target = with_monitors(|list| {
             list.iter()

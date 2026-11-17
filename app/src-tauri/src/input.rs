@@ -95,7 +95,12 @@ pub struct Controller {
     away: bool,
     /// 平台层最近一次上报的本机大写锁定状态（见 `CapturedEvent::CapsLock`）。
     caps: Option<bool>,
+    /// 直接查询本机大写锁定状态的办法（macOS、Windows 有；Linux 靠上面的事件）。
+    caps_probe: Option<CapsProbe>,
 }
+
+/// 查询本机大写锁定是否打开；查不到时返回 `None`。
+pub type CapsProbe = Box<dyn Fn() -> Option<bool> + Send>;
 
 /// 光标移到距离边缘不足 1 个逻辑点、且还在朝边缘移动时，视为"推出边缘"。
 /// 系统会把光标限制在屏幕内，贴边后继续推可能没有位移，所以到达最后一列像素就算数。
@@ -156,7 +161,13 @@ impl Controller {
             ack_timeout: ACK_TIMEOUT,
             away: false,
             caps: None,
+            caps_probe: None,
         }
+    }
+
+    /// 让控制器在开始控制远端时查一下本机的大写锁定状态并告诉对方。
+    pub fn set_caps_probe(&mut self, probe: CapsProbe) {
+        self.caps_probe = Some(probe);
     }
 
     /// 引擎推断键鼠被别的设备带走了（它刚结束对本机的控制）。之后本机一有键鼠输入，
@@ -446,8 +457,10 @@ impl Controller {
             x: lp.x,
             y: lp.y,
         });
-        // 已经知道本机大写锁定的状态就先告诉对方；平台层稍后报来新的状态时还会再发。
-        if let Some(on) = self.caps {
+        // 告诉对方本机大写锁定的状态：能直接查就查（macOS、Windows），
+        // 否则用平台层上次报来的（Linux，稍后报来新的状态时还会再发）。
+        let caps = self.caps_probe.as_ref().and_then(|probe| probe());
+        if let Some(on) = caps.or(self.caps) {
             let _ = tx.send(caps_message(on));
         }
         info!(device = %target.device.short(), "键鼠切到远端");
@@ -787,6 +800,33 @@ mod tests {
         // 控制期间状态变了：马上转告。
         r.ctl.handle(CapturedEvent::CapsLock(false));
         assert_eq!(drain(&mut r.pc_rx), vec![caps(false)]);
+    }
+
+    #[test]
+    fn caps_lock_is_probed_when_entering_a_remote() {
+        let mut r = rig(SwitchPolicy::default());
+        // 每次查到的状态不一样：第一次开着，第二次关着。
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = calls.clone();
+        r.ctl.set_caps_probe(Box::new(move || {
+            Some(seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+        }));
+        let caps = |on| Message::Key {
+            code: KeyCode::caps_state(on),
+            down: false,
+            repeat: false,
+        };
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        let sent = drain(&mut r.pc_rx);
+        assert!(matches!(sent[0], Message::Enter { .. }));
+        assert_eq!(sent[1], caps(true));
+        // 回到本机再切过去：重新查，不沿用上一次的。
+        r.ctl.force_local();
+        drain(&mut r.pc_rx);
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        let sent = drain(&mut r.pc_rx);
+        assert!(matches!(sent[0], Message::Enter { .. }));
+        assert_eq!(sent[1], caps(false));
     }
 
     #[test]

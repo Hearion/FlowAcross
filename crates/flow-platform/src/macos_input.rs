@@ -283,8 +283,8 @@ fn translate(state: &mut TapState, kind: u32, event: CGEventRef) -> [Option<Capt
             }
             SCROLL_WHEEL => {
                 // 单位是"行"（触控板为小数），换算成 1/120 格并累积不足一个单位的余数。
-                let ly = CGEventGetDoubleValueField(event, FIELD_SCROLL_FIXED_1) * 120.0;
-                let lx = -CGEventGetDoubleValueField(event, FIELD_SCROLL_FIXED_2) * 120.0;
+                let ly = lines_to_units(CGEventGetDoubleValueField(event, FIELD_SCROLL_FIXED_1));
+                let lx = -lines_to_units(CGEventGetDoubleValueField(event, FIELD_SCROLL_FIXED_2));
                 state.scroll.0 += lx;
                 state.scroll.1 += ly;
                 let (dx, dy) = (state.scroll.0.trunc(), state.scroll.1.trunc());
@@ -625,6 +625,20 @@ const LINES_PER_NOTCH: i32 = 3;
 /// 一行大约 10 个像素，和上面保持一致：一格 = 3 行 ≈ 30 像素 = 120 个单位。
 const UNITS_PER_PIXEL: i32 = 4;
 
+/// 本机滚动的行数换成流界的滚动量（1/120 格）。和注入时用同一个约定：3 行算一格。
+///
+/// 早先是 1 行算一格。那样从 Mac 滚 1 行，Windows 和 Linux 会滚一整格（3 行），一直偏快；
+/// 注入端改成一格 3 行之后，Mac 控制 Mac 更是会变成 3 倍。两头用同一个比例，各个方向才对得上。
+fn lines_to_units(lines: f64) -> f64 {
+    lines * 120.0 / f64::from(LINES_PER_NOTCH)
+}
+
+/// 系统的大写锁定现在是否打开。
+pub fn caps_lock_on() -> bool {
+    // SAFETY: 只读查询当前的修饰键状态（1 = HID 系统状态），任何线程都可以调用。
+    unsafe { CGEventSourceFlagsState(1) & FLAG_CAPS != 0 }
+}
+
 /// 流界的滚动量（1/120 格，向上、向右为正）换成 macOS 滚动事件的参数：(单位：1 行 / 0 像素, 纵向, 横向)。
 /// 整格滚动按"行"发，其余按像素发；不足 1 像素的留在 `rem` 里攒到下一次，否则慢速滚动每次都被整除成 0。
 /// macOS 的横向正方向和流界相反。
@@ -900,6 +914,23 @@ impl crate::ClipboardAccess for MacClipboard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captured_lines_and_injected_lines_use_the_same_ratio() {
+        // 本机滚 3 行 = 一格；对方是 Mac 的话注入回去还是 3 行，不会越传越快。
+        assert_eq!(lines_to_units(3.0), 120.0);
+        assert_eq!(lines_to_units(-1.0), -40.0);
+        let mut rem = (0, 0);
+        assert_eq!(
+            scroll_amounts(0, lines_to_units(3.0) as i32, &mut rem),
+            (1, 3, 0)
+        );
+        // 只滚 1 行：按像素发，约 10 个像素，也就是 1 行。
+        assert_eq!(
+            scroll_amounts(0, lines_to_units(1.0) as i32, &mut rem),
+            (0, 10, 0)
+        );
+    }
+
     #[test]
     fn one_wheel_notch_scrolls_three_lines() {
         let mut rem = (0, 0);

@@ -727,7 +727,10 @@ impl Engine {
         } else {
             Box::new(|_, _| {})
         };
-        let controller = Controller::new(identity.device_id.clone(), ctl_tx, cursor);
+        let mut controller = Controller::new(identity.device_id.clone(), ctl_tx, cursor);
+        if opts.input {
+            controller.set_caps_probe(Box::new(flow_platform::caps_lock_on));
+        }
         let clipboard_sync = ClipboardSync::new(identity.device_id.clone());
         let engine = Engine {
             inner: Arc::new(Inner {

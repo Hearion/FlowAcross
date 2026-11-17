@@ -85,6 +85,7 @@ git push origin main v0.2.2-beta.1
 
 - 在发布仓库里标成 **Pre-release**，不会成为 latest。`releases/latest/download/latest.json` 仍指向上一个正式版，**已安装的流界收不到更新提示**，测试的人要到发布页手动下载安装。
 - 多打一份 **Linux 安装包**（x86_64 的 `.deb`、`.AppImage`，以及给 Arch 系用的 `.pkg.tar.zst`，在 ubuntu-22.04 上打包）。Linux 目前只随测试版提供，没有应用内自动更新。Arch 包由 `scripts/build-arch-pkg.sh` 在 Arch 的官方容器里把 `.deb` 重新打包而成（`scripts/arch/PKGBUILD`，包名 `flowacross-bin`），不重新编译；Arch 的版本号不能带连字符，`0.2.2-beta.3` 在包里写成 `0.2.2_beta.3`。
+- 用快一些的构建配置（轻量 LTO、16 个代码生成单元），出包更快，安装包比正式版的配置大 1 MB 左右；正式版仍按 `Cargo.toml` 里的配置（全量 LTO）。这两个设置是打包任务里按标签写入的环境变量，不要改成"正式版时留空"：值为空的话 Cargo 不会忽略，会直接报错。
 - 装了测试版的 Windows / macOS，之后发布同号或更高的正式版（如 0.2.2）时会正常收到更新提示（`0.2.2-beta.1` 低于 `0.2.2`）。
 - 测试完直接发正式版即可（把版本号改成不带后缀的），不需要撤回测试版；想清理就在发布仓库把它删掉。
 

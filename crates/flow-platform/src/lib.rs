@@ -78,6 +78,19 @@ pub fn input_injector() -> Result<Box<dyn InputInjector>, PlatformError> {
     return Err(PlatformError::Unsupported("键鼠注入"));
 }
 
+/// 本机的大写锁定现在是否打开；查不到时返回 `None`。控制器在开始控制远端时用它告诉对方。
+///
+/// macOS 和 Windows 直接查系统。Linux 返回 `None`：那里在开始控制、以及控制期间状态变化时
+/// 由捕获上报（[`CapturedEvent::CapsLock`]）。
+pub fn caps_lock_on() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    return Some(macos_input::caps_lock_on());
+    #[cfg(windows)]
+    return Some(windows_input::caps_lock_on());
+    #[cfg(not(any(target_os = "macos", windows)))]
+    return None;
+}
+
 /// 当前系统的剪贴板（纯文本、文件和图片）。
 pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     #[cfg(target_os = "macos")]
@@ -306,7 +319,8 @@ pub enum CapturedEvent {
         repeat: bool,
     },
     /// 本机的大写锁定现在是开还是关。开始控制远端时、以及控制期间状态变化时上报，
-    /// 控制器转告对方，让两边一致。目前只有 Linux（X11、Hyprland / Sway）会报。
+    /// 控制器转告对方，让两边一致。只有 Linux（X11、Hyprland / Sway）用这个事件；
+    /// macOS 和 Windows 由控制器在开始控制时直接查询（[`caps_lock_on`]）。
     CapsLock(bool),
 }
 
@@ -335,7 +349,7 @@ pub trait InputInjector: Send {
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), PlatformError>;
     fn key(&mut self, code: KeyCode, down: bool, repeat: bool) -> Result<(), PlatformError>;
     /// 把大写锁定对齐到控制方的状态（见 [`CapturedEvent::CapsLock`]）。已经一致时什么都不做。
-    /// 默认无操作：Windows 和 Linux 的 GNOME / KDE（portal）还没有实现。
+    /// 默认无操作：Linux 的 GNOME / KDE（portal）还没有实现。
     fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
         let _ = on;
         Ok(())
