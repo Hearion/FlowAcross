@@ -231,6 +231,9 @@ pub struct DeviceView {
     pub manual: bool,
     /// 本机的键鼠当前是否在这台设备上。
     pub active: bool,
+    /// 界面上「键鼠在这里」标在这台设备上。通常和 `active` 一样；例外是别的设备刚结束对本机的控制：
+    /// 键鼠跟着它回去了，这时标在它上面而不是本机，直到本机有键鼠输入。
+    pub has_input: bool,
     pub paused: bool,
     /// 对方暂停了共享或暂停了本机，暂时不能切过去。
     pub remote_paused: bool,
@@ -332,6 +335,8 @@ struct Inner {
     progress_emitted: Mutex<Instant>,
     /// 低延迟模式当前是否在生效（已通知后台服务关闭 AWDL）；`None` 表示还没同步过。
     low_latency_active: Mutex<Option<bool>>,
+    /// 键鼠被这台设备带走了：它刚结束对本机的控制，之后本机还没有过键鼠输入。只用于界面显示。
+    input_at: Mutex<Option<DeviceId>>,
     /// 正处在握手 / 配对阶段（对方还没通过认证）的入站连接数，见 [`HandshakeSlot`]。
     unauthenticated: Arc<AtomicUsize>,
     /// 别人发来的配对请求（本机没有发起）的频率限制。
@@ -420,7 +425,11 @@ fn switch_policy(settings: &Settings, locked: bool, limits: flow_platform::Limit
             HoldKey::Shift => Modifiers::SHIFT,
         },
         dwell_ms: if limits.dwell { 0 } else { settings.dwell_ms },
-        corner_deadzone: if settings.corner_guard { 10.0 } else { 0.0 },
+        corner_deadzone: if settings.corner_guard {
+            flow_core::switching::CORNER_DEADZONE
+        } else {
+            0.0
+        },
         locked,
     }
 }
@@ -755,6 +764,7 @@ impl Engine {
                 started: Instant::now(),
                 progress_emitted: Mutex::new(Instant::now()),
                 low_latency_active: Mutex::new(None),
+                input_at: Mutex::new(None),
                 unauthenticated: Arc::new(AtomicUsize::new(0)),
                 // 每分钟最多弹 3 次别人发起的配对。
                 pair_requests: Mutex::new(RateLimit::new(3, 60_000)),
@@ -1028,6 +1038,16 @@ impl Engine {
             .expect("controlled")
             .as_ref()
             .map(|c| c.by.clone());
+        // 键鼠被刚离开的设备带走了：它还连着、本机没在控制别的设备、也没在被控制时才算数。
+        let input_at = self
+            .inner
+            .input_at
+            .lock()
+            .expect("input at")
+            .clone()
+            .filter(|id| {
+                active.is_none() && controlled_by.is_none() && st.sessions.contains_key(id)
+            });
         let mut devices = vec![DeviceView {
             id: local.clone(),
             name: self.name_of(&st),
@@ -1035,6 +1055,7 @@ impl Engine {
             status: DeviceStatus::Local,
             manual: false,
             active: active.is_none(),
+            has_input: active.is_none() && input_at.is_none(),
             paused: false,
             remote_paused: false,
         }];
@@ -1051,6 +1072,7 @@ impl Engine {
             },
             manual: st.manual.contains(&p.id) && !st.sessions.contains_key(&p.id),
             active: active.as_ref() == Some(&p.id),
+            has_input: active.as_ref() == Some(&p.id) || input_at.as_ref() == Some(&p.id),
             paused: p.paused,
             remote_paused: st.remote_blocked.contains(&p.id),
         }));
@@ -2364,6 +2386,12 @@ impl Engine {
                 self.glow_on_return(*at);
                 continue;
             }
+            // 本机有键鼠输入了，或者本机的键鼠切到了别处：不再认为键鼠在刚离开的那台设备上。
+            self.set_input_at(None);
+            if matches!(ev, ControlEvent::LocalInput) {
+                self.emit();
+                continue;
+            }
             if let ControlEvent::Lost(id) = &ev {
                 // 用户自己移除或暂停了正在控制的设备：键鼠回到本机是预期的，不提示"连接中断"。
                 let (by_user, name, refused) = {
@@ -3130,6 +3158,11 @@ impl Engine {
             Some(Remote::Key(code, down, repeat)) => self.inject(|i| i.key(code, down, repeat)),
             Some(Remote::Release) => {
                 drop(st);
+                // 对方主动离开：键鼠跟着它回去了。界面上标到它那边，直到本机有输入为止。
+                // 看不到本机输入的系统（Linux 的 Wayland）没法知道什么时候回来，就不做这个推断。
+                if !flow_platform::limits().local_input {
+                    self.set_input_at(Some(peer.clone()));
+                }
                 self.release_controlled(Some(peer));
             }
             Some(Remote::ReleaseKeys) => {
@@ -3193,6 +3226,7 @@ impl Engine {
             );
         }
         info!(device = %short(peer), "开始被控制");
+        self.set_input_at(None);
         *self.inner.controlled.lock().expect("controlled") = Some(Controlled {
             by: peer.clone(),
             by_os: peer_os,
@@ -3253,6 +3287,20 @@ impl Engine {
     }
 
     /// 结束被控制并释放对方按下的所有键。`by` 为 `None` 时不论是谁都释放。
+    /// 记下（或清掉）"键鼠被这台设备带走了"，并让控制器在本机有输入时通知。
+    fn set_input_at(&self, device: Option<DeviceId>) {
+        let away = device.is_some();
+        let changed = {
+            let mut at = self.inner.input_at.lock().expect("input at");
+            let changed = *at != device;
+            *at = device;
+            changed
+        };
+        if changed {
+            self.controller().set_away(away);
+        }
+    }
+
     fn release_controlled(&self, by: Option<&DeviceId>) {
         let taken = {
             let mut guard = self.inner.controlled.lock().expect("controlled");
@@ -3652,6 +3700,76 @@ mod tests {
             .devices
             .iter()
             .any(|d| &d.id == id && d.remote_paused)
+    }
+
+    fn has_input(e: &Engine, id: &DeviceId) -> bool {
+        e.view().devices.iter().any(|d| &d.id == id && d.has_input)
+    }
+
+    /// 对方结束控制后，界面上「键鼠在这里」标到对方那边；本机一有键鼠输入就标回本机。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn input_follows_the_controller_home_until_local_input() {
+        let (a, b) = paired("a9", "b9").await;
+        let (ida, idb) = (a.engine.local_id().clone(), b.engine.local_id().clone());
+        // 一开始各自认为键鼠在自己这里。
+        assert!(has_input(&b.engine, &idb) && !has_input(&b.engine, &ida));
+
+        enter(&a.engine, &idb, 1);
+        wait_for("B 被 A 控制", || {
+            b.engine.controlled_by() == Some(ida.clone())
+        })
+        .await;
+        assert!(has_input(&b.engine, &idb), "被控制时键鼠就在 B 这里");
+
+        // A 离开：B 认为键鼠跟着 A 回去了。
+        {
+            let st = a.engine.lock();
+            let _ = st.sessions[&idb].tx.send(Message::Leave { session: 1 });
+        }
+        wait_for("B 结束被控制", || b.engine.controlled_by().is_none()).await;
+        wait_for("键鼠标到 A 那边", || {
+            has_input(&b.engine, &ida) && !has_input(&b.engine, &idb)
+        })
+        .await;
+        // 这不等于 B 在控制 A。
+        assert!(
+            b.engine
+                .view()
+                .devices
+                .iter()
+                .all(|d| d.id != ida || !d.active)
+        );
+
+        // B 本机动了一下鼠标：标回 B。
+        b.engine
+            .controller()
+            .handle(flow_platform::CapturedEvent::MouseMove {
+                x: 100.0,
+                y: 100.0,
+                dx: 1.0,
+                dy: 0.0,
+            });
+        wait_for("键鼠标回 B", || {
+            has_input(&b.engine, &idb) && !has_input(&b.engine, &ida)
+        })
+        .await;
+
+        // A 再来再走，然后断开：不再标在一台已经离线的设备上。
+        enter(&a.engine, &idb, 2);
+        wait_for("B 再次被 A 控制", || {
+            b.engine.controlled_by() == Some(ida.clone())
+        })
+        .await;
+        {
+            let st = a.engine.lock();
+            let _ = st.sessions[&idb].tx.send(Message::Leave { session: 2 });
+        }
+        wait_for("键鼠再次标到 A 那边", || has_input(&b.engine, &ida)).await;
+        a.engine.shutdown();
+        wait_for("A 离线后标回 B", || {
+            has_input(&b.engine, &idb) && !has_input(&b.engine, &ida)
+        })
+        .await;
     }
 
     /// 暂停挡住双向控制，锁定只限制本机切出去，对方仍可进入。

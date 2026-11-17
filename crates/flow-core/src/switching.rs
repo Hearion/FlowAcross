@@ -11,6 +11,15 @@ use crate::geometry::{Edge, Point, Rect};
 use crate::keys::Modifiers;
 use crate::layout::{Crossing, DisplayId};
 
+/// 「屏幕角落不切换」打开时角落的范围（逻辑点）。
+///
+/// 太小等于没有：早先是 10 个点，在 2560 宽的屏幕上不到 0.4%，光标稍微一滑就出去了（用户反馈）。
+/// 48 个点大约是菜单栏、任务栏按钮的尺寸，冲着屏幕角去的时候够得着，又不至于挡住正常的跨屏。
+pub const CORNER_DEADZONE: f64 = 48.0;
+
+/// 角落范围最多占所在那条边长度的这个比例，免得很短的边（小屏幕、竖屏的短边）大半都切不过去。
+const CORNER_MAX_FRACTION: f64 = 0.2;
+
 /// 防误触设置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwitchPolicy {
@@ -29,7 +38,7 @@ impl Default for SwitchPolicy {
         Self {
             require_modifiers: Modifiers::NONE,
             dwell_ms: 0,
-            corner_deadzone: 10.0,
+            corner_deadzone: CORNER_DEADZONE,
             locked: false,
         }
     }
@@ -107,6 +116,7 @@ impl EdgeSwitcher {
         }
         let along = c.edge.along(c.at);
         let (s0, s1) = c.from_rect.edge_span(c.edge);
+        let dz = dz.min((s1 - s0) * CORNER_MAX_FRACTION);
         along - s0 < dz || s1 - along < dz
     }
 
@@ -251,6 +261,47 @@ mod tests {
             s.update(Some(&contact(895.0, true)), FREE, 0),
             Decision::Stay
         );
+    }
+
+    #[test]
+    fn corner_deadzone_is_big_enough_to_notice_but_capped_on_short_edges() {
+        let mut s = EdgeSwitcher::default();
+        // 900 高的边：两头各 48 个点不切换，往里一点就可以。
+        assert_eq!(
+            s.update(Some(&contact(40.0, true)), FREE, 0),
+            Decision::Stay
+        );
+        assert_eq!(
+            s.update(Some(&contact(860.0, true)), FREE, 0),
+            Decision::Stay
+        );
+        assert!(matches!(
+            s.update(Some(&contact(60.0, true)), FREE, 0),
+            Decision::Switch(_)
+        ));
+        assert!(matches!(
+            s.update(Some(&contact(840.0, true)), FREE, 0),
+            Decision::Switch(_)
+        ));
+        // 只有 100 高的边：角落最多占两成（20 个点），不会大半条边都切不过去。
+        let short = |y: f64| EdgeContact {
+            from_rect: Rect::new(0.0, 0.0, 1440.0, 100.0),
+            ..contact(y, true)
+        };
+        assert_eq!(s.update(Some(&short(15.0)), FREE, 0), Decision::Stay);
+        assert!(matches!(
+            s.update(Some(&short(30.0)), FREE, 0),
+            Decision::Switch(_)
+        ));
+        // 关掉「屏幕角落不切换」后角上也能切。
+        let mut off = EdgeSwitcher::new(SwitchPolicy {
+            corner_deadzone: 0.0,
+            ..Default::default()
+        });
+        assert!(matches!(
+            off.update(Some(&contact(1.0, true)), FREE, 0),
+            Decision::Switch(_)
+        ));
     }
 
     #[test]

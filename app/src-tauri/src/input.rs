@@ -38,6 +38,8 @@ pub enum ControlEvent {
     /// 键鼠从远端穿过屏幕边回到了本机的这个位置（布局坐标）。跟在 `Changed` 后面发，
     /// 只用于在这条边上闪一道浮光；快捷键、断线等其他方式回来时不发。
     Returned(Point),
+    /// 引擎标记过"键鼠被别的设备带走了"（[`Controller::set_away`]）之后，本机第一次有键鼠输入。
+    LocalInput,
 }
 
 /// 引擎提供给控制器的配置快照。
@@ -89,6 +91,8 @@ pub struct Controller {
     last_local: Option<Point>,
     return_to: Option<Point>,
     ack_timeout: Duration,
+    /// 引擎认为键鼠被别的设备带走了；本机一有输入就通知它（只通知一次）。
+    away: bool,
 }
 
 /// 光标移到距离边缘不足 1 个逻辑点、且还在朝边缘移动时，视为"推出边缘"。
@@ -138,7 +142,14 @@ impl Controller {
             last_local: None,
             return_to: None,
             ack_timeout: ACK_TIMEOUT,
+            away: false,
         }
+    }
+
+    /// 引擎推断键鼠被别的设备带走了（它刚结束对本机的控制）。之后本机一有键鼠输入，
+    /// 就发一次 [`ControlEvent::LocalInput`]。
+    pub fn set_away(&mut self, away: bool) {
+        self.away = away;
     }
 
     /// 正在控制的远端设备；`None` 表示键鼠在本机。
@@ -222,6 +233,11 @@ impl Controller {
 
     /// 处理一个本机捕获到的事件，返回是否放行给本机系统。
     pub fn handle(&mut self, ev: CapturedEvent) -> Verdict {
+        // 能走到这里的都是本机的真实输入（流界自己注入的在捕获层就跳过了）。
+        if self.away {
+            self.away = false;
+            let _ = self.events.send(ControlEvent::LocalInput);
+        }
         match ev {
             CapturedEvent::MouseMove { x, y, dx, dy } => {
                 let was_remote = self.active.is_some();

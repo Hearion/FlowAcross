@@ -80,6 +80,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             local_hotkey: true,
             dwell: false,
             edge_glow: !layer_shell,
+            local_input: true,
         },
         // 另外，光标一撞上屏障合成器就开始捕获，等不了停留时间；GNOME 没有 layer-shell，画不了浮光。
         Backend::Portal => Limits {
@@ -87,6 +88,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             local_hotkey: true,
             dwell: true,
             edge_glow: !layer_shell,
+            local_input: true,
         },
     }
 }
@@ -439,7 +441,7 @@ mod tests {
     fn wayland_sessions_report_what_they_cannot_do() {
         assert_eq!(limits_for(Backend::X11, false), Limits::default());
         let sway = limits_for(Backend::Wlr, true);
-        assert!(sway.hold_key && sway.local_hotkey);
+        assert!(sway.hold_key && sway.local_hotkey && sway.local_input);
         assert!(!sway.dwell && !sway.edge_glow);
         let kde = limits_for(Backend::Portal, true);
         assert!(kde.hold_key && kde.local_hotkey && kde.dwell && !kde.edge_glow);

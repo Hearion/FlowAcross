@@ -116,6 +116,16 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
 
   const links = useMemo(() => findLinks(layout.displays), [layout]);
   const leads = useMemo(() => leadDisplays(layout.displays), [layout]);
+  // 有不止一块屏幕的设备。
+  const multiDisplay = useMemo(() => {
+    const seen = new Set<string>();
+    const multi = new Set<string>();
+    for (const d of layout.displays) {
+      if (seen.has(d.id.device)) multi.add(d.id.device);
+      seen.add(d.id.device);
+    }
+    return multi;
+  }, [layout]);
   const deviceCount = useMemo(() => new Set(layout.displays.map((d) => d.id.device)).size, [layout]);
   const deviceById = new Map(devices.map((d) => [d.id, d]));
 
@@ -154,7 +164,7 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
           "screen",
           `hue-${hueOf(devices, d.id.device)}`,
           dev?.status ?? "offline",
-          dev?.active ? "active" : "",
+          dev?.has_input ? "active" : "",
           selected === d.id.device ? "selected" : "",
           dragging ? "dragging" : "",
         ].join(" ");
@@ -179,10 +189,12 @@ export function LayoutMap({ layout, devices, selected, onSelect, onDrop, reserve
                     <OsIcon os={dev.os} size={13} className="screen-os" />
                     <span className="screen-device-name">{dev.name}</span>
                   </span>
-                  {dev.active ? (
+                  {dev.has_input ? (
                     <span className="screen-chip here">
                       <CursorIcon size={11} />
-                      键鼠在这里
+                      {/* 这是设备级的标记：只知道键鼠在哪台电脑，不知道光标在它的哪块屏幕上。
+                          有多块屏幕时说"这台电脑"，免得被当成标在了这一块屏幕上。 */}
+                      {multiDisplay.has(d.id.device) ? "键鼠在这台电脑" : "键鼠在这里"}
                     </span>
                   ) : (
                     <span className={`screen-chip ${dev.status}`}>{statusText(dev)}</span>

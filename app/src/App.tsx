@@ -70,7 +70,7 @@ export default function App() {
 
   const s = state.settings;
   const update = (patch: Partial<Settings>) => api.updateSettings({ ...s, ...patch });
-  const active = state.devices.find((d) => d.active);
+  const active = state.devices.find((d) => d.has_input);
   const controller = state.controlled_by ? state.devices.find((d) => d.id === state.controlled_by) : undefined;
   const sel = state.devices.find((d) => d.id === selected) ?? null;
   const selDisplays = sel ? state.layout.displays.filter((d) => d.id.device === sel.id) : [];

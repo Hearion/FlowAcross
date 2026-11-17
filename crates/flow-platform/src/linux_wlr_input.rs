@@ -654,7 +654,8 @@ impl Shared {
             self.warp(&inner, x, y);
         }
         drop(inner);
-        let _ = self.conn.flush();
+        // 让事件线程替还按着的键补上抬起。不能在这里直接报：放开常常就是在上报回调里触发的。
+        self.wake();
     }
 
     /// 用一个临时的虚拟指针把光标放到指定位置（离屏幕边留一点距离）。
@@ -914,6 +915,8 @@ struct Capture {
     on: Option<(wl_surface::WlSurface, f64, f64)>,
     scroll: Scroll,
     repeat: mpsc::Sender<Repeat>,
+    /// 已经上报了按下、还没上报抬起的键。
+    pressed: Vec<KeyCode>,
     /// 当前这批边缘窗口是按哪份设置建的。
     built_for: Option<Vec<(String, Edge)>>,
     rebuild: bool,
@@ -922,6 +925,22 @@ struct Capture {
 impl Capture {
     fn captured(&self) -> bool {
         self.shared.inner().grab.is_some()
+    }
+
+    /// 已经回到本机时，替还按着的键补上抬起。键盘一还给本机，真正的抬起就收不到了；
+    /// 不补的话控制器会一直以为这些键按着（比如切换用的方向键会被一直"吞掉"，下次要按两下才生效）。
+    fn release_held_keys(&mut self) {
+        if self.pressed.is_empty() || self.shared.inner().want {
+            return;
+        }
+        for code in std::mem::take(&mut self.pressed) {
+            let _ = self.repeat.send(Repeat::Up(code));
+            self.shared.report(CapturedEvent::Key {
+                code,
+                down: false,
+                repeat: false,
+            });
+        }
     }
 
     /// 按当前的显示器和可切换的边重建边缘窗口。
@@ -1063,7 +1082,8 @@ impl Dispatch<wl_callback::WlCallback, ()> for Capture {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // 别的线程叫醒：看看可切换的边是不是变了。
+        // 别的线程叫醒：刚放开键盘的话补上按键的抬起，再看看可切换的边是不是变了。
+        state.release_held_keys();
         let wanted = SWITCH_EDGES
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1237,11 +1257,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Capture {
                 } else {
                     Repeat::Up(code)
                 });
+                state.pressed.retain(|c| *c != code);
+                if down {
+                    state.pressed.push(code);
+                }
                 state.shared.report(CapturedEvent::Key {
                     code,
                     down,
                     repeat: false,
                 });
+                // 这个按键可能正好让控制器切回了本机（快捷键）：马上把还按着的键抬起来。
+                state.release_held_keys();
             }
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 let _ = state.repeat.send(Repeat::Info(rate, delay));
@@ -1410,6 +1436,7 @@ impl InputCapture for WlrCapture {
             on: None,
             scroll: Scroll::default(),
             repeat: repeat_tx.clone(),
+            pressed: Vec::new(),
             built_for: None,
             rebuild: false,
         };
@@ -1763,8 +1790,23 @@ mod tests {
         assert!(recv_until(&rx, |e| *e == key(false)).is_some());
 
         // 5. 放开：键盘还给本机，光标放到指定位置（离边留一点），之后一小段时间内碰边不算。
+        // 放开时还按着的键要补一个抬起：键盘一还给本机，真正的抬起就收不到了，
+        // 不补的话控制器会一直以为这个键按着（用快捷键切回来后，下次要按两下才生效就是这么来的）。
+        let held = KeyCode(0x05);
+        inj.key(held, true, false).unwrap();
+        let held_event = |down| CapturedEvent::Key {
+            code: held,
+            down,
+            repeat: false,
+        };
+        assert!(recv_until(&rx, |e| *e == held_event(true)).is_some());
         set_cursor_captured(false, Some((d.rect.x + 500.0, d.rect.y + 400.0)));
         assert!(active().unwrap().inner().grab.is_none());
+        assert!(
+            recv_until(&rx, |e| *e == held_event(false)).is_some(),
+            "放开时还按着的键应该补一个抬起"
+        );
+        inj.key(held, false, false).unwrap();
         std::thread::sleep(Duration::from_millis(RESTORE_QUIET_MS + 150));
         while rx.try_recv().is_ok() {}
         inj.key(KeyCode::A, true, false).unwrap();

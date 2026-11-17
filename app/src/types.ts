@@ -36,7 +36,13 @@ export interface DeviceView {
   status: DeviceStatus;
   /** 自动重连已停止，需要手动连接。 */
   manual: boolean;
+  /** 本机的键鼠当前在这台设备上（对远端设备来说就是"正在控制它"）。 */
   active: boolean;
+  /**
+   * 「键鼠在这里」标在这台设备上。通常和 `active` 一样；例外是别的设备刚结束对本机的控制，
+   * 键鼠跟着它回去了，这时标在它上面，直到本机有键鼠输入。
+   */
+  has_input: boolean;
   paused: boolean;
   /** 对方暂停了共享或暂停了本机，暂时不能切过去。 */
   remote_paused: boolean;

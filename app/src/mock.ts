@@ -19,8 +19,8 @@ export function createMock(): Api {
       ],
     },
     devices: [
-      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, paused: false, remote_paused: false },
-      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, paused: false, remote_paused: false },
+      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false },
+      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false },
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
@@ -81,14 +81,14 @@ export function createMock(): Api {
       settings,
       ...(settings.sharing_paused ? {
         controlled_by: null,
-        devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id })),
+        devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id, has_input: d.id === state.local.id })),
         file_offer: null,
         transfers: state.transfers.map((t) => t.status === "running" ? { ...t, status: "canceled" as const } : t),
       } : {}),
     }),
     setLocked: async (locked) => set({
       locked,
-      ...(locked ? { devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id })) } : {}),
+      ...(locked ? { devices: state.devices.map((d) => ({ ...d, active: d.id === state.local.id, has_input: d.id === state.local.id })) } : {}),
     }),
     setDevicePaused: async (device, paused) =>
       set({ devices: state.devices.map((d) => (d.id === device ? { ...d, paused } : d)) }),
@@ -120,7 +120,7 @@ export function createMock(): Api {
         set({
           pairings: [],
           nearby: state.nearby.filter((d) => d.id !== device),
-          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, paused: false, remote_paused: false }],
+          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false }],
           layout: {
             displays: [
               ...state.layout.displays,

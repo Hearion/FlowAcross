@@ -173,6 +173,9 @@ pub struct Limits {
     pub dwell: bool,
     /// 边缘浮光。
     pub edge_glow: bool,
+    /// 看不到本机平时的键鼠输入（只在光标碰到屏幕边、或正在控制远端时才有事件）。
+    /// 引擎靠"本机有输入了"判断键鼠回到了这台电脑，看不到时就不做这种推断。
+    pub local_input: bool,
 }
 
 /// 当前系统的限制，见 [`Limits`]。

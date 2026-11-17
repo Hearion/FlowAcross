@@ -815,7 +815,21 @@ async fn capture_main(
     // 合成器正在把键鼠交给我们，以及这次的编号。
     let mut active: Option<Option<u32>> = None;
     let mut scroll = Scroll::default();
+    // 已经上报了按下、还没上报抬起的键。
+    let mut pressed: Vec<KeyCode> = Vec::new();
     loop {
+        // 已经回到本机时，替还按着的键补上抬起：键盘一还给本机，真正的抬起就收不到了，
+        // 不补的话控制器会一直以为这些键按着（切换用的方向键会被一直"吞掉"，下次要按两下才生效）。
+        if !pressed.is_empty() && !shared.wanted() {
+            for code in std::mem::take(&mut pressed) {
+                let _ = repeat.send(Repeat::Up(code));
+                shared.report(CapturedEvent::Key {
+                    code,
+                    down: false,
+                    repeat: false,
+                });
+            }
+        }
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 None | Some(CaptureCmd::Stop) => break,
@@ -921,6 +935,10 @@ async fn capture_main(
                             } else {
                                 Repeat::Up(code)
                             });
+                            pressed.retain(|c| *c != code);
+                            if down {
+                                pressed.push(code);
+                            }
                             shared.report(CapturedEvent::Key {
                                 code,
                                 down,
