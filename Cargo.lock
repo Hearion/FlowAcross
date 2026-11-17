@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "flow-core"
-version = "0.2.2-beta.4"
+version = "0.2.2-beta.5"
 dependencies = [
  "postcard",
  "serde",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "flow-net"
-version = "0.2.2-beta.4"
+version = "0.2.2-beta.5"
 dependencies = [
  "bytes",
  "flow-core",
@@ -1164,7 +1164,7 @@ dependencies = [
 
 [[package]]
 name = "flow-platform"
-version = "0.2.2-beta.4"
+version = "0.2.2-beta.5"
 dependencies = [
  "ashpd",
  "core-foundation 0.10.1",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "flowacross"
-version = "0.2.2-beta.4"
+version = "0.2.2-beta.5"
 dependencies = [
  "flow-core",
  "flow-net",

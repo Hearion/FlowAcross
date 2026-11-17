@@ -157,7 +157,8 @@ impl Shared {
         if self.cursor_hidden.swap(false, Ordering::SeqCst) {
             let _ = self.conn.xfixes_show_cursor(self.root);
         }
-        let _ = self.conn.flush();
+        // 等 X 服务处理完再返回：返回时键鼠确实已经还给本机、光标已经在新位置上。
+        let _ = self.conn.get_input_focus().map(|c| c.reply());
     }
 
     fn pointer_position(&self) -> Option<(f64, f64)> {
@@ -369,6 +370,12 @@ fn query_devices(conn: &RustConnection) -> HashMap<u16, Device> {
         .collect()
 }
 
+/// X 服务里大写锁定是否打开（指针查询的修饰键掩码里带着锁定位）。
+fn caps_lock_on(conn: &RustConnection, root: Window) -> Option<bool> {
+    let reply = conn.query_pointer(root).ok()?.reply().ok()?;
+    Some(reply.mask.contains(xproto::KeyButMask::LOCK))
+}
+
 fn fp3232(v: Fp3232) -> f64 {
     f64::from(v.integral) + f64::from(v.frac) / 4_294_967_296.0
 }
@@ -434,9 +441,33 @@ struct Loop {
     /// 最近一次已经上报的按键（X 键码、时间戳、是否按下）。同一次按键可能既有原始事件、
     /// 又有抓取送来的普通事件（抓取恰好在两者之间生效），靠它去重。
     last_key: Option<(u32, u32, bool)>,
+    /// 抓住键盘后已经上报过的大写锁定状态；没抓住时为 `None`。
+    caps_reported: Option<bool>,
+    /// 大写锁定可能变了（刚抓住键盘，或按过 Caps Lock），下一轮查一次。
+    caps_dirty: bool,
 }
 
 impl Loop {
+    /// 抓着键盘（正在控制远端）时，把本机的大写锁定状态报给控制器，状态变了再报一次。
+    fn sync_caps(&mut self) {
+        if !self.shared.grabbed.load(Ordering::SeqCst) {
+            self.caps_reported = None;
+            self.caps_dirty = true;
+            return;
+        }
+        if !self.caps_dirty {
+            return;
+        }
+        self.caps_dirty = false;
+        let Some(on) = caps_lock_on(&self.shared.conn, self.shared.root) else {
+            return;
+        };
+        if self.caps_reported != Some(on) {
+            self.caps_reported = Some(on);
+            (self.handler)(CapturedEvent::CapsLock(on));
+        }
+    }
+
     fn device(&mut self, id: u16) -> Device {
         if !self.devices.contains_key(&id) {
             self.devices = query_devices(&self.shared.conn);
@@ -509,6 +540,9 @@ impl Loop {
         }
         self.last_key = Some(stamp);
         if let Some(code) = key_code(detail) {
+            if code == KeyCode::CAPS_LOCK {
+                self.caps_dirty = true;
+            }
             (self.handler)(CapturedEvent::Key { code, down, repeat });
         }
     }
@@ -545,6 +579,8 @@ fn run(shared: Arc<Shared>, handler: CaptureHandler) {
         devices: query_devices(&shared.conn),
         last_pos: shared.pointer_position(),
         last_key: None,
+        caps_reported: None,
+        caps_dirty: true,
         handler,
         shared: shared.clone(),
     };
@@ -558,6 +594,7 @@ fn run(shared: Arc<Shared>, handler: CaptureHandler) {
         if shared.captured.load(Ordering::SeqCst) && !shared.grabbed.load(Ordering::SeqCst) {
             shared.try_grab();
         }
+        state.sync_caps();
     }
     shared.release(None);
 }
@@ -617,6 +654,15 @@ pub(crate) fn take_notches(rest: &mut i32, delta: i32) -> i32 {
 }
 
 impl InputInjector for X11Injector {
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
+        if caps_lock_on(&self.conn, self.root) == Some(!on) {
+            // 状态不一样：按一下 Caps Lock。
+            self.key(KeyCode::CAPS_LOCK, true, false)?;
+            self.key(KeyCode::CAPS_LOCK, false, false)?;
+        }
+        Ok(())
+    }
+
     fn move_to(&mut self, display_local_id: &str, x: f64, y: f64) -> Result<(), PlatformError> {
         let find = |list: &[linux::Monitor]| {
             list.iter()
@@ -983,6 +1029,21 @@ mod tests {
         );
         // 同一次按键不能上报两遍。
         assert!(recv_until(&rx, |e| matches!(e, CapturedEvent::Key { .. })).is_none());
+
+        // 大写锁定：对齐到指定状态（XTest 按一下 Caps Lock），捕获这边把新状态报出来。
+        let caps = |on| move |e: &CapturedEvent| *e == CapturedEvent::CapsLock(on);
+        inj.set_caps_lock(true).unwrap();
+        assert!(
+            recv_until(&rx, caps(true)).is_some(),
+            "大写锁定打开后应该上报"
+        );
+        assert_eq!(caps_lock_on(&other, root), Some(true));
+        inj.set_caps_lock(false).unwrap();
+        assert!(
+            recv_until(&rx, caps(false)).is_some(),
+            "大写锁定关闭后应该上报"
+        );
+        assert_eq!(caps_lock_on(&other, root), Some(false));
 
         set_cursor_captured(false, Some((d.rect.x + 300.0, d.rect.y + 50.0)));
         assert!(!shared.grabbed.load(Ordering::SeqCst));

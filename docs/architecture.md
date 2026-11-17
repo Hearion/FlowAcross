@@ -83,6 +83,10 @@
 - Mac 被控制时注入的事件只带对方按下的修饰键（不混入本机键盘的状态），保留系统按键位加上的小键盘 / Fn 标志；Caps Lock 由注入器自己记状态并带上大写锁定标志（注入的 Caps Lock 按键不会改变系统的大写锁定）。Windows 上 Pause 和 Num Lock 按虚拟键码注入（它们在钩子里报告的扫描码和硬件扫描码语义相反）。
 - 长按：注入的按键不会被目标系统自动连发，因此转发源设备系统产生的连发事件（`repeat = true`）。
 - **按键状态跟踪**（`flow-core::keys::PressedState`）：源和目标两侧都记录"已按下但未抬起"的键和鼠标按钮。切换离开、断网、心跳超时、休眠时，目标侧自动释放全部按键，源侧恢复本机输入——避免"卡键"。
+- **大写锁定同步**：两边的大写锁定各记各的，切过去时状态不同的话，之后每按一次 Caps Lock 两边一起翻转，就一直相反。所以控制方在开始控制时、以及控制期间状态变化时，把本机大写锁定的状态告诉对方（平台层报 `CapturedEvent::CapsLock`），被控制方对齐过去（`InputInjector::set_caps_lock`）。不改协议：借用按键消息，键码用 HID 里没有的两个保留值（`KeyCode::CAPS_STATE_ON` / `CAPS_STATE_OFF`），只发"抬起"；不认识它的旧版本在键码表里查不到，直接忽略。目前的覆盖范围：
+  - 会上报状态的控制方：Linux 的 X11（查指针掩码里的锁定位）和 Hyprland / Sway（拿到键盘焦点时合成器报的修饰键状态）。macOS、Windows、GNOME / KDE 做控制方时还不上报。
+  - 会对齐的被控制方：macOS（改注入器自己记的状态）、Linux 的 X11 和 Hyprland / Sway（状态不同就按一下 Caps Lock）。Windows、GNOME / KDE 做被控制方时还不对齐。
+- **滚轮**：消息里的单位是 1/120 格。macOS 注入时一格按 3 行发（`LINES_PER_NOTCH`）：系统自己的鼠标驱动有滚动加速，注入的事件没有，一格只滚 1 行的话翻网页要滚半天；非整格的按像素发，一格约 30 像素。
 - 已知系统限制：Windows 的 Ctrl+Alt+Del、UAC 安全桌面无法注入；向管理员权限窗口注入需要流界本身以管理员运行。在界面中给出说明。
 
 ## 6. 网络、发现与配对
@@ -222,7 +226,7 @@ Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不
 - **剪贴板**（`linux_clipboard.rs`）：X11 的剪贴板不存数据，谁复制谁就是选区的所有者，别人粘贴时再向它要。所以有一个进程内唯一的后台服务（自己的连接、不可见窗口和事件线程）负责应答，`X11Clipboard` 只是句柄。读：`ConvertSelection`，文本和文件清单最多等 0.5 秒（引擎是持锁读的），图片 5 秒；写：保存各格式的数据并成为所有者。两个方向超过 1 MB 都按 ICCCM 的 `INCR` 分块。变化计数来自 XFixes 的所有者变化通知，自己写入时直接加一。格式：文本 `UTF8_STRING` / `text/plain;charset=utf-8`，文件 `text/uri-list` 加 `x-special/gnome-copied-files`，图片只认 `image/png`。流界退出后它写入的内容会消失（除非桌面有剪贴板管理器）。
 - **边缘浮光**（`linux_glow.rs`）：32 位色深的 override-redirect 窗口，输入区域设为空（鼠标穿透），在单独的线程里逐帧 `PutImage`，像素由 `glow::render` 算。依赖窗口合成器，没有时不显示。暂不跟随系统的「减少动态效果」。
 - **测试**：纯计算的部分是普通单元测试；需要 X 服务的测试标了 `#[ignore]`，CI 的 Ubuntu 任务用 Xvfb 跑（`xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1`，xclip 充当"别的程序"）。Xvfb 里没有真实键鼠，测试用 XTest 模拟并让捕获接受 XTEST 设备。
-- **外壳**（三套实现相同）：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；安装包只随测试版提供，应用内自动更新还没接入。
+- **外壳**（三套实现相同）：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；托盘菜单常常不显示勾选状态，所以「暂停共享」「锁定在本机」两项在 Linux 上用文字表示当前状态（暂停后变成「恢复共享」）；安装包只随测试版提供，应用内自动更新还没接入。
 
 ### Wayland：显示器（`linux_wl.rs`）
 

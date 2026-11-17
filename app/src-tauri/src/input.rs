@@ -93,6 +93,8 @@ pub struct Controller {
     ack_timeout: Duration,
     /// 引擎认为键鼠被别的设备带走了；本机一有输入就通知它（只通知一次）。
     away: bool,
+    /// 平台层最近一次上报的本机大写锁定状态（见 `CapturedEvent::CapsLock`）。
+    caps: Option<bool>,
 }
 
 /// 光标移到距离边缘不足 1 个逻辑点、且还在朝边缘移动时，视为"推出边缘"。
@@ -112,6 +114,16 @@ fn nudge(rect: flow_core::Rect, p: Point, dx: f64, dy: f64) -> (f64, f64) {
         d.1 = dy.min(rect.top() - p.y - 0.01);
     }
     d
+}
+
+/// 告诉对方本机大写锁定的状态。借用按键消息和保留键码（见 `KeyCode::CAPS_STATE_ON`），
+/// 只发"抬起"，不认识它的旧版本会直接忽略。
+fn caps_message(on: bool) -> Message {
+    Message::Key {
+        code: KeyCode::caps_state(on),
+        down: false,
+        repeat: false,
+    }
 }
 
 fn input_message(ev: InputEvent) -> Message {
@@ -143,6 +155,7 @@ impl Controller {
             return_to: None,
             ack_timeout: ACK_TIMEOUT,
             away: false,
+            caps: None,
         }
     }
 
@@ -274,6 +287,14 @@ impl Controller {
                 }
             }
             CapturedEvent::Key { code, down, repeat } => self.key(code, down, repeat),
+            CapturedEvent::CapsLock(on) => {
+                // 本机的大写锁定状态：记下来，正在控制远端的话马上告诉对方。
+                self.caps = Some(on);
+                if let Some(a) = &self.active {
+                    let _ = a.tx.send(caps_message(on));
+                }
+                Verdict::Pass
+            }
         }
     }
 
@@ -425,6 +446,10 @@ impl Controller {
             x: lp.x,
             y: lp.y,
         });
+        // 已经知道本机大写锁定的状态就先告诉对方；平台层稍后报来新的状态时还会再发。
+        if let Some(on) = self.caps {
+            let _ = tx.send(caps_message(on));
+        }
         info!(device = %target.device.short(), "键鼠切到远端");
         self.router.enter_remote();
         self.switcher.reset();
@@ -741,6 +766,27 @@ mod tests {
         r.ctl.handle(key(KeyCode::LEFT_CTRL, true));
         assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0)), Verdict::Suppress);
         assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+    }
+
+    #[test]
+    fn caps_lock_state_is_forwarded_while_controlling() {
+        let mut r = rig(SwitchPolicy::default());
+        let caps = |on| Message::Key {
+            code: KeyCode::caps_state(on),
+            down: false,
+            repeat: false,
+        };
+        // 在本机时只记下，不发给任何人。
+        assert_eq!(r.ctl.handle(CapturedEvent::CapsLock(true)), Verdict::Pass);
+        assert!(drain(&mut r.pc_rx).is_empty());
+        // 切过去：紧跟着进入消息把已知的状态告诉对方。
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        let sent = drain(&mut r.pc_rx);
+        assert!(matches!(sent[0], Message::Enter { .. }));
+        assert_eq!(sent[1], caps(true));
+        // 控制期间状态变了：马上转告。
+        r.ctl.handle(CapturedEvent::CapsLock(false));
+        assert_eq!(drain(&mut r.pc_rx), vec![caps(false)]);
     }
 
     #[test]

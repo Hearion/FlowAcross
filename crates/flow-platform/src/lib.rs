@@ -305,6 +305,9 @@ pub enum CapturedEvent {
         down: bool,
         repeat: bool,
     },
+    /// 本机的大写锁定现在是开还是关。开始控制远端时、以及控制期间状态变化时上报，
+    /// 控制器转告对方，让两边一致。目前只有 Linux（X11、Hyprland / Sway）会报。
+    CapsLock(bool),
 }
 
 /// 捕获回调对每个事件的处理结果。
@@ -331,6 +334,12 @@ pub trait InputInjector: Send {
     fn button(&mut self, button: MouseButton, down: bool) -> Result<(), PlatformError>;
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), PlatformError>;
     fn key(&mut self, code: KeyCode, down: bool, repeat: bool) -> Result<(), PlatformError>;
+    /// 把大写锁定对齐到控制方的状态（见 [`CapturedEvent::CapsLock`]）。已经一致时什么都不做。
+    /// 默认无操作：Windows 和 Linux 的 GNOME / KDE（portal）还没有实现。
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
+        let _ = on;
+        Ok(())
+    }
 }
 
 pub trait DisplayProvider: Send + Sync {

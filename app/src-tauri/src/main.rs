@@ -20,6 +20,23 @@ use crate::engine::{Engine, EngineEvent, EngineOptions, MainThread, Notify};
 
 const LOG_KEEP_DAYS: usize = 14;
 
+/// Linux 托盘菜单里「暂停共享」「锁定在本机」两项的文字：点下去会发生什么。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn tray_labels(paused: bool, locked: bool) -> (&'static str, &'static str) {
+    (
+        if paused {
+            "恢复共享"
+        } else {
+            "暂停共享"
+        },
+        if locked {
+            "取消锁定"
+        } else {
+            "锁定在本机"
+        },
+    )
+}
+
 /// 日志同时写到终端和 `<数据目录>/logs/flowacross.log.<日期>`，调试两台电脑联调时把日志文件发过来即可。
 /// 只保留最近 [`LOG_KEEP_DAYS`] 天，避免长期运行（或被人反复连接刷日志）把磁盘写满。
 /// 用环境变量 RUST_LOG 调整级别，例如 `RUST_LOG=debug`。
@@ -109,6 +126,14 @@ fn main() {
                 EngineEvent::State(view) => {
                     let _ = pause_item.set_checked(view.settings.sharing_paused);
                     let _ = lock_item.set_checked(view.locked);
+                    // Linux 的托盘菜单常常不显示勾选状态（用户反馈：点了「暂停共享」再打开还是「暂停共享」），
+                    // 改用文字表示当前状态。macOS 和 Windows 的勾选是正常的，保持原样。
+                    #[cfg(target_os = "linux")]
+                    {
+                        let (pause, lock) = tray_labels(view.settings.sharing_paused, view.locked);
+                        let _ = pause_item.set_text(pause);
+                        let _ = lock_item.set_text(lock);
+                    }
                     let _ = handle.emit("state", view);
                 }
                 EngineEvent::Notice(msg) => {

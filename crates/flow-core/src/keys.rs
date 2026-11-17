@@ -47,6 +47,33 @@ impl KeyCode {
         }
     }
 
+    /// 不是真实的按键：控制方用它告诉被控制方"我这边大写锁定现在是关 / 开"，被控制方据此对齐自己的状态。
+    ///
+    /// 两边的大写锁定各记各的，切过去时如果状态不同，之后每按一次 Caps Lock 两边一起翻转，
+    /// 就一直相反（用户反馈）。借用按键消息、用 HID 里没有的键码来带这个状态，是为了不改协议：
+    /// 不认识它的旧版本在键码表里查不到，会直接忽略，不影响连接。只以"抬起"的形式发送，
+    /// 不会被记成按住的键。
+    pub const CAPS_STATE_OFF: KeyCode = KeyCode(0xFFF0);
+    pub const CAPS_STATE_ON: KeyCode = KeyCode(0xFFF1);
+
+    /// 表示大写锁定状态的保留键码。
+    pub fn caps_state(on: bool) -> KeyCode {
+        if on {
+            Self::CAPS_STATE_ON
+        } else {
+            Self::CAPS_STATE_OFF
+        }
+    }
+
+    /// 如果这是表示大写锁定状态的保留键码，返回它表示的状态。
+    pub fn as_caps_state(self) -> Option<bool> {
+        match self {
+            Self::CAPS_STATE_ON => Some(true),
+            Self::CAPS_STATE_OFF => Some(false),
+            _ => None,
+        }
+    }
+
     /// Mac ⌘ ↔ Windows Ctrl 互换（左右分别互换）。用于 Mac 控制 Windows 时让 ⌘C 变成 Ctrl+C。
     pub fn swap_meta_ctrl(self) -> KeyCode {
         match self {
@@ -488,6 +515,14 @@ mod tests {
             postcard::from_bytes::<WinToMacKeys>(&bytes).unwrap(),
             custom
         );
+    }
+
+    #[test]
+    fn caps_state_codes_round_trip_and_are_not_real_keys() {
+        assert_eq!(KeyCode::caps_state(true).as_caps_state(), Some(true));
+        assert_eq!(KeyCode::caps_state(false).as_caps_state(), Some(false));
+        assert_eq!(KeyCode::CAPS_LOCK.as_caps_state(), None);
+        assert_eq!(KeyCode::A.as_caps_state(), None);
     }
 
     #[test]

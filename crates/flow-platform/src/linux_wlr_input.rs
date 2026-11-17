@@ -75,6 +75,8 @@ const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 const BTN_SIDE: u32 = 0x113;
 const BTN_EXTRA: u32 = 0x114;
+/// 修饰键掩码里的大写锁定位。xkb 的八个"真实修饰键"顺序固定，Lock 是第 2 个。
+const LOCK_MASK: u32 = 1 << 1;
 /// xkb 的键码 = evdev 键码 + 8。
 const XKB_OFFSET: u32 = 8;
 /// 滚轮一格：协议里连续滚动量的 15 个单位，流界约定的 120 个单位。
@@ -149,6 +151,12 @@ impl Keys {
             text: keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1),
             state: xkb::State::new(&keymap),
         })
+    }
+
+    /// 这块虚拟键盘的大写锁定是否打开。
+    fn caps_locked(&self) -> bool {
+        self.state
+            .mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_LOCKED)
     }
 
     /// 记下一次按键，返回要上报的修饰键状态：(按住的, 粘滞的, 锁定的, 布局组)。
@@ -388,6 +396,15 @@ fn bounding_box(list: &[Monitor]) -> (f64, f64, f64, f64) {
 }
 
 impl InputInjector for WlrInjector {
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
+        if self.keys.caps_locked() != on {
+            // 状态不一样：按一下 Caps Lock。虚拟键盘的锁定状态由我们自己算、自己上报。
+            self.key(KeyCode::CAPS_LOCK, true, false)?;
+            self.key(KeyCode::CAPS_LOCK, false, false)?;
+        }
+        Ok(())
+    }
+
     fn move_to(&mut self, display_local_id: &str, x: f64, y: f64) -> Result<(), PlatformError> {
         let find = |list: &[Monitor]| {
             list.iter()
@@ -917,6 +934,8 @@ struct Capture {
     repeat: mpsc::Sender<Repeat>,
     /// 已经上报了按下、还没上报抬起的键。
     pressed: Vec<KeyCode>,
+    /// 这次控制远端期间已经上报过的大写锁定状态。
+    caps_reported: Option<bool>,
     /// 当前这批边缘窗口是按哪份设置建的。
     built_for: Option<Vec<(String, Edge)>>,
     rebuild: bool,
@@ -933,6 +952,8 @@ impl Capture {
         if self.pressed.is_empty() || self.shared.inner().want {
             return;
         }
+        // 下次再控制远端时重新报一次大写锁定。
+        self.caps_reported = None;
         for code in std::mem::take(&mut self.pressed) {
             let _ = self.repeat.send(Repeat::Up(code));
             self.shared.report(CapturedEvent::Key {
@@ -1269,6 +1290,19 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Capture {
                 // 这个按键可能正好让控制器切回了本机（快捷键）：马上把还按着的键抬起来。
                 state.release_held_keys();
             }
+            wl_keyboard::Event::Modifiers { mods_locked, .. } => {
+                // 拿到键盘焦点（开始控制远端）时合成器会报一次修饰键状态，之后有变化再报。
+                // 把大写锁定的状态转告控制器，让对方和这边一致。
+                if !state.shared.inner().want {
+                    state.caps_reported = None;
+                    return;
+                }
+                let on = mods_locked & LOCK_MASK != 0;
+                if state.caps_reported != Some(on) {
+                    state.caps_reported = Some(on);
+                    state.shared.report(CapturedEvent::CapsLock(on));
+                }
+            }
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
                 let _ = state.repeat.send(Repeat::Info(rate, delay));
             }
@@ -1437,6 +1471,7 @@ impl InputCapture for WlrCapture {
             scroll: Scroll::default(),
             repeat: repeat_tx.clone(),
             pressed: Vec::new(),
+            caps_reported: None,
             built_for: None,
             rebuild: false,
         };
@@ -1777,6 +1812,26 @@ mod tests {
         } else {
             assert_eq!(first, down2);
         }
+
+        // 大写锁定：对齐到指定状态（虚拟键盘按一下 Caps Lock），捕获这边把新状态报出来。
+        let caps = |on| move |e: &CapturedEvent| *e == CapturedEvent::CapsLock(on);
+        inj.set_caps_lock(true).unwrap();
+        assert!(
+            recv_until(&rx, caps(true)).is_some(),
+            "大写锁定打开后应该上报"
+        );
+        // 已经是这个状态：不再按键，也不重复上报。
+        inj.set_caps_lock(true).unwrap();
+        assert!(
+            recv_until(&rx, |e| matches!(e, CapturedEvent::CapsLock(_))).is_none(),
+            "状态没变不应该重复上报"
+        );
+        inj.set_caps_lock(false).unwrap();
+        assert!(
+            recv_until(&rx, caps(false)).is_some(),
+            "大写锁定关闭后应该上报"
+        );
+        while rx.try_recv().is_ok() {}
 
         // 4. 长按连发由流界按合成器给的参数产生。
         inj.key(KeyCode::A, true, false).unwrap();

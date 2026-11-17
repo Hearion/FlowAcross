@@ -627,6 +627,8 @@ enum Remote {
     Button(flow_core::keys::MouseButton, bool),
     Wheel(i32, i32),
     Key(KeyCode, bool, bool),
+    /// 把大写锁定对齐到对方的状态。
+    Caps(bool),
     Release,
     ReleaseKeys,
 }
@@ -3134,6 +3136,10 @@ impl Engine {
                     Some(Remote::Button(button, down))
                 }
                 Message::Wheel { dx, dy } => Some(Remote::Wheel(dx, dy)),
+                // 不是真实的按键：对方在告知它那边大写锁定的状态。
+                Message::Key { code, .. } if code.as_caps_state().is_some() => {
+                    code.as_caps_state().map(Remote::Caps)
+                }
                 Message::Key { code, down, repeat } => {
                     let win_keys = *self.inner.win_keys.lock().expect("win_keys");
                     let now = map_key(c.by_os, Os::current(), win_keys, code);
@@ -3156,6 +3162,7 @@ impl Engine {
             Some(Remote::Button(b, down)) => self.inject(|i| i.button(b, down)),
             Some(Remote::Wheel(dx, dy)) => self.inject(|i| i.wheel(dx, dy)),
             Some(Remote::Key(code, down, repeat)) => self.inject(|i| i.key(code, down, repeat)),
+            Some(Remote::Caps(on)) => self.inject(|i| i.set_caps_lock(on)),
             Some(Remote::Release) => {
                 drop(st);
                 // 对方主动离开：键鼠跟着它回去了。界面上标到它那边，直到本机有输入为止。

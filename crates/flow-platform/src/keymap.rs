@@ -322,6 +322,16 @@ mod tests {
     }
 
     #[test]
+    fn caps_state_codes_are_not_real_keys_on_any_system() {
+        // 这两个保留键码只用来带"大写锁定开 / 关"的状态。旧版本收到后在表里查不到，直接忽略。
+        for code in [KeyCode::CAPS_STATE_OFF, KeyCode::CAPS_STATE_ON] {
+            assert_eq!(to_mac(code), None);
+            assert_eq!(to_win(code), None);
+            assert_eq!(to_linux(code), None);
+        }
+    }
+
+    #[test]
     fn common_keys() {
         assert_eq!(from_mac(0x08), Some(KeyCode::C));
         assert_eq!(from_mac(0x37), Some(KeyCode::LEFT_META));

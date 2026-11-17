@@ -618,7 +618,34 @@ fn button_number(b: MouseButton) -> u32 {
     }
 }
 
+/// 滚轮一格滚几行。macOS 自己的鼠标驱动会按滚动快慢加速，注入的事件没有这层加速：
+/// 一格只滚 1 行的话，翻网页要滚半天（用户反馈）。3 行是 Windows 和多数 Linux 桌面的默认值。
+const LINES_PER_NOTCH: i32 = 3;
+/// 高精度滚动（触控板、高分辨率滚轮）里多少个单位（1/120 格）算 1 个像素。
+/// 一行大约 10 个像素，和上面保持一致：一格 = 3 行 ≈ 30 像素 = 120 个单位。
+const UNITS_PER_PIXEL: i32 = 4;
+
+/// 流界的滚动量（1/120 格，向上、向右为正）换成 macOS 滚动事件的参数：(单位：1 行 / 0 像素, 纵向, 横向)。
+/// 整格滚动按"行"发，其余按像素发；不足 1 像素的留在 `rem` 里攒到下一次，否则慢速滚动每次都被整除成 0。
+/// macOS 的横向正方向和流界相反。
+fn scroll_amounts(dx: i32, dy: i32, rem: &mut (i32, i32)) -> (u32, i32, i32) {
+    if dx % 120 == 0 && dy % 120 == 0 {
+        *rem = (0, 0);
+        (1, dy / 120 * LINES_PER_NOTCH, -dx / 120 * LINES_PER_NOTCH)
+    } else {
+        let (ax, ay) = (rem.0 + dx, rem.1 + dy);
+        *rem = (ax % UNITS_PER_PIXEL, ay % UNITS_PER_PIXEL);
+        (0, ay / UNITS_PER_PIXEL, -ax / UNITS_PER_PIXEL)
+    }
+}
+
 impl InputInjector for MacInjector {
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), PlatformError> {
+        // 注入的按键带不带大写锁定标志只看这个状态（注入的 Caps Lock 本来就不改系统的大写锁定）。
+        self.caps = on;
+        Ok(())
+    }
+
     fn move_to(&mut self, display_local_id: &str, x: f64, y: f64) -> Result<(), PlatformError> {
         let id = display_local_id
             .parse::<u32>()
@@ -689,16 +716,7 @@ impl InputInjector for MacInjector {
     }
 
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), PlatformError> {
-        // 整格滚动按"行"发送；高精度滚动（触控板）按像素发送，约 10 像素一行。
-        let (units, wy, wx) = if dx % 120 == 0 && dy % 120 == 0 {
-            self.scroll_rem = (0, 0);
-            (1, dy / 120, -dx / 120)
-        } else {
-            // 不足 1 像素（12 个单位）的部分留到下一次，否则慢速滚动每次都被整除成 0。
-            let (ax, ay) = (self.scroll_rem.0 + dx, self.scroll_rem.1 + dy);
-            self.scroll_rem = (ax % 12, ay % 12);
-            (0, ay / 12, -ax / 12)
-        };
+        let (units, wy, wx) = scroll_amounts(dx, dy, &mut self.scroll_rem);
         if wx == 0 && wy == 0 {
             return Ok(());
         }
@@ -882,6 +900,32 @@ impl crate::ClipboardAccess for MacClipboard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn one_wheel_notch_scrolls_three_lines() {
+        let mut rem = (0, 0);
+        // 向下一格：按行发，3 行。
+        assert_eq!(scroll_amounts(0, -120, &mut rem), (1, -3, 0));
+        assert_eq!(scroll_amounts(0, 240, &mut rem), (1, 6, 0));
+        // 横向：macOS 的方向和流界相反。
+        assert_eq!(scroll_amounts(120, 0, &mut rem), (1, 0, -3));
+        assert_eq!(rem, (0, 0));
+    }
+
+    #[test]
+    fn partial_notches_scroll_by_pixels_and_keep_the_remainder() {
+        let mut rem = (0, 0);
+        // 半格 ≈ 15 个像素。
+        assert_eq!(scroll_amounts(0, -60, &mut rem), (0, -15, 0));
+        // 不足 1 像素的攒起来：3 + 3 个单位凑成 1 个像素，余 2。
+        assert_eq!(scroll_amounts(0, 3, &mut rem), (0, 0, 0));
+        assert_eq!(rem, (0, 3));
+        assert_eq!(scroll_amounts(0, 3, &mut rem), (0, 1, 0));
+        assert_eq!(rem, (0, 2));
+        // 之后来了整格：余量清掉。
+        assert_eq!(scroll_amounts(0, 120, &mut rem), (1, 3, 0));
+        assert_eq!(rem, (0, 0));
+    }
+
     use super::*;
     use crate::ClipboardAccess;
 
