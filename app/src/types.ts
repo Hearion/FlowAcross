@@ -101,6 +101,18 @@ export interface WinToMacKeys {
   alt: MacModifier;
 }
 
+/** 当前系统（桌面会话）做不到的切换方式和效果。`true` 表示在这台电脑上用不了，对应的设置不显示。 */
+export interface UnsupportedView {
+  /** 「按住按键才跨屏」。 */
+  hold_key: boolean;
+  /** 在这台电脑上按快捷键切到别的电脑（切过去之后用它切回来不受影响）。 */
+  local_hotkey: boolean;
+  /** 「贴边停留」。 */
+  dwell: boolean;
+  /** 边缘浮光。 */
+  edge_glow: boolean;
+}
+
 export interface LowLatencyView {
   /** 本机系统是否支持（只有 macOS）。 */
   supported: boolean;
@@ -173,6 +185,7 @@ export interface StateView {
   /** 本机正在被哪台设备控制。 */
   controlled_by: string | null;
   low_latency: LowLatencyView;
+  unsupported: UnsupportedView;
   about: {
     version: string;
     protocol: number;

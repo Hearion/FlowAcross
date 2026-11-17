@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { api } from "./api";
-import type { HoldKey, MacModifier, Settings, WinKeysPreset, WinToMacKeys } from "./types";
+import type { HoldKey, MacModifier, Settings, UnsupportedView, WinKeysPreset, WinToMacKeys } from "./types";
 import { Segmented, Toggle, isMac } from "./ui";
 
 const HOLD_OPTIONS: { value: HoldKey; label: string }[] = [
@@ -34,32 +34,40 @@ interface Props {
   update: (patch: Partial<Settings>) => void;
 }
 
-export function CrossScreenSettings({ settings: s, update }: Props) {
+/**
+ * `unsupported`：这台电脑的桌面做不到的切换方式和效果（目前只有 Linux 的 Wayland 会话会遇到），
+ * 对应的设置直接不显示，引擎也会忽略它们。
+ */
+export function CrossScreenSettings({ settings: s, update, unsupported: no }: Props & { unsupported: UnsupportedView }) {
   return (
     <>
-      <div className="setting">
-        <div className="setting-text">
-          <span>按住按键才跨屏</span>
-          <small>防止鼠标甩到边上时意外切换</small>
+      {!no.hold_key && (
+        <div className="setting">
+          <div className="setting-text">
+            <span>按住按键才跨屏</span>
+            <small>防止鼠标甩到边上时意外切换</small>
+          </div>
+          <Segmented label="按住按键才跨屏" value={s.hold_key} options={HOLD_OPTIONS} onChange={(v) => update({ hold_key: v })} />
         </div>
-        <Segmented label="按住按键才跨屏" value={s.hold_key} options={HOLD_OPTIONS} onChange={(v) => update({ hold_key: v })} />
-      </div>
-      <div className="setting">
-        <div className="setting-text">
-          <span>贴边停留</span>
-          <small>到达边缘后停一下再切换</small>
+      )}
+      {!no.dwell && (
+        <div className="setting">
+          <div className="setting-text">
+            <span>贴边停留</span>
+            <small>到达边缘后停一下再切换</small>
+          </div>
+          <Segmented
+            label="贴边停留"
+            value={String(s.dwell_ms) as "0" | "300" | "600"}
+            options={[
+              { value: "0", label: "立即" },
+              { value: "300", label: "0.3 秒" },
+              { value: "600", label: "0.6 秒" },
+            ]}
+            onChange={(v) => update({ dwell_ms: Number(v) })}
+          />
         </div>
-        <Segmented
-          label="贴边停留"
-          value={String(s.dwell_ms) as "0" | "300" | "600"}
-          options={[
-            { value: "0", label: "立即" },
-            { value: "300", label: "0.3 秒" },
-            { value: "600", label: "0.6 秒" },
-          ]}
-          onChange={(v) => update({ dwell_ms: Number(v) })}
-        />
-      </div>
+      )}
       <div className="setting">
         <div className="setting-text">
           <span>尺寸不同的屏幕</span>
@@ -82,25 +90,29 @@ export function CrossScreenSettings({ settings: s, update }: Props) {
         </div>
         <Toggle label="屏幕角落不切换" checked={s.corner_guard} onChange={(v) => update({ corner_guard: v })} />
       </div>
-      <div className="setting inline">
-        <div className="setting-text">
-          <span>跨屏时显示边缘浮光</span>
-          <small>键鼠来到这台电脑时，进来的那条屏幕边亮一下</small>
+      {!no.edge_glow && (
+        <div className="setting inline">
+          <div className="setting-text">
+            <span>跨屏时显示边缘浮光</span>
+            <small>键鼠来到这台电脑时，进来的那条屏幕边亮一下</small>
+          </div>
+          <Toggle label="跨屏时显示边缘浮光" checked={s.edge_glow} onChange={(v) => update({ edge_glow: v })} />
         </div>
-        <Toggle label="跨屏时显示边缘浮光" checked={s.edge_glow} onChange={(v) => update({ edge_glow: v })} />
-      </div>
-      <div className="setting inline">
-        <div className="setting-text">
-          <span>快捷键切换</span>
-          <small>按住后用方向键切到左右相邻的电脑</small>
+      )}
+      {!no.local_hotkey && (
+        <div className="setting inline">
+          <div className="setting-text">
+            <span>快捷键切换</span>
+            <small>按住后用方向键切到左右相邻的电脑</small>
+          </div>
+          <span className="keys">
+            <kbd>{isMac ? "⌃" : "Ctrl"}</kbd>
+            <kbd>{isMac ? "⌥" : "Alt"}</kbd>
+            <kbd>←</kbd>
+            <kbd>→</kbd>
+          </span>
         </div>
-        <span className="keys">
-          <kbd>{isMac ? "⌃" : "Ctrl"}</kbd>
-          <kbd>{isMac ? "⌥" : "Alt"}</kbd>
-          <kbd>←</kbd>
-          <kbd>→</kbd>
-        </span>
-      </div>
+      )}
     </>
   );
 }

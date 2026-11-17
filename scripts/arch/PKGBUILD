@@ -1,0 +1,26 @@
+# 流界 FlowAcross 的 Arch 安装包：把发版流程打出的 .deb 里的文件原样装进去，不重新编译。
+# 不要直接用 makepkg 跑这个文件：由 scripts/build-arch-pkg.sh 填好版本号、放好 .deb 后在 Arch 容器里构建。
+pkgname=flowacross-bin
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="流界 FlowAcross：一套键鼠，自由跨屏（局域网键鼠共享）"
+arch=('x86_64')
+url="https://github.com/Hearion/FlowAcross-releases"
+license=('LicenseRef-proprietary')
+# 和 .deb 的依赖对应：WebView、GTK、托盘图标；xkbcommon 是 Wayland 上注入键盘用的。
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'libxkbcommon')
+provides=('flowacross')
+conflicts=('flowacross')
+# 二进制在发版时已经去掉符号，不用再处理，也不要拆出调试包。
+options=('!strip' '!debug')
+source=('flowacross.deb')
+noextract=('flowacross.deb')
+sha256sums=('SKIP')
+
+package() {
+  # .deb 是 ar 归档，里面的 data.tar.* 才是要安装的文件（usr/bin、usr/share）。
+  bsdtar -xf "$srcdir/flowacross.deb" -C "$srcdir"
+  bsdtar -xf "$srcdir"/data.tar.* -C "$pkgdir"
+  # 目录权限按 Arch 的惯例。
+  find "$pkgdir" -type d -exec chmod 755 {} +
+}

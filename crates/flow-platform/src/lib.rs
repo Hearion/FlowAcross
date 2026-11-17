@@ -159,6 +159,30 @@ pub fn keep_responsive() {
     windows::keep_responsive();
 }
 
+/// 当前系统（桌面会话）里做不到的切换方式和效果。`true` 表示用不了：引擎据此忽略对应的设置，
+/// 界面不显示它们，免得用户打开后发现切不过去。
+///
+/// 只有 Linux 的 Wayland 会有：那里的普通程序看不到全局键盘，见 `linux_wlr_input.rs`、`linux_portal.rs`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Limits {
+    /// 「按住修饰键才切换」：没切到远端时看不到键盘，不知道修饰键有没有按着。
+    pub hold_key: bool,
+    /// 在本机按 Ctrl+Alt+←/→ 切到别的电脑（切过去之后用它切回来不受影响）。
+    pub local_hotkey: bool,
+    /// 「停留一会儿才切换」：光标一碰到屏幕边系统就开始捕获，等不了。
+    pub dwell: bool,
+    /// 边缘浮光。
+    pub edge_glow: bool,
+}
+
+/// 当前系统的限制，见 [`Limits`]。
+pub fn limits() -> Limits {
+    #[cfg(target_os = "linux")]
+    return linux::limits();
+    #[cfg(not(target_os = "linux"))]
+    return Limits::default();
+}
+
 /// 低延迟模式：跨屏期间关闭 Mac 的 AWDL，消除 Wi‑Fi 周期性停顿造成的卡顿。只有 macOS 支持。
 pub mod low_latency {
     use crate::PlatformError;

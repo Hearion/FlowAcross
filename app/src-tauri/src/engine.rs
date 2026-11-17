@@ -144,6 +144,8 @@ pub struct StateView {
     /// 本机正在被哪台设备控制。
     pub controlled_by: Option<DeviceId>,
     pub low_latency: LowLatencyView,
+    /// 当前系统做不到的切换方式和效果，界面不显示对应的设置。
+    pub unsupported: UnsupportedView,
     pub about: AboutView,
     /// 正在进行和最近结束的文件传输，最新的在前。
     pub transfers: Vec<TransferView>,
@@ -162,6 +164,26 @@ pub struct FileOfferView {
     pub label: String,
     pub files: u64,
     pub bytes: u64,
+}
+
+/// 见 [`flow_platform::Limits`]。`true` 表示在这台电脑上用不了。
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct UnsupportedView {
+    pub hold_key: bool,
+    pub local_hotkey: bool,
+    pub dwell: bool,
+    pub edge_glow: bool,
+}
+
+impl From<flow_platform::Limits> for UnsupportedView {
+    fn from(l: flow_platform::Limits) -> Self {
+        Self {
+            hold_key: l.hold_key,
+            local_hotkey: l.local_hotkey,
+            dwell: l.dwell,
+            edge_glow: l.edge_glow,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,15 +408,18 @@ fn map_key(from: Os, local: Os, win_keys: WinToMacKeys, code: KeyCode) -> KeyCod
     }
 }
 
-fn switch_policy(settings: &Settings, locked: bool) -> SwitchPolicy {
+/// `limits`：当前系统做不到的切换方式。做不到的设置一律忽略，否则打开后永远切不过去
+/// （比如看不到键盘，就永远等不到"修饰键按着"）。
+fn switch_policy(settings: &Settings, locked: bool, limits: flow_platform::Limits) -> SwitchPolicy {
     SwitchPolicy {
         require_modifiers: match settings.hold_key {
+            _ if limits.hold_key => Modifiers::NONE,
             HoldKey::None => Modifiers::NONE,
             HoldKey::Ctrl => Modifiers::CTRL,
             HoldKey::Alt => Modifiers::ALT,
             HoldKey::Shift => Modifiers::SHIFT,
         },
-        dwell_ms: settings.dwell_ms,
+        dwell_ms: if limits.dwell { 0 } else { settings.dwell_ms },
         corner_deadzone: if settings.corner_guard { 10.0 } else { 0.0 },
         locked,
     }
@@ -964,7 +989,7 @@ impl Engine {
             layout,
             local_offset: st.config.local_offset,
             outputs,
-            policy: switch_policy(&st.config.settings, st.locked),
+            policy: switch_policy(&st.config.settings, st.locked, flow_platform::limits()),
             mapping: st.config.settings.mapping,
             enabled: !st.config.settings.sharing_paused,
             acks: st
@@ -1111,6 +1136,7 @@ impl Engine {
                     .expect("low latency")
                     .unwrap_or(false),
             },
+            unsupported: flow_platform::limits().into(),
             about: AboutView {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: PROTOCOL_VERSION,

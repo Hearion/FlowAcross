@@ -20,8 +20,8 @@ use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 
-use crate::PlatformError;
 use crate::linux::{Monitor, os_err};
+use crate::{Limits, PlatformError};
 
 /// 当前桌面会话用哪套实现。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,14 +53,47 @@ fn pick_backend(wayland: bool, globals: Option<&[String]>) -> Backend {
     }
 }
 
-/// 进程启动后会话类型不会变，只判断一次。
-pub(crate) fn backend() -> Backend {
-    static BACKEND: OnceLock<Backend> = OnceLock::new();
-    *BACKEND.get_or_init(|| {
+/// 当前会话的类型，以及合成器有没有 layer-shell（浮光要用）。进程启动后不会变，只判断一次。
+fn session() -> (Backend, bool) {
+    static SESSION: OnceLock<(Backend, bool)> = OnceLock::new();
+    *SESSION.get_or_init(|| {
         let wayland = wayland_session();
         let globals = wayland.then(global_interfaces).and_then(Result::ok);
-        pick_backend(wayland, globals.as_deref())
+        let layer_shell = globals
+            .as_deref()
+            .is_some_and(|g| g.iter().any(|i| i == "zwlr_layer_shell_v1"));
+        (pick_backend(wayland, globals.as_deref()), layer_shell)
     })
+}
+
+pub(crate) fn backend() -> Backend {
+    session().0
+}
+
+/// 这种会话里做不到的切换方式和效果。
+fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
+    match backend {
+        Backend::X11 => Limits::default(),
+        // 看不到全局键盘。
+        Backend::Wlr => Limits {
+            hold_key: true,
+            local_hotkey: true,
+            dwell: false,
+            edge_glow: !layer_shell,
+        },
+        // 另外，光标一撞上屏障合成器就开始捕获，等不了停留时间；GNOME 没有 layer-shell，画不了浮光。
+        Backend::Portal => Limits {
+            hold_key: true,
+            local_hotkey: true,
+            dwell: true,
+            edge_glow: !layer_shell,
+        },
+    }
+}
+
+pub(crate) fn limits() -> Limits {
+    let (backend, layer_shell) = session();
+    limits_for(backend, layer_shell)
 }
 
 pub(crate) fn connect() -> Result<Connection, PlatformError> {
@@ -400,6 +433,18 @@ mod tests {
         assert_eq!(pick_backend(true, Some(&gnome)), Backend::Portal);
         // 连不上合成器也按 portal 处理，由它报出具体的错误。
         assert_eq!(pick_backend(true, None), Backend::Portal);
+    }
+
+    #[test]
+    fn wayland_sessions_report_what_they_cannot_do() {
+        assert_eq!(limits_for(Backend::X11, false), Limits::default());
+        let sway = limits_for(Backend::Wlr, true);
+        assert!(sway.hold_key && sway.local_hotkey);
+        assert!(!sway.dwell && !sway.edge_glow);
+        let kde = limits_for(Backend::Portal, true);
+        assert!(kde.hold_key && kde.local_hotkey && kde.dwell && !kde.edge_glow);
+        // GNOME 没有 layer-shell：浮光也没有。
+        assert!(limits_for(Backend::Portal, false).edge_glow);
     }
 
     fn output(mode: (i32, i32), logical: Option<((i32, i32), (i32, i32))>) -> Output {

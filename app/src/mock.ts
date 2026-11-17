@@ -33,6 +33,7 @@ export function createMock(): Api {
     permission_hint: null,
     controlled_by: null,
     low_latency: { supported: true, installed: false, active: false },
+    unsupported: { hold_key: false, local_hotkey: false, dwell: false, edge_glow: false },
     about: { version: pkg.version, protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
     transfers: [],
     file_offer: null,

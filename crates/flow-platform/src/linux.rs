@@ -55,6 +55,10 @@ pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     })
 }
 
+pub fn limits() -> crate::Limits {
+    linux_wl::limits()
+}
+
 pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     match linux_wl::backend() {
         Backend::X11 => linux_input::set_cursor_captured(captured, restore_at),

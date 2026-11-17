@@ -82,7 +82,7 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
         {section === "crossing" && (
           <Section title="跨屏与键鼠">
             <Panel>
-              <CrossScreenSettings settings={state.settings} update={update} />
+              <CrossScreenSettings settings={state.settings} update={update} unsupported={state.unsupported} />
             </Panel>
             {state.local.os === "MacOs" ? (
               <>

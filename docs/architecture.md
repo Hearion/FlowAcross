@@ -160,7 +160,7 @@
 - **签名**：更新包用 minisign 私钥签名（私钥只在 GitHub Secrets 和开发者本机），公钥写在 `tauri.conf.json`，App 下载后先验签再安装。本地打包不生成更新包，不需要私钥（CI 打包前才打开 `createUpdaterArtifacts`）。
 - **App 端**（`app/src-tauri/src/updater.rs`，`tauri-plugin-updater`）：发布版启动 15 秒后、之后每 6 小时检查一次（设置里可关），只提示不自动安装。用户确认后：下载（引擎照常工作，失败不影响使用）→ `Engine::shutdown()` 释放远端按键、恢复本机输入、断开连接（之后重连、键鼠捕获、剪贴板等后台循环全部停止，可重复调用）→ 安装 → 重新打开。安装失败时提示原因并提供「重新打开流界」。
 - **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。
-- **测试版**：版本号带后缀的标签（如 `v0.2.2-beta.1`）发布成 Pre-release，不成为 latest，已安装的流界收不到更新提示；另外多打一份 Linux 安装包（deb、AppImage，不带更新包）。
+- **测试版**：版本号带后缀的标签（如 `v0.2.2-beta.1`）发布成 Pre-release，不成为 latest，已安装的流界收不到更新提示；另外多打一份 Linux 安装包（deb、AppImage，以及由 deb 重新打包的 Arch 包 pkg.tar.zst，都不带更新包）。
 - 发版步骤和一次性配置见 `docs/release.md`。
 
 ### 开机启动与单实例
@@ -203,6 +203,8 @@ Linux 上有三套实现，启动时按桌面会话选一套（`linux_wl.rs` 的
 | X11 | XInput2 / XTest / RandR / X 选区（纯 Rust 的 x11rb，不链接 libxcb / libX11） | `linux.rs`、`linux_input.rs`、`linux_clipboard.rs`、`linux_glow.rs` |
 | Wayland，合成器有 wlroots 的虚拟输入和 layer-shell 协议（Sway、Hyprland 等） | 虚拟指针 / 虚拟键盘、layer-shell、data-control（纯 Rust 的 wayland-client；xkbcommon 链接系统库） | `linux_wl.rs`、`linux_wlr_input.rs`、`linux_wl_clipboard.rs`、`linux_wl_glow.rs` |
 | Wayland，其他合成器（GNOME、KDE） | xdg-desktop-portal（ashpd）+ libei 协议（纯 Rust 的 reis） | `linux_portal.rs`，剪贴板和浮光尽量复用上一行的 |
+
+做不到的切换方式由 `flow_platform::limits()` 报告（按会话类型和有没有 layer-shell 判断）：引擎生成切换策略时忽略对应的设置（否则打开「按住修饰键才切换」就永远切不过去），并通过状态里的 `unsupported` 告诉界面，设置页和侧栏不显示这些选项。这是按现有实现判断的"做不到"，其中几项换个做法可以实现，见路线图。
 
 Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不到别的窗口的输入，也不知道光标在哪，所以两套 Wayland 实现和其他系统有几处共同的不同（下面各节细说）：只在通往别的电脑的屏幕边上感知"光标推到了边上"（引擎用 `flow_platform::set_switch_edges` 告知是哪些边，由 `flow_core::Layout::switch_edges` 算出）；没切到远端时看不到键盘，「按住修饰键才切换」和本机上的 Ctrl+Alt+←/→ 不起作用。
 

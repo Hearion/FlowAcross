@@ -290,7 +290,7 @@ export default function App() {
                 更多设置
               </button>
             </div>
-            <CrossScreenSettings settings={s} update={update} />
+            <CrossScreenSettings settings={s} update={update} unsupported={state.unsupported} />
           </section>
 
           <section className="panel">
