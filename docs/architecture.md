@@ -162,12 +162,12 @@
 
 ## 10. 打包与自动更新
 
-- **打包**：推送 `v*` 标签后由 GitHub Actions（`release.yml`）用 tauri-action 打包 Windows NSIS 安装包和 macOS 通用版（.dmg + `.app.tar.gz`），发布到公开仓库 `Hearion/FlowAcross-releases`。源码仓库私有，App 无法匿名下载其中的文件，所以安装包单独发布。
+- **打包**：推送 `v*` 标签后由 GitHub Actions（`release.yml`）用 tauri-action 打包 Windows NSIS 安装包、macOS 通用版（.dmg + `.app.tar.gz`）和 Linux 安装包（deb、AppImage，以及由 deb 重新打包的 Arch 包 pkg.tar.zst；Linux 不带更新包，没有接入应用内自动更新），发布到公开仓库 `Hearion/FlowAcross-releases`。源码仓库私有，App 无法匿名下载其中的文件，所以安装包单独发布。
 - **更新清单**：每次发布带一个 `latest.json`（版本号、更新说明、各平台下载地址和签名）。App 读取 `releases/latest/download/latest.json`。
 - **签名**：更新包用 minisign 私钥签名（私钥只在 GitHub Secrets 和开发者本机），公钥写在 `tauri.conf.json`，App 下载后先验签再安装。本地打包不生成更新包，不需要私钥（CI 打包前才打开 `createUpdaterArtifacts`）。
 - **App 端**（`app/src-tauri/src/updater.rs`，`tauri-plugin-updater`）：发布版启动 15 秒后、之后每 6 小时检查一次（设置里可关），只提示不自动安装。用户确认后：下载（引擎照常工作，失败不影响使用）→ `Engine::shutdown()` 释放远端按键、恢复本机输入、断开连接（之后重连、键鼠捕获、剪贴板等后台循环全部停止，可重复调用）→ 安装 → 重新打开。安装失败时提示原因并提供「重新打开流界」。
 - **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。
-- **测试版**：版本号带后缀的标签（如 `v0.2.2-beta.1`）发布成 Pre-release，不成为 latest，已安装的流界收不到更新提示；另外多打一份 Linux 安装包（deb、AppImage，以及由 deb 重新打包的 Arch 包 pkg.tar.zst，都不带更新包）。
+- **测试版**：版本号带后缀的标签（如 `v0.2.2-beta.1`）发布成 Pre-release，不成为 latest，已安装的流界收不到更新提示。
 - **测试版的构建配置**：发布构建三分之二的时间花在最后一步"整体优化"上（全量 LTO 加单个代码生成单元，基本是单线程；日志会停在最后一个依赖 `gethostname` 那一行，其实是在编主程序）。测试版在发版流程里改用轻量 LTO 和 16 个代码生成单元（`CARGO_PROFILE_RELEASE_*` 环境变量），本机实测总耗时减半，二进制大约 3.6 MB；正式版不变。
 - 发版步骤和一次性配置见 `docs/release.md`。
 
@@ -229,7 +229,7 @@ Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不
 - **剪贴板**（`linux_clipboard.rs`）：X11 的剪贴板不存数据，谁复制谁就是选区的所有者，别人粘贴时再向它要。所以有一个进程内唯一的后台服务（自己的连接、不可见窗口和事件线程）负责应答，`X11Clipboard` 只是句柄。读：`ConvertSelection`，文本和文件清单最多等 0.5 秒（引擎是持锁读的），图片 5 秒；写：保存各格式的数据并成为所有者。两个方向超过 1 MB 都按 ICCCM 的 `INCR` 分块。变化计数来自 XFixes 的所有者变化通知，自己写入时直接加一。格式：文本 `UTF8_STRING` / `text/plain;charset=utf-8`，文件 `text/uri-list` 加 `x-special/gnome-copied-files`，图片只认 `image/png`。流界退出后它写入的内容会消失（除非桌面有剪贴板管理器）。
 - **边缘浮光**（`linux_glow.rs`）：32 位色深的 override-redirect 窗口，输入区域设为空（鼠标穿透），在单独的线程里逐帧 `PutImage`，像素由 `glow::render` 算。依赖窗口合成器，没有时不显示。暂不跟随系统的「减少动态效果」。
 - **测试**：纯计算的部分是普通单元测试；需要 X 服务的测试标了 `#[ignore]`，CI 的 Ubuntu 任务用 Xvfb 跑（`xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1`，xclip 充当"别的程序"）。Xvfb 里没有真实键鼠，测试用 XTest 模拟并让捕获接受 XTEST 设备。
-- **外壳**（三套实现相同）：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；托盘菜单常常不显示勾选状态，所以「暂停共享」「锁定在本机」两项在 Linux 上用文字表示当前状态（暂停后变成「恢复共享」）；安装包只随测试版提供，应用内自动更新还没接入。
+- **外壳**（三套实现相同）：托盘依赖 libayatana-appindicator，GNOME 默认不显示托盘图标（要装扩展）；托盘菜单常常不显示勾选状态，所以「暂停共享」「锁定在本机」两项在 Linux 上用文字表示当前状态（暂停后变成「恢复共享」）；安装包从 v0.2.2 起随正式版发布，应用内自动更新还没接入。
 
 ### Wayland：显示器（`linux_wl.rs`）
 

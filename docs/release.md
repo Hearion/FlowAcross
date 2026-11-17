@@ -3,8 +3,10 @@
 推送 `v*` 标签后，GitHub Actions（`.github/workflows/release.yml`）会自动：
 
 1. 校验标签和各处版本号一致，在公开仓库 **Hearion/FlowAcross-releases** 创建草稿发布；
-2. 同时打包 Windows（NSIS 安装包）和 macOS（通用版 .dmg + 更新用的 `.app.tar.gz`），用更新私钥签名后上传；
-3. 检查 `latest.json` 同时包含 Windows 和 macOS，再正式发布。
+2. 同时打包 Windows（NSIS 安装包）、macOS（通用版 .dmg + 更新用的 `.app.tar.gz`）和 Linux（x86_64 的 `.deb`、`.AppImage`，以及给 Arch 系用的 `.pkg.tar.zst`），Windows 和 macOS 的更新包用更新私钥签名后上传；
+3. 检查 `latest.json` 同时包含 Windows 和 macOS、Linux 的三种安装包都在，再正式发布。
+
+Linux 版从 v0.2.2 起随正式版一起发布，但没有接入应用内自动更新（`latest.json` 里没有 Linux），用户要回到发布页手动下载新版本。Arch 包由 `scripts/build-arch-pkg.sh` 在 Arch 的官方容器里把 `.deb` 重新打包而成（`scripts/arch/PKGBUILD`，包名 `flowacross-bin`），不重新编译；Arch 的版本号不能带连字符，`0.2.2-beta.3` 在包里写成 `0.2.2_beta.3`。
 
 已安装的流界启动 15 秒后、之后每 6 小时读取一次
 `https://github.com/Hearion/FlowAcross-releases/releases/latest/download/latest.json`，
@@ -84,7 +86,6 @@ git push origin main v0.2.2-beta.1
 和正式版的区别：
 
 - 在发布仓库里标成 **Pre-release**，不会成为 latest。`releases/latest/download/latest.json` 仍指向上一个正式版，**已安装的流界收不到更新提示**，测试的人要到发布页手动下载安装。
-- 多打一份 **Linux 安装包**（x86_64 的 `.deb`、`.AppImage`，以及给 Arch 系用的 `.pkg.tar.zst`，在 ubuntu-22.04 上打包）。Linux 目前只随测试版提供，没有应用内自动更新。Arch 包由 `scripts/build-arch-pkg.sh` 在 Arch 的官方容器里把 `.deb` 重新打包而成（`scripts/arch/PKGBUILD`，包名 `flowacross-bin`），不重新编译；Arch 的版本号不能带连字符，`0.2.2-beta.3` 在包里写成 `0.2.2_beta.3`。
 - 用快一些的构建配置（轻量 LTO、16 个代码生成单元），出包更快，安装包比正式版的配置大 1 MB 左右；正式版仍按 `Cargo.toml` 里的配置（全量 LTO）。这两个设置是打包任务里按标签写入的环境变量，不要改成"正式版时留空"：值为空的话 Cargo 不会忽略，会直接报错。
 - 装了测试版的 Windows / macOS，之后发布同号或更高的正式版（如 0.2.2）时会正常收到更新提示（`0.2.2-beta.1` 低于 `0.2.2`）。
 - 测试完直接发正式版即可（把版本号改成不带后缀的），不需要撤回测试版；想清理就在发布仓库把它删掉。
@@ -94,6 +95,6 @@ git push origin main v0.2.2-beta.1
 - **「标签和版本号不一致」**：忘了运行 `bump-version.mjs`。删掉标签（`git tag -d v0.2.0 && git push origin :refs/tags/v0.2.0`），改好版本号提交后重新打标签。
 - **「latest.json 缺少 …」**：两个打包任务同时写 `latest.json` 时偶尔会互相覆盖。在 Actions 页面点 **Re-run all jobs**，会复用同一个草稿。
 - **「已经发布过 vX」**：同一个版本号不能发两次，改用新的版本号。
-- **「草稿里缺少 Linux 安装包」**：测试版要等 Linux 包打完才发布。看「打包 Linux（仅测试版）」的日志，修好后重新运行失败的任务。
+- **「草稿里缺少 Linux 安装包」**：要等 Linux 包也打完才发布。看「打包 Linux」的日志，修好后重新运行失败的任务。
 - **只想要一个 Windows 测试包**：Actions 页面手动运行「Windows 测试包」，安装包在运行结果的附件里，不会触发自动更新。
 - **想撤回一个有问题的版本**：在发布仓库把它删掉或改回草稿，`latest/download` 会指向上一个正式版本；已经更新的用户需要等下一个版本。

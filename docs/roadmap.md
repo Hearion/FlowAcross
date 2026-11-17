@@ -41,7 +41,7 @@
 - [x] 源侧拦截本机输入、隐藏并锁定本机光标（Windows 把光标停在离开的那个边缘点，暂不隐藏）
 - [x] 心跳、超时释放、断网恢复本机
 - [x] Mac ⌘ ↔ Win Ctrl 互换（Mac 与 Windows 之间自动启用）
-- [ ] Mac ↔ Windows 真机互控验证（点击、滚动、拖拽、打字、中文输入法、断网不卡键）
+- [x] Mac ↔ Windows 真机互控验证（点击、滚动、拖拽、打字、中文输入法、断网不卡键）：v0.2.2-beta.6 / beta.7 上开发者按清单验证通过
 
 **验收**：Mac 和 Windows 互控，能正常点击、滚动、拖拽、打字（含中文输入法），拔网线后两边都不卡键。
 
@@ -74,7 +74,8 @@
   - [x] 第 0 步：工程在 Linux 上能编译，CI 加 Ubuntu
   - [x] 第 1 步：X11 平台层（`crates/flow-platform/src/linux*.rs`）：XInput2 捕获 + 抓取锁定、XTest 注入、RandR 显示器、X 选区剪贴板（文本、文件、图片）、边缘浮光。在容器里的虚拟 X 屏幕（Xvfb）上测过：注入落点、捕获键鼠和滚轮、抓取与放开、剪贴板和别的程序（xclip）双向互通（含 4 MB 图片分块）、浮光的显示与消失；CI 的 Ubuntu 任务每次都跑这些测试。**没有在真实的 Linux 桌面和真实键鼠上验证**，和 Mac / Windows 的互控也没有测过
   - [ ] X11 真机验证：GNOME / KDE 的 X11 会话下与 Mac、Windows 互控（点击、滚动、拖拽、打字、中文输入法、复制文件和图片、多显示器、高分屏缩放）
-  - [ ] 打包（deb / AppImage）与自动更新：测试版（版本号带后缀，如 `v0.2.2-beta.1`）会打 x86_64 的 deb、AppImage 和 Arch 的 pkg.tar.zst 并发布成 Pre-release，见 `docs/release.md`；正式版还不带 Linux 包，应用内自动更新没有接入
+  - [x] 打包：x86_64 的 deb、AppImage 和 Arch 的 pkg.tar.zst，从 v0.2.2 起随正式版一起发布（之前只随测试版），见 `docs/release.md`
+  - [ ] Linux 接入应用内自动更新（目前要回到发布页手动下载）
   - [x] Wayland：wlroots 系（Hyprland、Sway）：虚拟指针 / 虚拟键盘注入、屏幕边的 layer-shell 窗口捕获、data-control 剪贴板、layer-shell 浮光（`linux_wl*.rs`、`linux_wlr_input.rs`）。在容器里的无头 sway 上测过整条链路（1.7 不肯锁定指针、1.10 会锁定，两种情况都通过），CI 每次都跑（`scripts/test-wayland.sh`）；**没有在 Hyprland 和真实键鼠上验证**。有用户在 Hyprland 上等这个（FlowAcross-releases 的 Issue #1）
   - [x] Wayland：GNOME / KDE：xdg-desktop-portal 的 RemoteDesktop（注入）+ InputCapture（捕获）+ libei，GNOME 的剪贴板走 Clipboard portal（`linux_portal.rs`）。**只做到编译通过和纯计算部分的单元测试，整条链路没有运行过**（授权弹窗要人来点，无头环境里跑不起来）
   - [ ] Wayland 真机验证：Hyprland、Sway、GNOME（45 以上）、KDE Plasma（6.1 以上）下与 Mac、Windows 互控，尤其是 portal 那一套
