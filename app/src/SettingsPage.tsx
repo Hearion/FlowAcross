@@ -57,6 +57,19 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <Panel>
               <NameSetting current={state.local.name} />
               <AutostartSetting mac={state.local.os === "MacOs"} />
+              <div className="setting inline">
+                <div className="setting-text">
+                  <span>保持屏幕常亮</span>
+                  <small>连着其他电脑时，这台电脑的屏幕不自动熄灭</small>
+                  {state.keep_awake_problem && <small className="text-danger">这台电脑上用不了：{state.keep_awake_problem}</small>}
+                </div>
+                <Toggle
+                  label="保持屏幕常亮"
+                  checked={state.settings.keep_awake && !state.keep_awake_problem}
+                  disabled={!!state.keep_awake_problem}
+                  onChange={(v) => update({ keep_awake: v })}
+                />
+              </div>
             </Panel>
             {state.local.os === "MacOs" && (
               <p className="settings-note">

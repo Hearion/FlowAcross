@@ -26,11 +26,15 @@ mod linux_input;
 #[cfg(target_os = "linux")]
 mod linux_portal;
 #[cfg(target_os = "linux")]
+mod linux_power;
+#[cfg(target_os = "linux")]
 mod linux_wl;
 #[cfg(target_os = "linux")]
 mod linux_wl_clipboard;
 #[cfg(target_os = "linux")]
 mod linux_wl_glow;
+#[cfg(target_os = "linux")]
+mod linux_wl_power;
 #[cfg(target_os = "linux")]
 mod linux_wlr_input;
 #[cfg(target_os = "macos")]
@@ -41,6 +45,8 @@ mod macos_awdl;
 mod macos_glow;
 #[cfg(target_os = "macos")]
 mod macos_input;
+#[cfg(target_os = "macos")]
+mod macos_power;
 // 生成以 root 运行的安装命令（纯字符串处理）。只有 macOS 用到，但在所有平台编译，方便单元测试。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod root_install;
@@ -238,6 +244,80 @@ pub mod low_latency {
         crate::macos_awdl::set_active(active);
         #[cfg(not(target_os = "macos"))]
         let _ = active;
+    }
+}
+
+/// 屏幕电源：点亮屏幕、不让屏幕自动熄灭、查询屏幕是否熄着。
+pub mod power {
+    use crate::PlatformError;
+
+    /// 点亮本机已经熄灭的屏幕，并重置自动熄屏的计时。
+    ///
+    /// Linux 的 Wayland 上，Sway、Hyprland 用合成器的屏幕电源协议直接打开；GNOME、KDE 没有
+    /// 这类接口，返回 [`PlatformError::Unsupported`]，调用方可以改为注入一次鼠标移动（合成器把它
+    /// 当作用户操作）。锁屏不归这里管，点亮后仍停在锁屏界面。
+    pub fn wake_display() -> Result<(), PlatformError> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_power::wake_display();
+        #[cfg(windows)]
+        return crate::windows::wake_display();
+        #[cfg(target_os = "linux")]
+        return crate::linux_power::wake_display();
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+        return Err(PlatformError::Unsupported("点亮屏幕"));
+    }
+
+    /// 别的电脑的键鼠正在操作本机时调用（调用方负责限制频率）：让系统把它当作用户操作，
+    /// 熄着的屏幕会亮，自动熄屏的计时重新开始。
+    ///
+    /// 只有 macOS 需要：它不把 `CGEventPost` 注入的事件算作用户操作。Windows 的 `SendInput`、
+    /// X11 的 XTest、Wayland 的虚拟指针 / 键盘在系统看来就是输入设备，本身会点亮屏幕，无操作。
+    pub fn input_activity() -> Result<(), PlatformError> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_power::wake_display();
+        #[cfg(not(target_os = "macos"))]
+        return Ok(());
+    }
+
+    /// 开启或关闭"不让屏幕自动熄灭"（不影响用户自己锁屏、合盖）。重复调用无副作用。
+    /// macOS 用电源断言，Windows 用线程执行状态，Linux 向桌面环境的屏幕保护服务登记
+    /// （没有这个服务的桌面会返回错误）。
+    pub fn set_keep_awake(on: bool) -> Result<(), PlatformError> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_power::set_keep_awake(on);
+        #[cfg(windows)]
+        return crate::windows::set_keep_awake(on);
+        #[cfg(target_os = "linux")]
+        return crate::linux_power::set_keep_awake(on);
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+        {
+            let _ = on;
+            Err(PlatformError::Unsupported("保持屏幕常亮"))
+        }
+    }
+
+    /// 这台电脑上做不到"保持屏幕常亮"的原因（给用户看的话）；做得到时返回 `None`。
+    /// macOS、Windows 一定做得到。Linux 要问会话总线上有没有屏幕保护服务，会阻塞几毫秒，
+    /// 不要在界面线程上频繁调用。
+    pub fn keep_awake_problem() -> Option<String> {
+        #[cfg(any(target_os = "macos", windows))]
+        return None;
+        #[cfg(target_os = "linux")]
+        return crate::linux_power::keep_awake_problem();
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+        return Some("这个系统不支持保持屏幕常亮。".into());
+    }
+
+    /// 屏幕现在是不是熄着。熄屏期间枚举到的显示器不可信（见
+    /// `flow_core::protocol::settle_displays`）。只有 macOS 和 Linux 的 X11 查得到，
+    /// 其余返回 `false`。
+    pub fn displays_asleep() -> bool {
+        #[cfg(target_os = "macos")]
+        return crate::macos_power::displays_asleep();
+        #[cfg(target_os = "linux")]
+        return crate::linux_power::displays_asleep();
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        return false;
     }
 }
 

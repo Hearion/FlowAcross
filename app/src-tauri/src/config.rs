@@ -67,6 +67,8 @@ pub struct Settings {
     /// 控制其他电脑时滚轮的速度，百分比：100 是原样，200 是两倍。由控制方在发出滚动之前换算，
     /// 所以在手边这台电脑上设置，对所有被控制的电脑生效，对方不需要升级。
     pub wheel_speed: u32,
+    /// 有设备连着时，不让本机屏幕自动熄灭（不影响手动锁屏）。只管设置所在的这台电脑。
+    pub keep_awake: bool,
 }
 
 /// 滚轮速度的可调范围（百分比）。
@@ -106,6 +108,7 @@ impl Default for Settings {
             win_keys: WinKeysPreset::Windows,
             win_keys_custom: WinToMacKeys::WINDOWS,
             wheel_speed: 100,
+            keep_awake: false,
         }
     }
 }

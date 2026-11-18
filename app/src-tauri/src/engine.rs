@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use flow_core::layout::{DeviceId, Display, DisplayId, Layout};
 use flow_core::pairing::{Nonce, PairingCode, commitment, device_id, sas_code, verify_commitment};
 use flow_core::protocol::{
     ByeReason, DisplayInfo, Message, Os, PROTOCOL_VERSION, clean_name, peer_supports_secure,
+    peer_supports_wake, settle_displays,
 };
 use flow_core::switching::{SwitchPolicy, accepts_control};
 use flow_core::throttle::{MoveThrottle, RateLimit};
@@ -44,6 +45,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 const TICK: Duration = Duration::from_secs(2);
+/// 被控制期间，最多每隔这么久告诉系统一次"有键鼠操作"（见 `Engine::remote_activity`）。
+const REMOTE_ACTIVITY_EVERY: Duration = Duration::from_secs(2);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// 设备离线后自动重连的次数（约 30 秒内）。用完后停止，等用户手动连接或对方主动连过来。
 const MAX_AUTO_ATTEMPTS: u32 = 5;
@@ -146,6 +149,8 @@ pub struct StateView {
     pub low_latency: LowLatencyView,
     /// 当前系统做不到的切换方式和效果，界面不显示对应的设置。
     pub unsupported: UnsupportedView,
+    /// 这台电脑上做不到「保持屏幕常亮」的原因；做得到时为 `None`。界面据此禁用开关并显示原因。
+    pub keep_awake_problem: Option<String>,
     pub about: AboutView,
     /// 正在进行和最近结束的文件传输，最新的在前。
     pub transfers: Vec<TransferView>,
@@ -237,6 +242,8 @@ pub struct DeviceView {
     pub paused: bool,
     /// 对方暂停了共享或暂停了本机，暂时不能切过去。
     pub remote_paused: bool,
+    /// 可以请它点亮屏幕：连着，而且对方的版本认得这条消息。
+    pub can_wake: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,6 +342,14 @@ struct Inner {
     progress_emitted: Mutex<Instant>,
     /// 低延迟模式当前是否在生效（已通知后台服务关闭 AWDL）；`None` 表示还没同步过。
     low_latency_active: Mutex<Option<bool>>,
+    /// 上次要求系统"保持屏幕常亮"的状态；`None` 表示还没同步过。
+    keep_awake_active: Mutex<Option<bool>>,
+    /// 这台电脑上做不到「保持屏幕常亮」的原因（启动时探测，做不到时定时重查）。
+    keep_awake_problem: Mutex<Option<String>>,
+    /// 已经提示过"没能保持屏幕常亮"。
+    keep_awake_warned: AtomicBool,
+    /// 上次告诉系统"别的电脑的键鼠在操作本机"的时刻（引擎启动后的毫秒数 + 1），0 表示还没有过。
+    remote_activity_at: AtomicU64,
     /// 键鼠被这台设备带走了：它刚结束对本机的控制，之后本机还没有过键鼠输入。只用于界面显示。
     input_at: Mutex<Option<DeviceId>>,
     /// 正处在握手 / 配对阶段（对方还没通过认证）的入站连接数，见 [`HandshakeSlot`]。
@@ -465,6 +480,8 @@ struct Session {
     images: bool,
     /// 对方支持 0.1.7 新增的消息：心跳回执、`Availability`（看版本）。
     acks: bool,
+    /// 对方认得 `Wake`（看版本）。
+    wake: bool,
     /// 上次告诉对方的"本机是否接受它控制"；`None` 表示还没发过。
     accepting_sent: Option<bool>,
 }
@@ -720,6 +737,14 @@ impl Engine {
         let local_displays = flow_platform::display_provider()
             .displays()
             .unwrap_or_default();
+        // Linux 上要问一次会话总线，放到阻塞线程里。
+        let keep_awake_problem = if opts.input {
+            tokio::task::spawn_blocking(flow_platform::power::keep_awake_problem)
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
 
         let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
         let cursor: crate::input::CursorControl = if opts.input {
@@ -769,6 +794,10 @@ impl Engine {
                 started: Instant::now(),
                 progress_emitted: Mutex::new(Instant::now()),
                 low_latency_active: Mutex::new(None),
+                keep_awake_active: Mutex::new(None),
+                keep_awake_problem: Mutex::new(keep_awake_problem),
+                keep_awake_warned: AtomicBool::new(false),
+                remote_activity_at: AtomicU64::new(0),
                 input_at: Mutex::new(None),
                 unauthenticated: Arc::new(AtomicUsize::new(0)),
                 // 每分钟最多弹 3 次别人发起的配对。
@@ -864,6 +893,7 @@ impl Engine {
         self.sync_availability();
         self.sync_input();
         self.sync_low_latency();
+        self.sync_keep_awake();
         self.emit_view();
     }
 
@@ -938,6 +968,135 @@ impl Engine {
             info!(active = want, "低延迟模式");
             *cur = Some(want);
         }
+    }
+
+    /// 设置里开了「保持屏幕常亮」且有设备连着时，不让本机屏幕自动熄灭；否则恢复系统默认。
+    fn sync_keep_awake(&self) {
+        if !self.inner.input {
+            return;
+        }
+        // 整个过程拿着这把锁：两处同时同步时，后算出来的状态一定后生效，
+        // 不会出现"设备都断开了，屏幕却一直不熄"。锁顺序：`keep_awake_active` → `state`。
+        let mut cur = self.inner.keep_awake_active.lock().expect("keep awake");
+        let able = self
+            .inner
+            .keep_awake_problem
+            .lock()
+            .expect("keep awake problem")
+            .is_none();
+        let want = able && {
+            let st = self.lock();
+            st.config.settings.keep_awake && !st.sessions.is_empty()
+        };
+        if *cur == Some(want) {
+            return;
+        }
+        // 失败也记下来，不在每次状态变化时重试；设备重新连上或重新打开开关时再试。
+        *cur = Some(want);
+        let result = flow_platform::power::set_keep_awake(want);
+        drop(cur);
+        match result {
+            Ok(()) => info!(active = want, "保持屏幕常亮"),
+            Err(e) => {
+                warn!(error = %e, "无法保持屏幕常亮");
+                // 只提示一次：这个桌面做不到的话，每次设备重连都会失败。重新打开开关后再提示。
+                if want && !self.inner.keep_awake_warned.swap(true, Ordering::Relaxed) {
+                    self.notice(format!(
+                        "没能保持屏幕常亮：{}。可以在系统设置里把自动关闭显示器的时间调长。",
+                        platform_reason(&e)
+                    ));
+                }
+            }
+        }
+    }
+
+    /// 启动时探测到做不到「保持屏幕常亮」的话定时重查：开机自启时流界可能比桌面的
+    /// 屏幕保护服务先起来。查到能用了就不再查。
+    async fn recheck_keep_awake(&self) {
+        let known = |e: &Engine| {
+            e.inner
+                .keep_awake_problem
+                .lock()
+                .expect("keep awake problem")
+                .clone()
+        };
+        if !self.inner.input || known(self).is_none() {
+            return;
+        }
+        let now = tokio::task::spawn_blocking(flow_platform::power::keep_awake_problem)
+            .await
+            .unwrap_or(None);
+        if now != known(self) {
+            info!(problem = ?now, "保持屏幕常亮的可用性变化");
+            *self
+                .inner
+                .keep_awake_problem
+                .lock()
+                .expect("keep awake problem") = now;
+            self.emit();
+        }
+    }
+
+    /// 别的电脑的键鼠正在操作本机：告诉系统"有人在用"。有的系统（macOS）不把注入的键鼠算作
+    /// 用户操作，屏幕熄着不会亮、亮着也照样会到时间熄灭。键鼠刚进来和之后每次输入都会调用，
+    /// 所以限制为每隔 [`REMOTE_ACTIVITY_EVERY`] 最多通知系统一次。
+    fn remote_activity(&self) {
+        if !self.inner.input {
+            return;
+        }
+        // 加 1：0 留给"还没通知过"。
+        let now = self.inner.started.elapsed().as_millis() as u64 + 1;
+        let last = self.inner.remote_activity_at.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < REMOTE_ACTIVITY_EVERY.as_millis() as u64 {
+            return;
+        }
+        self.inner.remote_activity_at.store(now, Ordering::Relaxed);
+        if let Err(e) = flow_platform::power::input_activity() {
+            debug!(error = %e, "通知系统有键鼠操作失败");
+        }
+    }
+
+    /// 对方点了「唤醒屏幕」：点亮本机的屏幕。系统没有专门的接口时（Linux 的 Wayland），
+    /// 改为把鼠标移到主屏中间，合成器会把它当作用户操作。
+    fn wake_local(&self) {
+        if !self.inner.input {
+            return;
+        }
+        match flow_platform::power::wake_display() {
+            Ok(()) => {}
+            Err(PlatformError::Unsupported(_)) => {
+                // 本机正在控制别的电脑时不动鼠标：有人正在用这台电脑，屏幕本来就亮着，
+                // 凭空多出来的鼠标移动还会被当成本机输入发给对方。
+                if self.controller().active_device().is_some() {
+                    return;
+                }
+                let target = {
+                    let st = self.lock();
+                    st.local_displays
+                        .iter()
+                        .find(|d| d.primary)
+                        .or(st.local_displays.first())
+                        .map(|d| (d.local_id.clone(), d.rect.width / 2.0, d.rect.height / 2.0))
+                };
+                if let Some((display, x, y)) = target {
+                    self.inject(|i| i.move_to(&display, x, y));
+                }
+            }
+            Err(e) => warn!(error = %e, "点亮屏幕失败"),
+        }
+    }
+
+    /// 请一台已连接的设备点亮屏幕。失败时返回给用户看的原因。
+    pub fn wake_device(&self, device: &DeviceId) -> Result<(), String> {
+        let st = self.lock();
+        let Some(s) = st.sessions.get(device) else {
+            return Err("这台设备现在没有连着，没法唤醒它的屏幕。".into());
+        };
+        if !s.wake {
+            return Err("对方的流界版本太旧，不支持唤醒屏幕。请把对方升级到最新版本。".into());
+        }
+        s.tx.send(Message::Wake)
+            .map_err(|_| "和这台设备的连接刚刚断开，请稍后再试。".to_string())
     }
 
     /// 开启或关闭低延迟模式。第一次开启时安装后台服务，会弹出系统的管理员授权窗口并阻塞到用户操作完，
@@ -1064,6 +1223,7 @@ impl Engine {
             has_input: active.is_none() && input_at.is_none(),
             paused: false,
             remote_paused: false,
+            can_wake: false,
         }];
         devices.extend(st.config.peers.iter().map(|p| DeviceView {
             id: p.id.clone(),
@@ -1081,6 +1241,7 @@ impl Engine {
             has_input: active.as_ref() == Some(&p.id) || input_at.as_ref() == Some(&p.id),
             paused: p.paused,
             remote_paused: st.remote_blocked.contains(&p.id),
+            can_wake: st.sessions.get(&p.id).is_some_and(|s| s.wake),
         }));
         let mut nearby: Vec<NearbyView> = st
             .nearby
@@ -1165,6 +1326,12 @@ impl Engine {
                     .unwrap_or(false),
             },
             unsupported: flow_platform::limits().into(),
+            keep_awake_problem: self
+                .inner
+                .keep_awake_problem
+                .lock()
+                .expect("keep awake problem")
+                .clone(),
             about: AboutView {
                 version: env!("CARGO_PKG_VERSION"),
                 protocol: PROTOCOL_VERSION,
@@ -1232,6 +1399,9 @@ impl Engine {
         // 界面传来的是整份设置的快照，这一项以引擎里的为准。
         let low_latency = st.config.settings.low_latency;
         let was_paused = st.config.settings.sharing_paused;
+        if settings.keep_awake != st.config.settings.keep_awake {
+            self.inner.keep_awake_warned.store(false, Ordering::Relaxed);
+        }
         st.config.settings = Settings {
             low_latency,
             ..settings
@@ -1484,6 +1654,9 @@ impl Engine {
             if tick % 3 == 0 {
                 self.refresh_displays();
             }
+            if tick % 15 == 0 {
+                self.recheck_keep_awake().await;
+            }
             self.ensure_capture();
             self.stop_idle_capture();
             let targets = {
@@ -1568,8 +1741,15 @@ impl Engine {
         let Ok(now) = flow_platform::display_provider().displays() else {
             return;
         };
+        // 绝大多数时候列表没变：这时不用查熄屏状态（Linux 上查一次要多连一次 X 服务）。
+        if self.lock().local_displays == now {
+            return;
+        }
+        let asleep = flow_platform::power::displays_asleep();
         let changed = {
             let mut st = self.lock();
+            // 熄屏期间系统报的列表会变少甚至变空，照发的话别的电脑就切不过来了。
+            let now = settle_displays(&st.local_displays, now, asleep);
             if st.local_displays == now {
                 false
             } else {
@@ -2059,6 +2239,7 @@ impl Engine {
         // 单元测试里两端都是当前（未发布的）版本号，直接视为支持。
         let files = peer_supports_files(&version) || cfg!(test);
         let images = files && (peer_supports_images(&version) || cfg!(test));
+        let wake = peer_supports_wake(&version) || cfg!(test);
         info!(device = %short(&peer), version = %version, files, images, "对方版本");
         let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
         let initiator_id = if initiator {
@@ -2086,6 +2267,7 @@ impl Engine {
                     files,
                     images,
                     acks,
+                    wake,
                     accepting_sent: None,
                 },
             );
@@ -2212,7 +2394,8 @@ impl Engine {
                 Ok(Some(Message::Displays(list))) => {
                     let mut st = self.lock();
                     if let Some(r) = st.config.peer_mut(&peer) {
-                        r.displays = list;
+                        // 旧版本在屏幕熄灭后会发来空列表：沿用原来的，否则就切不过去唤醒它了。
+                        r.displays = settle_displays(&r.displays, list, false);
                     }
                     let local = self.local_id().clone();
                     st.place_new_peer(&local, &peer);
@@ -2281,6 +2464,14 @@ impl Engine {
                 }
                 Ok(Some(Message::Clipboard { origin, seq, text })) => {
                     self.on_remote_clipboard(&peer, &origin, seq, &text)
+                }
+                Ok(Some(Message::Wake)) => {
+                    // 暂停共享或暂停了这台设备时，它不能操作本机，也不该能点亮本机的屏幕。
+                    let ok = Self::accepting(&self.lock(), &peer);
+                    info!(device = %short(&peer), accepted = ok, "对方请求点亮屏幕");
+                    if ok {
+                        self.wake_local();
+                    }
                 }
                 Ok(Some(msg @ (Message::FileOffer(_) | Message::ImageOffer(_)))) => {
                     if let Some(offer) = FileOffer::from_message(msg) {
@@ -3161,6 +3352,14 @@ impl Engine {
                 _ => None,
             }
         };
+        // 真的键鼠操作（不含心跳、大写锁定状态这类通知）算作本机有人在用：
+        // 键鼠一直停在本机、屏幕中途熄了的话，没有新的 `Enter`，要靠这里点亮。
+        if matches!(
+            action,
+            Some(Remote::Move(..) | Remote::Button(..) | Remote::Wheel(..) | Remote::Key(..))
+        ) {
+            self.remote_activity();
+        }
         match action {
             Some(Remote::Move(display, x, y)) => self.inject(|i| i.move_to(&display, x, y)),
             Some(Remote::Button(b, down)) => self.inject(|i| i.button(b, down)),
@@ -3237,6 +3436,8 @@ impl Engine {
             );
         }
         info!(device = %short(peer), "开始被控制");
+        // 屏幕熄着的话先点亮：外接显示器熄屏后可能已经断开，鼠标移动落不到它上面。
+        self.remote_activity();
         self.set_input_at(None);
         *self.inner.controlled.lock().expect("controlled") = Some(Controlled {
             by: peer.clone(),
@@ -4115,6 +4316,57 @@ mod tests {
             a.engine.shutdown();
             b.engine.shutdown();
         }
+    }
+
+    /// 对方屏幕熄灭后发来空的屏幕列表（旧版本会这样）：本机沿用原来的，否则就切不过去唤醒它了。
+    /// 「唤醒屏幕」只对连着的设备可用。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sleeping_peer_keeps_its_place_and_can_be_woken() {
+        let (a, b) = paired("wake-a", "wake-b").await;
+        let ida = a.engine.local_id().clone();
+        let idb = b.engine.local_id().clone();
+        let screen = DisplayInfo {
+            local_id: "1".into(),
+            name: "外接显示器".into(),
+            rect: Rect::new(0.0, 0.0, 2560.0, 1440.0),
+            scale: 1.0,
+            primary: true,
+            native: None,
+        };
+        let send = |m: Message| {
+            let st = a.engine.lock();
+            st.sessions[&idb].tx.send(m).unwrap();
+        };
+        let displays_at_b = || {
+            let st = b.engine.lock();
+            st.config.peer(&ida).unwrap().displays.clone()
+        };
+        send(Message::Displays(vec![screen.clone()]));
+        wait_for("收到屏幕列表", || {
+            displays_at_b() == vec![screen.clone()]
+        })
+        .await;
+        // 空列表之后再发一条改名：改名生效时，空列表肯定已经处理过了。
+        send(Message::Displays(vec![]));
+        send(Message::Profile {
+            name: "熄屏的电脑".into(),
+        });
+        wait_for("改名生效", || {
+            b.engine.lock().config.peer(&ida).unwrap().name == "熄屏的电脑"
+        })
+        .await;
+        assert_eq!(displays_at_b(), vec![screen]);
+
+        let can_wake =
+            |e: &Engine, id: &DeviceId| e.view().devices.iter().any(|d| &d.id == id && d.can_wake);
+        assert!(can_wake(&b.engine, &ida) && !can_wake(&b.engine, &idb));
+        assert!(b.engine.wake_device(&ida).is_ok());
+        // 本机不是"连着的设备"；断开之后也不能再唤醒。
+        assert!(b.engine.wake_device(&idb).is_err());
+        a.engine.shutdown();
+        wait_for("断开", || !b.engine.lock().sessions.contains_key(&ida)).await;
+        assert!(b.engine.wake_device(&ida).is_err() && !can_wake(&b.engine, &ida));
+        b.engine.shutdown();
     }
 
     /// 接收方取消：两边都停下，不留下半个文件。

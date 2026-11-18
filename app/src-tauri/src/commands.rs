@@ -39,6 +39,12 @@ pub fn set_device_paused(engine: State<'_, Engine>, device: DeviceId, paused: bo
     engine.set_device_paused(&device, paused);
 }
 
+/// 请一台已连接的设备点亮屏幕。失败时返回给用户看的原因。
+#[tauri::command]
+pub fn wake_device(engine: State<'_, Engine>, device: DeviceId) -> Result<(), String> {
+    engine.wake_device(&device)
+}
+
 /// 拖动设备结束：位移单位为布局空间逻辑点。失败时返回给用户看的原因。
 #[tauri::command]
 pub fn move_device(

@@ -46,6 +46,8 @@ export interface DeviceView {
   paused: boolean;
   /** 对方暂停了共享或暂停了本机，暂时不能切过去。 */
   remote_paused: boolean;
+  /** 可以请它点亮屏幕：连着，而且对方的版本支持。 */
+  can_wake: boolean;
 }
 
 export interface NearbyView {
@@ -97,6 +99,8 @@ export interface Settings {
   win_keys_custom: WinToMacKeys;
   /** 控制其他电脑时滚轮的速度，百分比：100 是原样，200 是两倍。在手边这台电脑上设置。 */
   wheel_speed: number;
+  /** 有设备连着时，不让这台电脑的屏幕自动熄灭。 */
+  keep_awake: boolean;
 }
 
 export type MacModifier = "control" | "option" | "command";
@@ -194,6 +198,8 @@ export interface StateView {
   controlled_by: string | null;
   low_latency: LowLatencyView;
   unsupported: UnsupportedView;
+  /** 这台电脑上做不到「保持屏幕常亮」的原因；做得到时为 null。 */
+  keep_awake_problem: string | null;
   about: {
     version: string;
     protocol: number;

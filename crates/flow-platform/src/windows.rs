@@ -157,3 +157,60 @@ impl DisplayProvider for WinDisplays {
             .collect())
     }
 }
+
+// ---------------------------------------------------------------------------
+// 屏幕电源
+// ---------------------------------------------------------------------------
+
+/// 点亮屏幕：Windows 只在有输入时打开已经关掉的显示器，所以注入一次来回 1 像素的鼠标移动
+/// （光标不动），再重置自动熄屏的计时。
+pub fn wake_display() -> Result<(), crate::PlatformError> {
+    use windows_sys::Win32::System::Power::{
+        ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_MOVE;
+
+    use crate::windows_input::{mouse_input, send};
+    // SAFETY: 只传标志位。不带 ES_CONTINUOUS 时只重置一次计时，不留下状态。
+    unsafe { SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) };
+    send(&[
+        mouse_input(1, 0, 0, MOUSEEVENTF_MOVE),
+        mouse_input(-1, 0, 0, MOUSEEVENTF_MOVE),
+    ])
+}
+
+/// 正在阻止熄屏时，结束它用的发送端：丢掉它，持有状态的线程就恢复默认并退出。
+static KEEP_AWAKE: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
+    std::sync::Mutex::new(None);
+
+/// 开启或关闭"不让屏幕自动熄灭"。`SetThreadExecutionState` 的持续状态跟着线程走，
+/// 所以专门留一个线程拿着它，关闭时由同一个线程恢复。
+pub fn set_keep_awake(on: bool) -> Result<(), crate::PlatformError> {
+    use windows_sys::Win32::System::Power::{
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    };
+    let mut held = KEEP_AWAKE.lock().expect("keep awake");
+    if !on {
+        held.take();
+        return Ok(());
+    }
+    if held.is_some() {
+        return Ok(());
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::Builder::new()
+        .name("flow-keep-awake".into())
+        .spawn(move || {
+            // SAFETY: 只传标志位。
+            unsafe {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED)
+            };
+            // 发送端被丢掉时返回。
+            let _ = rx.recv();
+            // SAFETY: 同上；只留 ES_CONTINUOUS 表示恢复默认。
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
+        })
+        .map_err(|e| crate::PlatformError::Os(format!("无法启动线程：{e}")))?;
+    *held = Some(tx);
+    Ok(())
+}

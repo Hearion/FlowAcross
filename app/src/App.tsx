@@ -262,11 +262,29 @@ export default function App() {
                       : "正在等待对方上线，会自动重新连接。"}
                   </p>
                 )}
+                {sel.status === "connected" && !sel.can_wake && (
+                  <p className="detail-note">「唤醒屏幕」用不了：对方的流界版本太旧，升级到 0.2.3 或更高版本后可用。</p>
+                )}
                 {sel.status !== "local" && (
                   <div className="detail-actions">
                     {sel.status === "offline" && (
                       <button className="btn small primary" onClick={() => api.connectDevice(sel.id)}>
                         连接
+                      </button>
+                    )}
+                    {sel.status === "connected" && (
+                      <button
+                        className="btn small"
+                        disabled={!sel.can_wake}
+                        title="对方屏幕熄灭后点亮它"
+                        onClick={() =>
+                          api
+                            .wakeDevice(sel.id)
+                            .then(() => toast(`已请「${sel.name}」点亮屏幕`))
+                            .catch((e) => toast(String(e)))
+                        }
+                      >
+                        唤醒屏幕
                       </button>
                     )}
                     <button className="btn small" onClick={() => api.setDevicePaused(sel.id, !sel.paused)}>

@@ -19,12 +19,12 @@ export function createMock(): Api {
       ],
     },
     devices: [
-      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false },
-      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false },
+      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false, can_wake: false },
+      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true },
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", edge_glow: true, clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" }, wheel_speed: 100 },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", edge_glow: true, clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" }, wheel_speed: 100, keep_awake: false },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -34,6 +34,7 @@ export function createMock(): Api {
     controlled_by: null,
     low_latency: { supported: true, installed: false, active: false },
     unsupported: { hold_key: false, local_hotkey: false, dwell: false, edge_glow: false },
+    keep_awake_problem: null,
     about: { version: pkg.version, protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
     transfers: [],
     file_offer: null,
@@ -92,6 +93,7 @@ export function createMock(): Api {
     }),
     setDevicePaused: async (device, paused) =>
       set({ devices: state.devices.map((d) => (d.id === device ? { ...d, paused } : d)) }),
+    wakeDevice: async () => {},
     moveDevice: async (device, dx, dy) =>
       set({
         layout: {
@@ -120,7 +122,7 @@ export function createMock(): Api {
         set({
           pairings: [],
           nearby: state.nearby.filter((d) => d.id !== device),
-          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false }],
+          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true }],
           layout: {
             displays: [
               ...state.layout.displays,

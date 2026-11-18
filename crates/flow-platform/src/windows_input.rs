@@ -430,7 +430,7 @@ pub fn set_cursor_captured(captured: bool, at: Option<(f64, f64)>) {
 
 pub struct WinInjector;
 
-fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
+pub(crate) fn mouse_input(dx: i32, dy: i32, data: u32, flags: u32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
@@ -453,7 +453,7 @@ fn normalize_abs(offset: i32, size: i32) -> i32 {
     ((offset as i64 * 65536 + size - 1) / size) as i32
 }
 
-fn send(inputs: &[INPUT]) -> Result<(), PlatformError> {
+pub(crate) fn send(inputs: &[INPUT]) -> Result<(), PlatformError> {
     // SAFETY: inputs 是有效的 INPUT 数组，cbSize 为单个结构体大小。
     let sent = unsafe {
         SendInput(

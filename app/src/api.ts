@@ -15,6 +15,8 @@ export interface Api {
   updateSettings(settings: Settings): Promise<void>;
   setLocked(locked: boolean): Promise<void>;
   setDevicePaused(device: string, paused: boolean): Promise<void>;
+  /** 请一台已连接的设备点亮屏幕。失败时抛出给用户看的原因。 */
+  wakeDevice(device: string): Promise<void>;
   /** `snap`：吸附距离（布局逻辑点）。失败时以字符串原因 reject。 */
   moveDevice(device: string, dx: number, dy: number, snap?: number): Promise<void>;
   pairWith(device: string): Promise<void>;
@@ -61,6 +63,7 @@ const tauriApi: Api = {
   updateSettings: (settings) => invoke("update_settings", { settings }),
   setLocked: (locked) => invoke("set_locked", { locked }),
   setDevicePaused: (device, paused) => invoke("set_device_paused", { device, paused }),
+  wakeDevice: (device) => invoke("wake_device", { device }),
   moveDevice: (device, dx, dy, snap) => invoke("move_device", { device, dx, dy, snap: snap ?? null }),
   pairWith: (device) => invoke("pair_with", { device }),
   respondPairing: (device, accept) => invoke("respond_pairing", { device, accept }),

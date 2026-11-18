@@ -220,6 +220,7 @@ fn main() {
             commands::update_settings,
             commands::set_locked,
             commands::set_device_paused,
+            commands::wake_device,
             commands::move_device,
             commands::pair_with,
             commands::respond_pairing,

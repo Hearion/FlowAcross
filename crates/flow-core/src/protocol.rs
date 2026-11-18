@@ -193,6 +193,35 @@ pub enum Message {
     /// 本机剪贴板里是一张图片（截图等）：和 `FileOffer` 一样只发清单，内容是一个 PNG 文件，
     /// 对方取回后把图片本身写入剪贴板。撤回仍用 `FileOffer`。
     ImageOffer(FileOffer),
+    // ---- 以下为 0.2.3 新增，只发给版本不低于 [`WAKE_SINCE`] 的设备。
+    /// 请对方点亮屏幕（屏幕熄灭后在控制方点「唤醒屏幕」）。对方做不到时什么都不发生。
+    Wake,
+}
+
+/// 从这个版本起支持 [`Message::Wake`]。
+pub const WAKE_SINCE: (u32, u32, u32) = (0, 2, 3);
+
+/// 对方是否认得 [`Message::Wake`]（见 [`WAKE_SINCE`]）。
+pub fn peer_supports_wake(peer_version: &str) -> bool {
+    version_at_least(peer_version, WAKE_SINCE)
+}
+
+/// 定时枚举到的显示器里，哪一份该当作本机现在的屏幕。
+///
+/// 屏幕熄灭时系统报上来的列表不可信：macOS 不把休眠的显示器算作可用，有的外接显示器
+/// 熄屏后还会断开信号，列表就变少甚至变空。照实发给别的电脑，对方的布局里就没有这台
+/// 电脑的屏幕了，键鼠切不过来，也就没法把它唤醒。所以熄屏期间（`asleep`）和列表为空时
+/// 沿用上一份 `prev`；还没有上一份时只能用新的。
+pub fn settle_displays(
+    prev: &[DisplayInfo],
+    now: Vec<DisplayInfo>,
+    asleep: bool,
+) -> Vec<DisplayInfo> {
+    if !prev.is_empty() && (asleep || now.is_empty()) {
+        prev.to_vec()
+    } else {
+        now
+    }
 }
 
 /// 从这个版本起支持心跳回执（[`Message::HeartbeatAck`]）、带承诺的配对（[`Message::PairCommit`]）
@@ -599,6 +628,47 @@ mod tests {
         let long = "长".repeat(500);
         assert_eq!(clean_name(&long).chars().count(), MAX_NAME_CHARS);
         assert_eq!(clean_name("\t\r\n"), "");
+    }
+
+    fn display(id: &str) -> DisplayInfo {
+        DisplayInfo {
+            local_id: id.into(),
+            name: id.into(),
+            rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            scale: 1.0,
+            primary: true,
+            native: None,
+        }
+    }
+
+    #[test]
+    fn displays_are_kept_while_the_screen_is_off() {
+        let prev = vec![display("1"), display("2")];
+        // 熄屏：列表变少或变空都沿用上一份。
+        assert_eq!(settle_displays(&prev, vec![display("1")], true), prev);
+        assert_eq!(settle_displays(&prev, vec![], true), prev);
+        // 没熄屏但一块屏幕都枚举不到（外接显示器熄屏后断开信号）：同样沿用。
+        assert_eq!(settle_displays(&prev, vec![], false), prev);
+        // 屏幕亮着时的变化（拔掉一块）照常生效。
+        assert_eq!(
+            settle_displays(&prev, vec![display("1")], false),
+            vec![display("1")]
+        );
+        // 还没有上一份时只能用新的。
+        assert_eq!(
+            settle_displays(&[], vec![display("3")], true),
+            vec![display("3")]
+        );
+        assert!(settle_displays(&[], vec![], false).is_empty());
+    }
+
+    #[test]
+    fn wake_is_only_for_new_versions() {
+        assert!(peer_supports_wake("0.2.3") && peer_supports_wake("0.2.3-beta.1"));
+        assert!(!peer_supports_wake("0.2.2") && !peer_supports_wake("dev"));
+        // 新变体加在末尾：旧消息的编码不变。
+        let bytes = encode_payload(&Message::Wake).unwrap();
+        assert_eq!(decode_payload(&bytes).unwrap(), Message::Wake);
     }
 
     #[test]

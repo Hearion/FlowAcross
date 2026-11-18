@@ -31,6 +31,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Graphics_Gdi",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
+  "Win32_System_Power",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
@@ -42,7 +43,7 @@ windows-sys = { version = "0.61", features = [
 # Linux 只支持 X11：XInput2 捕获、XTest 注入、RandR 显示器、XFixes 剪贴板变化通知。
 # x11rb 是纯 Rust 的 X11 协议实现，不链接 libxcb / libX11。
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["xinput", "xtest", "randr", "xfixes", "shape"] }
+x11rb = { version = "0.13", features = ["xinput", "xtest", "randr", "xfixes", "shape", "dpms"] }
 # Wayland（wlroots 系）：虚拟指针 / 虚拟键盘注入、layer-shell 边缘窗口和浮光、data-control 剪贴板。
 # wayland-client 默认用纯 Rust 的协议实现，不链接 libwayland。
 wayland-client = "0.31"

@@ -160,6 +160,16 @@
 
 **配置文件损坏**（`config::Config::load`）：`config.json` 解析不了时，先改名备份为 `config.json.bad-<时间戳>`，再用默认配置继续运行，主界面一直显示原因和备份位置，直到用户点「知道了」。连改名都失败（比如没有权限）时，这次运行不写配置，避免覆盖原文件。以前是静默用默认配置，下一次保存就把所有配对覆盖掉了。
 
+### 屏幕熄灭（`flow_platform::power`）
+
+被控制的电脑长时间没人用，屏幕会自动熄灭。这时要保证别的电脑仍然切得过来，并且能把它点亮：
+
+- **熄屏时保留布局**（`flow_core::protocol::settle_displays`）：macOS 不把休眠的显示器算作可用，有的外接显示器熄屏后还会断开信号，定时枚举到的屏幕列表会变少甚至变空。照实发出去，别的电脑的布局里就没有这台电脑了，键鼠切不过来。所以熄屏期间（macOS 查 `CGDisplayIsAsleep`，Linux 的 X11 查 DPMS；只在列表变了的时候才查）和列表为空时沿用上一份；接收方收到空列表也沿用原来的（旧版本会发空列表）。Windows 和 Wayland 查不到熄屏状态，只有"列表为空"这一条生效。
+- **远端键鼠算作用户操作**（`power::input_activity`）：macOS 不把 `CGEventPost` 注入的事件算作用户操作，屏幕熄着不会亮，亮着也照样到时间熄灭。所以别的电脑的键鼠进来（`Enter`）和之后的每次移动、点击、滚动、按键，被控制方都向系统声明"有人在用"（`IOPMAssertionDeclareUserActivity`），最多每 2 秒一次；心跳和大写锁定状态这类通知不算。键鼠一直停在这台电脑上、屏幕中途熄了，动一下鼠标也能点亮。Windows 的 `SendInput`、X11 的 XTest、Wayland 的虚拟指针在系统看来就是输入设备，本身会点亮屏幕，这一步无操作。
+- **唤醒屏幕**（`power::wake_display`）：键鼠切不过去的时候，控制方在设备详情里点「唤醒屏幕」，发一条 `Message::Wake`（0.2.3 新增，只发给认得它的版本；对方暂停了共享时不理会）。macOS 同上，Windows 注入一次来回 1 像素的鼠标移动并重置熄屏计时，Linux 的 X11 重置屏幕保护并强制打开 DPMS。Wayland 没有通用接口：Sway、Hyprland 用合成器的屏幕电源协议（wlr-output-power-management，`linux_wl_power.rs`）直接把所有屏幕打开，不动鼠标；GNOME、KDE 没有这类接口，改为把鼠标移到主屏中间，由合成器当作用户操作来点亮（本机正在控制别的电脑时不动鼠标）。
+- **保持屏幕常亮**（设置 › 通用，默认关，`power::set_keep_awake`）：开着且有设备连着时不让本机屏幕自动熄灭，不影响手动锁屏。macOS 用电源断言 `PreventUserIdleDisplaySleep`，Windows 用专门的线程持有 `SetThreadExecutionState`，Linux 向桌面的 `org.freedesktop.ScreenSaver` 登记（GNOME、KDE、Xfce、hypridle 等提供；实际登记失败时每次打开开关只提示一次）。启动时先探测一次做不做得到（`power::keep_awake_problem`，Linux 上看会话总线有没有这个服务，正在运行或可以按需启动都算）：做不到时设置里的开关禁用并在旁边写明原因，之后每 30 秒重查，查到能用了就恢复（开机自启时流界可能比桌面的服务先起来）。
+- **做不到的**：屏幕点亮后如果停在锁屏界面，密码要在那台电脑上自己输。macOS 锁屏时开启安全输入，注入的键盘事件进不了密码框，这是系统限制。
+
 ## 10. 打包与自动更新
 
 - **打包**：推送 `v*` 标签后由 GitHub Actions（`release.yml`）用 tauri-action 打包 Windows NSIS 安装包、macOS 通用版（.dmg + `.app.tar.gz`）和 Linux 安装包（deb、AppImage，以及由 deb 重新打包的 Arch 包 pkg.tar.zst；Linux 不带更新包，没有接入应用内自动更新），发布到公开仓库 `Hearion/FlowAcross-releases`。源码仓库私有，App 无法匿名下载其中的文件，所以安装包单独发布。

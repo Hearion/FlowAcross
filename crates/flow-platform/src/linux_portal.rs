@@ -76,7 +76,7 @@ fn now_us() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
+pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
