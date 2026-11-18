@@ -2,21 +2,22 @@
 
 **一套键鼠，自由跨屏。**
 
-把几台电脑放在桌上，鼠标从一台的屏幕边缘移出，就出现在相邻电脑的屏幕上，键盘随之切换。支持 Windows 与 macOS 互相控制，局域网直连、端到端加密、无需注册账号。
+把几台电脑放在桌上，鼠标从一台的屏幕边缘移出，就出现在相邻电脑的屏幕上，键盘随之切换。复制的文字、文件和截图也能直接在另一台粘贴。支持 Windows、macOS 和 Linux 互相控制，局域网直连、端到端加密、无需注册账号。
 
-> 当前进度：界面、真实显示器、系统权限检测、局域网发现、加密连接、配对和自动重连已完成；键鼠捕获/注入与跨屏切换（M3）已实现，正在真机验证。详见 [docs/roadmap.md](docs/roadmap.md)。
+> 安装包、使用说明和官网在公开的发布仓库 [Hearion/FlowAcross-releases](https://github.com/Hearion/FlowAcross-releases)（官网 <https://flow.bapihou.com/>）。当前进度和各系统的验证情况见 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 文档
 
 - [技术架构](docs/architecture.md)：选型、坐标空间、切换判定、键盘处理、网络与配对、失败处理
 - [开发路线图](docs/roadmap.md)：M0–M5 里程碑与验收标准
+- [发布新版本与自动更新](docs/release.md)：正式版和测试版的发版步骤、一次性配置
 - [在 Windows 上调试](docs/windows.md)：拷贝源码、一键配置环境、测试清单、连不上时怎么查
 
 ## 目录
 
 ```
 crates/flow-core       纯逻辑：布局、跨边映射、切换判定、按键路由、协议、配对码、剪贴板防回环
-crates/flow-platform   平台层：显示器枚举、系统权限、键鼠捕获/注入
+crates/flow-platform   平台层：显示器枚举、系统权限、键鼠捕获/注入、剪贴板、屏幕电源（唤醒 / 常亮）
 crates/flow-net        网络层：设备身份、mDNS 发现、QUIC 双向认证连接
 app/src                React 界面（设备布局图）
 app/src-tauri          Tauri 2 外壳：引擎（配置、握手、配对、重连）、托盘/菜单栏、Tauri 命令
@@ -28,7 +29,7 @@ docs/                  架构与路线图
 - Rust stable（≥ 1.85）：<https://rustup.rs>
 - Node.js ≥ 20
 - macOS：Xcode Command Line Tools；Windows：Visual Studio C++ 生成工具 + WebView2
-- Linux（X11，以及 Wayland 的 Sway / Hyprland / GNOME / KDE；尚未在真机上验证，安装包只随测试版提供，见 [路线图](docs/roadmap.md)）：`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libxkbcommon-dev build-essential`。
+- Linux（X11，以及 Wayland 的 Sway / Hyprland / GNOME / KDE；各桌面的验证情况见 [路线图](docs/roadmap.md)）：`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libxkbcommon-dev build-essential`。
   需要图形环境的测试默认跳过，要跑的话：
   - X11：`sudo apt install xvfb xclip`，然后 `xvfb-run -a cargo test -p flow-platform -- --ignored --test-threads=1 linux_input linux_clipboard`
   - Wayland（wlroots 系）：`sudo apt install sway wl-clipboard grim`，然后 `scripts/test-wayland.sh`（用普通用户，会起一个无头的 sway）
@@ -71,7 +72,7 @@ cd app && npm run tauri dev
 scripts/build-mac.sh
 ```
 
-发布正式版本（自动打包 Windows + macOS 并推送应用内更新）：改版本号、打 `v*` 标签推送即可，一次性配置和步骤见 [docs/release.md](docs/release.md)。
+发布正式版本（自动打包 Windows、macOS 和 Linux，并向 Windows / macOS 推送应用内更新）：改版本号、打 `v*` 标签推送即可，一次性配置和步骤见 [docs/release.md](docs/release.md)。
 
 ## macOS 系统权限（开发时必读）
 
