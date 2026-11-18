@@ -13,7 +13,13 @@ Linux 版从 v0.2.2 起随正式版一起发布，但没有接入应用内自动
 `https://github.com/Hearion/FlowAcross-releases/releases/latest/download/latest.json`（0.2.3 及更早的版本只读 GitHub 的），
 发现新版本就在主界面提示。用户点「立即更新」后：下载并校验签名 → 释放远端按键、恢复本机输入、断开连接 → 安装 → 自动重新打开。
 
-源码仓库是私有的，App 不能从私有仓库下载（需要令牌，而令牌不能打包进 App），所以安装包单独放在公开的发布仓库，那里只有安装包，没有源码。
+源码仓库 [Hearion/FlowAcross](https://github.com/Hearion/FlowAcross) 已公开，安装包仍单独放在公开的发布仓库，保持已有更新地址可用。每次发布必须从下载页链接到对应源码标签或提交，以及构建脚本、锁文件和依赖源码获取资料；不能把二进制发布仓库的自动生成源码包误当成应用的对应源码。
+
+## 许可证与 Code signing policy
+
+项目自有内容采用 [GPL-3.0-only](../LICENSE)。安装包携带许可证、版权、隐私、卸载和第三方许可声明，Windows 安装时显示许可与隐私提示。更换依赖或锁文件后先运行 `node scripts/generate-third-party-notices.mjs`；如新依赖缺少许可文本，检查上游来源后运行 `node scripts/generate-third-party-notices.mjs --fetch-missing` 并复核结果。发布时仍需保证用户能获得 GPL 要求的完整对应源码，包括必要的依赖源码及构建脚本，不能仅提供指向最新主分支的链接。
+
+[Code signing policy](code-signing-policy.md) · [Privacy policy](../PRIVACY.md) · [卸载说明](uninstall.md)。**SignPath Foundation 当前仅准备申请，尚未获批或启用。** 申请内容、下载页可复制文字和后续接入安排见 [SignPath 申请资料](signpath-application.md)。Windows Authenticode 与 Tauri 更新包签名是两套不同的校验。
 
 ## 一次性配置
 
@@ -58,7 +64,7 @@ macOS 按签名记住「辅助功能」「输入监控」授权。不配证书�
 
 用同一张证书签名后，用户授权一次，之后自动更新都不用重新授权。注意：这是自签名证书，用户**第一次**打开时 macOS 仍会提示「无法验证开发者」，需要在「系统设置 → 隐私与安全性」里点「仍要打开」。要彻底去掉这个提示，需要 Apple Developer ID（每年 99 美元）签名并公证。
 
-Windows 安装包没有代码签名，第一次安装时 SmartScreen 会拦一下，点「更多信息 → 仍要运行」。之后的自动更新不受影响。
+Windows Authenticode 尚未接入，新版本可能出现 SmartScreen 提示；Windows 的企业策略或 Smart App Control 也可能阻止运行。现有 Tauri 更新签名不代表 Windows 已信任发布者，签名状态以实际安装包为准。
 
 ### 5. 阿里云 OSS（国内下载和应用内更新）
 
@@ -118,7 +124,7 @@ git push origin main v0.2.0
 
 - 标签说明（`-m` 的内容）会作为更新说明，显示在发布页和 App 的更新提示里。可以写多行。
 - 打开源码仓库的 Actions 页面看进度，一次大约 15–25 分钟。完成后在 https://github.com/Hearion/FlowAcross-releases/releases 能看到新版本。
-- 私有仓库每月有 2000 分钟免费 Actions 时长，macOS 按 10 倍、Windows 按 2 倍计费，一次发版大约用掉 200–300 分钟。
+- 源码仓库现为公开仓库；Actions 用量和账单以 GitHub 当前方案及所选 runner 为准。
 
 ## 发测试版（Pre-release）
 

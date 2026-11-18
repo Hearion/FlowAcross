@@ -6,7 +6,7 @@ members = ["crates/flow-core", "crates/flow-platform", "crates/flow-net", "app/s
 version = "0.2.3"
 edition = "2024"
 rust-version = "1.85"
-license = "UNLICENSED"
+license = "GPL-3.0-only"
 publish = false
 
 [workspace.dependencies]

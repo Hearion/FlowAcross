@@ -1,0 +1,23 @@
+FlowAcross — 一套键鼠，自由跨屏。
+Copyright (C) 2026 Hearion and the FlowAcross contributors
+
+FlowAcross project-owned source code, documentation and original project assets
+are licensed under the GNU General Public License, version 3 only
+(SPDX-License-Identifier: GPL-3.0-only), unless a file states otherwise.
+
+FlowAcross is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 of the License.
+
+FlowAcross is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+FlowAcross. If not, see <https://www.gnu.org/licenses/>.
+
+Source and build instructions: https://github.com/Hearion/FlowAcross
+Contact: https://github.com/Hearion/FlowAcross/issues
+
+Third-party components retain their own copyright notices and licenses;
+see THIRD_PARTY_NOTICES.txt. This notice does not relicense third-party code.

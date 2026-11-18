@@ -1,0 +1,35 @@
+FlowAcross — License and privacy notice / 许可与隐私说明
+
+Copyright (C) 2026 Hearion and the FlowAcross contributors.
+FlowAcross is free software under GNU GPL version 3 only (GPL-3.0-only).
+You may use, modify and redistribute it, including commercially, subject to
+the license. It is provided WITHOUT ANY WARRANTY, including MERCHANTABILITY
+or FITNESS FOR A PARTICULAR PURPOSE. This notice adds no license restrictions.
+
+The full license and third-party notices are installed in the legal directory.
+Source and build instructions: https://github.com/Hearion/FlowAcross
+
+隐私与系统行为：
+- 应用在局域网广播设备名称、设备 ID、系统类型和连接地址；配对后的键鼠、
+  剪贴板和文件通过加密连接在电脑间直接传输。剪贴板共享可在设置中关闭。
+- Windows/macOS 自动检查更新默认开启，先访问维护者的阿里云 OSS 下载域名，
+  失败时回退 GitHub。可在“设置 → 软件更新”关闭，不会自动安装新版本。
+  下载服务可见 IP 地址和常规 HTTP 请求信息，并可能保留访问或安全日志。
+- 应用不集成广告、使用分析或自动崩溃上报服务，运行日志只在本地保存。
+- Windows 缺少 WebView2 时，安装器可能从 Microsoft 下载并安装该运行时。
+- 开机自启由用户控制。macOS 可选低延迟服务需管理员授权，可在设置中移除。
+
+Privacy: LAN discovery exposes device metadata. Shared contents travel directly
+over encrypted paired connections. Update/download requests use the maintainer's
+Alibaba Cloud OSS domain, with GitHub as a fallback. Disable automatic checks in
+Settings → Software updates. Application logs remain local; download providers
+may retain access logs. No analytics,
+advertising or automatic crash reporting is integrated in the application.
+On Windows, a missing WebView2 runtime may be downloaded from Microsoft.
+
+Full privacy policy:
+https://github.com/Hearion/FlowAcross/blob/main/PRIVACY.md
+Uninstallation and cleanup:
+https://github.com/Hearion/FlowAcross/blob/main/docs/uninstall.md
+Code signing policy (application pending; not yet active):
+https://github.com/Hearion/FlowAcross/blob/main/docs/code-signing-policy.md

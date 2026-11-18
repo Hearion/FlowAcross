@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  # 安装包和 latest.json 发布到这个公开仓库（源码仓库是私有的，App 无法从私有仓库下载更新）。
+  # 安装包和 latest.json 仍发布到独立公开仓库，保持现有客户端的更新地址可用；源码仓库已公开。
   RELEASE_OWNER: ${{ github.repository_owner }}
   RELEASE_REPO: FlowAcross-releases
 
@@ -81,6 +81,11 @@ jobs:
           git fetch --force origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           notes=$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME" | sed '/-----BEGIN/,$d')
           [ -z "$notes" ] && notes="流界 $GITHUB_REF_NAME"
+          source_url="https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_SHA"
+          license_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/LICENSE"
+          policy_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/code-signing-policy.md"
+          privacy_url="https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/PRIVACY.md"
+          notes="$(printf '%s\n\n## License and source\n\nGPL-3.0-only · [License](%s) · [Source and build instructions](%s)\n\n## Code signing policy\n\n[Code signing policy and team roles](%s) · [Privacy policy](%s)\n\nSignPath Foundation signing is not yet approved or active. Check the downloaded file’s actual digital signature.\n' "$notes" "$license_url" "$source_url" "$policy_url" "$privacy_url")"
           {
             echo "notes<<EOF_NOTES"
             echo "$notes"

@@ -33,6 +33,17 @@
   },
   "bundle": {
     "active": true,
+    "license": "GPL-3.0-only",
+    "licenseFile": "../../docs/installer-notice.txt",
+    "copyright": "Copyright (C) 2026 Hearion and the FlowAcross contributors",
+    "homepage": "https://github.com/Hearion/FlowAcross",
+    "resources": {
+      "../../LICENSE": "legal/LICENSE.txt",
+      "../../COPYRIGHT": "legal/COPYRIGHT.txt",
+      "../../PRIVACY.md": "legal/PRIVACY.md",
+      "../../THIRD_PARTY_NOTICES.txt": "legal/THIRD_PARTY_NOTICES.txt",
+      "../../docs/uninstall.md": "legal/UNINSTALL.md"
+    },
     "targets": "all",
     "category": "Utility",
     "shortDescription": "一套键鼠，自由跨屏",

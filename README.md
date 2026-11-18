@@ -12,6 +12,23 @@
 - [开发路线图](docs/roadmap.md)：M0–M5 里程碑与验收标准
 - [发布新版本与自动更新](docs/release.md)：正式版和测试版的发版步骤、一次性配置
 - [在 Windows 上调试](docs/windows.md)：拷贝源码、一键配置环境、测试清单、连不上时怎么查
+- [隐私说明 / Privacy policy](PRIVACY.md)：局域网发现、共享内容、更新请求和本地数据
+- [卸载与清理](docs/uninstall.md)：退出共享、移除自启与可选后台服务、清理本地文件
+- [Code signing policy](docs/code-signing-policy.md)：签名状态、维护者角色和发布审批
+- [SignPath 申请资料](docs/signpath-application.md)：英文申请内容与提交检查项
+- [Download / 下载](docs/downloads.md)：安装包入口、源码、许可和签名状态
+
+## License
+
+Copyright (C) 2026 Hearion and the FlowAcross contributors.
+
+FlowAcross 自有代码、文档及项目原创资源采用 **GNU General Public License v3.0 only**（SPDX: `GPL-3.0-only`）。你可以使用、修改和分发，包括商用；分发时须遵守 GPL-3.0，提供对应源码并保留必要声明。软件按现状提供，不附带适销性或特定用途适用性担保。完整条款见 [LICENSE](LICENSE)，第三方组件保留各自许可证，见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
+
+源码仓库：[Hearion/FlowAcross](https://github.com/Hearion/FlowAcross)。安装包：[正式发布](https://github.com/Hearion/FlowAcross-releases/releases)。每个安装包的对应源码应按发布说明中的源码标签或提交获取；二次分发者也须提供自己分发版本的对应源码及构建脚本。
+
+## Code signing policy
+
+Windows 的 SignPath Foundation 签名申请资料正在准备，**尚未获批或启用**。维护者及签名审批政策见 [Code signing policy](docs/code-signing-policy.md)，数据处理方式见 [Privacy policy](PRIVACY.md)。
 
 ## 目录
 
