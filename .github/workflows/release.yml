@@ -1,7 +1,8 @@
 name: 发布新版本
 
 # 推送 v* 标签时运行：校验版本号 → 打包 Windows、macOS 和 Linux → 发布到公开的发布仓库。
-# 已安装的流界（Windows、macOS）从发布仓库的 latest.json 检查更新；Linux 版没有接入应用内更新。
+# 发布前把安装包和更新文件复制一份到阿里云 OSS（scripts/mirror-to-oss.mjs），国内下载和应用内更新走 OSS；
+# 已安装的流界（Windows、macOS）先读 OSS 上的 latest.json，读不到再读发布仓库的。Linux 版没有接入应用内更新。
 # 一次性配置和发版步骤见 docs/release.md。
 #
 # 版本号带后缀的标签（如 v0.2.2-beta.1）是测试版：发布成 Pre-release，不会成为 latest，
@@ -38,6 +39,11 @@ jobs:
         env:
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          OSS_REGION: ${{ secrets.OSS_REGION }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          DOWNLOAD_BASE_URL: ${{ secrets.DOWNLOAD_BASE_URL }}
         run: |
           missing=0
           if [ -z "$RELEASES_TOKEN" ]; then
@@ -48,6 +54,13 @@ jobs:
             echo "::error::缺少 TAURI_SIGNING_PRIVATE_KEY：没有它无法给更新包签名，配置方法见 docs/release.md。"
             missing=1
           fi
+          # 打包要二十分钟，缺 OSS 配置的话在开头就报出来，免得打完包才在复制到阿里云那一步失败。
+          for name in OSS_REGION OSS_BUCKET OSS_ACCESS_KEY_ID OSS_ACCESS_KEY_SECRET DOWNLOAD_BASE_URL; do
+            if [ -z "${!name}" ]; then
+              echo "::error::缺少 $name：发布前要把安装包复制到阿里云 OSS，配置方法见 docs/release.md 的「阿里云 OSS」。"
+              missing=1
+            fi
+          done
           exit $missing
 
       - name: 校验版本号
@@ -330,12 +343,14 @@ jobs:
             }
 
   publish:
-    name: 检查并正式发布
+    name: 检查、复制到阿里云并正式发布
     # 三个系统的包都打完才发布。
     needs: [prepare, build, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - name: 检查 latest.json 后发布
+      - uses: actions/checkout@v5
+
+      - name: 检查草稿
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
@@ -372,6 +387,41 @@ jobs:
               core.setFailed(`草稿里缺少 Linux 安装包（${lacking.join('、')}），草稿未发布。请检查「打包 Linux」的日志。`);
               return;
             }
+
+      # 先复制到 OSS 再发布：OSS 传失败时 GitHub 上也不发布，两边的最新版本保持一致
+      # （已安装的流界先读 OSS 的清单，OSS 落后的话它们就收不到这次更新）。
+      - name: 安装 OSS SDK
+        run: npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/oss-sdk" ali-oss@6.23.0
+
+      - name: 复制到阿里云 OSS
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASE_REPO: ${{ env.RELEASE_OWNER }}/${{ env.RELEASE_REPO }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          OSS_REGION: ${{ secrets.OSS_REGION }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          DOWNLOAD_BASE_URL: ${{ secrets.DOWNLOAD_BASE_URL }}
+          # 存储桶 bapihou-app-release 里还放别的软件，流界的文件都在这个目录下。
+          OSS_PREFIX: FlowAcross
+          OSS_SDK_DIR: ${{ runner.temp }}/oss-sdk
+        run: node scripts/mirror-to-oss.mjs
+
+      - name: 正式发布
+        uses: actions/github-script@v8
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        with:
+          github-token: ${{ secrets.RELEASES_TOKEN }}
+          script: |
+            const owner = process.env.RELEASE_OWNER;
+            const repo = process.env.RELEASE_REPO;
+            const release_id = Number(process.env.RELEASE_ID);
+            const { data: release } = await github.rest.repos.getRelease({ owner, repo, release_id });
+            const latest = { version: release.tag_name.replace(/^v/, '') };
             if (process.env.PRERELEASE === 'true') {
               // 测试版：不成为 latest，releases/latest/download/latest.json 仍指向上一个正式版。
               const { data: published } = await github.rest.repos.updateRelease({

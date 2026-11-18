@@ -1,0 +1,44 @@
+# 手动把一个已经发布的版本复制到阿里云 OSS：第一次配好 OSS 后补传当前版本，或者某次发版时 OSS 那一步之外出了问题需要重传。
+# 正常发版不用运行它，「发布新版本」会在发布前自动复制。说明见 docs/release.md 的「阿里云 OSS」。
+name: 补传到阿里云 OSS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要补传的版本标签，如 v0.2.3（必须已经在发布仓库发布）
+        required: true
+      prerelease:
+        description: 这是测试版（只传版本目录，不改 latest.json 和官网下载用的文件）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: 复制 ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 OSS SDK
+        run: npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/oss-sdk" ali-oss@6.23.0
+
+      - name: 复制到阿里云 OSS
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASE_REPO: ${{ github.repository_owner }}/FlowAcross-releases
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          OSS_REGION: ${{ secrets.OSS_REGION }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          DOWNLOAD_BASE_URL: ${{ secrets.DOWNLOAD_BASE_URL }}
+          # 存储桶 bapihou-app-release 里还放别的软件，流界的文件都在这个目录下。
+          OSS_PREFIX: FlowAcross
+          OSS_SDK_DIR: ${{ runner.temp }}/oss-sdk
+        run: node scripts/mirror-to-oss.mjs

@@ -173,7 +173,9 @@
 ## 10. 打包与自动更新
 
 - **打包**：推送 `v*` 标签后由 GitHub Actions（`release.yml`）用 tauri-action 打包 Windows NSIS 安装包、macOS 通用版（.dmg + `.app.tar.gz`）和 Linux 安装包（deb、AppImage，以及由 deb 重新打包的 Arch 包 pkg.tar.zst；Linux 不带更新包，没有接入应用内自动更新），发布到公开仓库 `Hearion/FlowAcross-releases`。源码仓库私有，App 无法匿名下载其中的文件，所以安装包单独发布。
-- **更新清单**：每次发布带一个 `latest.json`（版本号、更新说明、各平台下载地址和签名）。App 读取 `releases/latest/download/latest.json`。
+- **更新清单**：每次发布带一个 `latest.json`（版本号、更新说明、各平台下载地址和签名）。
+- **阿里云 OSS**：GitHub 在国内下载慢、时常连不上，所以发版时在正式发布之前，由 `scripts/mirror-to-oss.mjs` 把这次的全部文件复制到 OSS 存储桶 `bapihou-app-release` 的 `FlowAcross/` 目录（工作流里的 `OSS_PREFIX`；这个存储桶还放别的软件）：`releases/<标签>/` 下按原文件名放一份（内容不再改动）；正式版还会更新 `latest/`（不带版本号的固定文件名，给官网下载按钮用，浏览器保存时仍带版本号）和根目录的 `latest.json`（下载地址改指 OSS 的版本目录）。顺序是先传文件、最后换清单，OSS 失败时 GitHub 上也不发布，两边的最新版本保持一致。已发布的版本可以用「补传到阿里云 OSS」工作流（`mirror-oss.yml`）手动补传，它不允许把 `latest.json` 换回旧版本。
+- **App 读哪份清单**：`tauri.conf.json` 的 `endpoints` 依次是 OSS 的 `https://dl.bapihou.com/FlowAcross/latest.json`（下载域名 dl.bapihou.com 绑定在存储桶上，HTTPS 证书过期时请求失败，会自动退到下一个）和发布仓库的 `releases/latest/download/latest.json`。插件按顺序尝试，前一个连不上或出错才读下一个；读到哪份清单，就从那份清单写的地址下载。0.2.3 及更早的版本只认 GitHub 的地址，要先从 GitHub 升到下一个版本，之后才走 OSS。
 - **签名**：更新包用 minisign 私钥签名（私钥只在 GitHub Secrets 和开发者本机），公钥写在 `tauri.conf.json`，App 下载后先验签再安装。本地打包不生成更新包，不需要私钥（CI 打包前才打开 `createUpdaterArtifacts`）。
 - **App 端**（`app/src-tauri/src/updater.rs`，`tauri-plugin-updater`）：发布版启动 15 秒后、之后每 6 小时检查一次（设置里可关），只提示不自动安装。用户确认后：下载（引擎照常工作，失败不影响使用）→ `Engine::shutdown()` 释放远端按键、恢复本机输入、断开连接（之后重连、键鼠捕获、剪贴板等后台循环全部停止，可重复调用）→ 安装 → 重新打开。安装失败时提示原因并提供「重新打开流界」。
 - **macOS 授权**：系统按代码签名记住辅助功能/输入监控授权。CI 用固定证书（`APPLE_CERTIFICATE`）签名，更新后授权保持有效；没有证书时退回 ad-hoc，每次更新都要重新授权。

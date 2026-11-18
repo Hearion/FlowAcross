@@ -1,4 +1,8 @@
-//! 应用内更新：从公开的发布仓库读取 `latest.json`，校验签名后下载安装。
+//! 应用内更新：读取 `latest.json`，校验签名后下载安装。
+//!
+//! 清单地址在 `tauri.conf.json` 的 `plugins.updater.endpoints` 里，按顺序尝试：先读阿里云 OSS 上的
+//! （国内快），读不到（连不上、出错）再读 GitHub 发布仓库的。安装包从清单里写的地址下载，
+//! OSS 的清单就从 OSS 下载。两边的文件相同，签名都用同一把私钥校验，放在哪里都一样安全。
 //!
 //! 安装前先关闭引擎（释放远端按键、恢复本机输入、断开连接），再替换程序并重新打开，
 //! 和托盘里「退出流界」走同一条路径，避免安装过程中卡键。
@@ -68,7 +72,7 @@ async fn check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
         .map_err(|e| format!("更新功能初始化失败：{e}"))?;
     let found = updater.check().await.map_err(|e| {
         tracing::warn!(error = %e, "检查更新失败");
-        "检查更新失败，请确认网络可以访问 GitHub 后重试。".to_string()
+        "检查更新失败，请检查网络后重试。".to_string()
     })?;
     let info = found.as_ref().map(info_of);
     *app.state::<PendingUpdate>()
