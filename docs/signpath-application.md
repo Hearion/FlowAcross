@@ -95,7 +95,7 @@ The project is actively developed and has published binary releases. Please eval
 - [x] 准备安装时的许可与隐私提示，以及安装包内的许可、版权及第三方声明资源。
 - [x] 准备英文申请介绍与联系方式。
 - [x] 建立带实际下载入口、隐私和签名政策的统一下载页 `docs/downloads.md`，可用于申请表 Download URL。
-- [ ] 提交并推送本次修改；核对上述源码、许可证和政策链接可匿名访问。
+- [x] 许可证和申请资料已推送到源码仓库；已匿名核验 LICENSE、隐私说明、签名政策、下载页和本申请指南均可访问。
 - [ ] 维护者亲自确认 GitHub 已开启 MFA；获批后确认 SignPath MFA。当前没有读取账号设置。
 - [ ] 在官网和发布仓库首页加入下方的 **Code signing policy** 入口；现有发布页也应加入入口。
 - [ ] 对照真实下载版本填写具体 tag、源码提交、Actions run 和安装包链接；申请时不要使用与安装包不符的本地旧版本号。
