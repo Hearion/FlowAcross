@@ -8,6 +8,7 @@ export function createMock(): Api {
   // 预览开关：?onboarding 显示首次引导，?solo 只有本机（看空状态）。
   const params = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
   let state: StateView = {
+    seq: 0,
     local: { id: "local", name: "本机（浏览器预览）", os: "MacOs" },
     onboarded: true,
     port: 24830,
@@ -19,12 +20,20 @@ export function createMock(): Api {
       ],
     },
     devices: [
-      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false, can_wake: false },
-      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true },
+      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false, can_wake: false, locked: false, can_switch: false, can_send_keys: false, problem: null },
+      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, problem: null },
     ],
-    nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false }],
+    nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false, problem: null }],
     pairings: [],
-    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", edge_glow: true, clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" }, wheel_speed: 100, keep_awake: false },
+    settings: { hold_key: "none", dwell_ms: 0, corner_guard: true, mapping: "Continuous", edge_glow: true, clipboard: true, clipboard_files: true, sharing_paused: false, auto_check_updates: true, low_latency: false, win_keys: "windows", win_keys_custom: { ctrl: "command", win: "control", alt: "option" }, wheel_speed: 100, keep_awake: false,
+      hotkeys: {
+        switch_left: { mods: 6, key: 0x50 },
+        switch_right: { mods: 6, key: 0x4f },
+        devices: [],
+        mappings: [{ trigger: { mods: 6, key: 0x16 }, send: { mods: 0, key: 0x16 }, device: "pc" }],
+      },
+      sync_layout: true,
+    },
     locked: false,
     permissions: [
       { kind: "accessibility", state: "granted" },
@@ -40,7 +49,12 @@ export function createMock(): Api {
     file_offer: null,
     receive_dir: "~/Downloads/流界",
     config_warning: null,
+    auth_prompt: null,
+    auth_denied: [],
   };
+  // ?auth：系统授权弹窗在等（倒计时）；?auth=denied：授权被拒绝。
+  if (params.get("auth") === "denied") state.auth_denied = ["capture", "inject"];
+  else if (params.has("auth")) state.auth_prompt = { kind: "capture", seconds_left: 47 };
   if (params.has("onboarding")) state.onboarded = false;
   // ?config-error：看配置文件损坏的提示。
   if (params.has("config-error"))
@@ -55,6 +69,34 @@ export function createMock(): Api {
       { id: 1, peer: "pc", peer_name: "书房台式机", incoming: true, label: "照片", done: 120_000_000, total: 512_000_000, status: "failed", error: "磁盘空间不足，请清理后重试。", pasteable: false },
     ];
   }
+  // ?problem：看连不上时设备详情和「添加设备」里的原因与排查步骤；?locked：对方停在锁屏界面。
+  if (params.has("problem")) {
+    state.devices = state.devices.map((d) =>
+      d.id === "pc"
+        ? {
+            ...d,
+            status: "offline",
+            manual: true,
+            can_wake: false,
+            can_switch: false,
+            can_send_keys: false,
+            problem: {
+              summary: "能在网络里看到「书房台式机」，但连接被拦住了，多半是防火墙或 VPN / 代理软件。",
+              steps: [
+                "在「书房台式机」上打开「Windows 安全中心 › 防火墙和网络保护 › 允许应用通过防火墙」，把 FlowAcross 的「专用」和「公用」都勾上。装了第三方安全软件的话，也在里面放行流界。",
+                "在这台电脑上打开「系统设置 › 网络 › 防火墙 › 选项」，关掉「阻止所有传入连接」，并把 FlowAcross 设为「允许传入连接」。",
+                "两台电脑上如果开着 VPN 或代理软件，先退出它，或关掉它的「虚拟网卡 / TUN 模式」、打开「允许局域网连接」。这类软件会把发往局域网的流量也接管走。",
+              ],
+            },
+          }
+        : d,
+    );
+    state.nearby = state.nearby.map((n) => ({
+      ...n,
+      problem: { summary: "在网络里找不到「Mac mini」。", steps: ["确认「Mac mini」开着机、没有睡眠，而且流界正在运行（托盘 / 菜单栏里有流界的图标）。", "确认两台电脑连的是同一个 Wi‑Fi 或同一个局域网。"] },
+    }));
+  }
+  if (params.has("locked")) state.devices = state.devices.map((d) => (d.id === "pc" ? { ...d, locked: true } : d));
   if (params.has("solo")) {
     state.devices = state.devices.filter((d) => d.id === "local");
     state.layout = { displays: state.layout.displays.filter((d) => d.id.device === "local") };
@@ -62,14 +104,17 @@ export function createMock(): Api {
   const stateListeners = new Set<(s: StateView) => void>();
   const noticeListeners = new Set<(m: string) => void>();
   const set = (next: Partial<StateView>) => {
-    state = { ...state, ...next };
+    state = { ...state, ...next, seq: state.seq + 1 };
     stateListeners.forEach((cb) => cb(structuredClone(state)));
   };
   const notice = (m: string) => noticeListeners.forEach((cb) => cb(m));
   const progressListeners = new Set<(p: UpdateProgress) => void>();
   // ?autostart-error：看开机启动开关失败时的提示。
   let autostart = false;
-  const mockUpdate = { version: "9.9.9", current: pkg.version, notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09" };
+  // ?update=deb / pacman / manual：看 Linux 上几种安装方式的更新提示。
+  const kindParam = params.get("update");
+  const kind = kindParam === "deb" || kindParam === "pacman" || kindParam === "manual" || kindParam === "app_image" ? kindParam : "bundled";
+  const mockUpdate = { version: "9.9.9", current: pkg.version, notes: "（浏览器预览）示例更新说明：\n- 修复断网后偶尔卡键\n- 布局图支持缩放", date: "2026-11-09", kind, manual: kind === "manual" } as const;
 
   return {
     getState: async () => structuredClone(state),
@@ -94,6 +139,11 @@ export function createMock(): Api {
     setDevicePaused: async (device, paused) =>
       set({ devices: state.devices.map((d) => (d.id === device ? { ...d, paused } : d)) }),
     wakeDevice: async () => {},
+    switchToDevice: async (device) =>
+      set({ devices: state.devices.map((d) => ({ ...d, active: d.id === device, has_input: d.id === device, can_switch: d.id !== device && (d.status === "connected" || d.status === "local") })) }),
+    setHotkeysSuspended: async () => {},
+    openDownloadPage: async () => notice("（浏览器预览）这里会用浏览器打开下载页"),
+    retryAuthorization: async () => set({ auth_denied: [], auth_prompt: { kind: "capture", seconds_left: 60 } }),
     moveDevice: async (device, dx, dy) =>
       set({
         layout: {
@@ -122,7 +172,7 @@ export function createMock(): Api {
         set({
           pairings: [],
           nearby: state.nearby.filter((d) => d.id !== device),
-          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true }],
+          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, problem: null }],
           layout: {
             displays: [
               ...state.layout.displays,
@@ -134,15 +184,22 @@ export function createMock(): Api {
       }, 900);
     },
     connectDevice: async (device) =>
-      set({ devices: state.devices.map((d) => (d.id === device ? { ...d, status: "connected", manual: false } : d)) }),
+      set({ devices: state.devices.map((d) => (d.id === device ? { ...d, status: "connected", manual: false, can_switch: true, can_send_keys: true, problem: null } : d)) }),
     removeDevice: async (device) =>
       set({
         devices: state.devices.filter((d) => d.id !== device),
         layout: { displays: state.layout.displays.filter((d) => d.id.device !== device) },
+        settings: {
+          ...state.settings,
+          hotkeys: {
+            ...state.settings.hotkeys,
+            devices: state.settings.hotkeys.devices.filter((d) => d.device !== device),
+            mappings: state.settings.hotkeys.mappings.filter((m) => m.device !== device),
+          },
+        },
       }),
     requestPermission: async (kind) => {
       set({ permissions: state.permissions.map((p) => (p.kind === kind ? { ...p, state: "granted" } : p)) });
-      return structuredClone(state);
     },
     openPermissionSettings: async () => notice("（浏览器预览）这里会打开系统设置"),
     openLogs: async () => notice("（浏览器预览）这里会打开日志文件夹"),
@@ -215,6 +272,8 @@ export function createMock(): Api {
       stateListeners.add(h);
       return () => stateListeners.delete(h);
     },
+    // 浏览器预览里进度随完整状态一起推。
+    onTransfers: async () => () => {},
     onNotice: async (cb) => {
       const h = (m: string) => cb(m);
       noticeListeners.add(h);

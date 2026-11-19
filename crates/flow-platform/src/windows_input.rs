@@ -544,17 +544,15 @@ impl InputInjector for WinInjector {
     }
 
     fn wheel(&mut self, dx: i32, dy: i32) -> Result<(), PlatformError> {
-        let mut inputs = Vec::new();
-        if dy != 0 {
-            inputs.push(mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL));
+        // 每次滚动都走这里：不为一两个事件分配。
+        let vertical = mouse_input(0, 0, dy as u32, MOUSEEVENTF_WHEEL);
+        let horizontal = mouse_input(0, 0, dx as u32, MOUSEEVENTF_HWHEEL);
+        match (dy != 0, dx != 0) {
+            (true, true) => send(&[vertical, horizontal]),
+            (true, false) => send(&[vertical]),
+            (false, true) => send(&[horizontal]),
+            (false, false) => Ok(()),
         }
-        if dx != 0 {
-            inputs.push(mouse_input(0, 0, dx as u32, MOUSEEVENTF_HWHEEL));
-        }
-        if inputs.is_empty() {
-            return Ok(());
-        }
-        send(&inputs)
     }
 
     fn key(&mut self, code: KeyCode, down: bool, _repeat: bool) -> Result<(), PlatformError> {

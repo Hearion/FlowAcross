@@ -4,6 +4,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
+use flow_core::hotkeys::Hotkeys;
 use flow_core::keys::WinToMacKeys;
 use flow_core::layout::{DeviceId, EdgeMapping};
 use flow_core::protocol::{DisplayInfo, Os};
@@ -69,6 +70,11 @@ pub struct Settings {
     pub wheel_speed: u32,
     /// 有设备连着时，不让本机屏幕自动熄灭（不影响手动锁屏）。只管设置所在的这台电脑。
     pub keep_awake: bool,
+    /// 这台电脑上的快捷键：切到左右相邻的电脑、切到指定的电脑、快捷键映射。只有物理键盘所在的
+    /// 电脑看得到按键，所以在哪台电脑上按，就用哪台电脑的设置。
+    pub hotkeys: Hotkeys,
+    /// 设备布局在各台电脑之间同步：在任意一台上拖动屏幕，其他电脑的布局跟着变。
+    pub sync_layout: bool,
 }
 
 /// 滚轮速度的可调范围（百分比）。
@@ -109,6 +115,8 @@ impl Default for Settings {
             win_keys_custom: WinToMacKeys::WINDOWS,
             wheel_speed: 100,
             keep_awake: false,
+            hotkeys: Hotkeys::default(),
+            sync_layout: true,
         }
     }
 }
@@ -145,6 +153,11 @@ pub struct Config {
     pub peers: Vec<PeerRecord>,
     /// 本机显示器在布局空间中的整体偏移。
     pub local_offset: (f64, f64),
+    /// 布局的修改次数：用户每拖一次屏幕加一；采纳别的电脑的布局时变成它的。各台电脑之间
+    /// 同步布局时，次数大的算数（见 `flow_core::layout::SharedLayout`）。
+    pub layout_rev: u64,
+    /// 最后改动布局的设备；`None` 表示还没人拖过（次数一样时用它分先后，没有就当作本机）。
+    pub layout_by: Option<DeviceId>,
 }
 
 /// 配置文件存在但读不了或解析不了。
@@ -239,6 +252,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn hotkeys_default_to_the_old_fixed_ones_and_survive_a_roundtrip() {
+        use flow_core::hotkeys::{HotkeyAction, KeyCombo, KeyMapping};
+        use flow_core::keys::{KeyCode, Modifiers};
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        // 旧版本的配置文件里没有快捷键：还是 Ctrl+Alt+←/→。
+        let old: Settings = serde_json::from_str(r#"{"dwell_ms": 300}"#).unwrap();
+        assert_eq!(
+            old.hotkeys.action(ctrl_alt, KeyCode::RIGHT),
+            Some(HotkeyAction::SwitchRight)
+        );
+        let mut s = Settings::default();
+        s.hotkeys.switch_left = None;
+        s.hotkeys.mappings.push(KeyMapping {
+            trigger: KeyCombo::new(ctrl_alt, KeyCode(0x16)),
+            send: KeyCombo::new(Modifiers::NONE, KeyCode(0x16)),
+            device: DeviceId("ab".into()),
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+    }
 
     #[test]
     fn roundtrip_and_tolerates_missing_fields() {

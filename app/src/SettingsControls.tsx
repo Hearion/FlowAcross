@@ -3,6 +3,7 @@
 import { useEffect, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { api } from "./api";
 import type { HoldKey, MacModifier, Settings, UnsupportedView, WinKeysPreset, WinToMacKeys } from "./types";
+import { comboLabels } from "./keys";
 import { Segmented, Toggle, isMac } from "./ui";
 
 const HOLD_OPTIONS: { value: HoldKey; label: string }[] = [
@@ -21,9 +22,14 @@ export function useDeviceNameInput(current: string) {
     maxLength: 40,
     onChange: (e: ChangeEvent<HTMLInputElement>) => setValue(e.target.value),
     onBlur: () => {
-      if (value.trim() !== current) api.setDeviceName(value);
+      const name = value.trim();
+      if (name !== current) api.setDeviceName(value);
+      // 清空（改回系统电脑名）或只多了首尾空格时，保存后名字可能没变，不会有新状态把输入框改回来。
+      if (name === "" || name === current) setValue(current);
     },
     onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => {
+      // 输入法用回车上屏时不算（WebKit 这时报的 isComposing 是 false，只能看 keyCode 229）。
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter") e.currentTarget.blur();
     },
   };
@@ -54,7 +60,15 @@ interface Props {
  * `unsupported`：这台电脑的桌面做不到的切换方式和效果（目前只有 Linux 的 Wayland 会话会遇到），
  * 对应的设置直接不显示，引擎也会忽略它们。
  */
-export function CrossScreenSettings({ settings: s, update, unsupported: no }: Props & { unsupported: UnsupportedView }) {
+export function CrossScreenSettings({
+  settings: s,
+  update,
+  unsupported: no,
+  onHotkeys,
+}: Props & { unsupported: UnsupportedView; onHotkeys?: () => void }) {
+  const { switch_left: left, switch_right: right } = s.hotkeys;
+  // 两个方向的修饰键相同时合起来写（⌃ ⌥ ← →），否则各写各的。
+  const shared = left && right && left.mods === right.mods;
   return (
     <>
       {!no.hold_key && (
@@ -131,14 +145,40 @@ export function CrossScreenSettings({ settings: s, update, unsupported: no }: Pr
         <div className="setting inline">
           <div className="setting-text">
             <span>快捷键切换</span>
-            <small>按住后用方向键切到左右相邻的电脑</small>
+            <small>
+              切到左右相邻的电脑
+              {onHotkeys && (
+                <>
+                  ，
+                  <button type="button" className="link" onClick={onHotkeys}>
+                    修改快捷键
+                  </button>
+                </>
+              )}
+            </small>
           </div>
-          <span className="keys">
-            <kbd>{isMac ? "⌃" : "Ctrl"}</kbd>
-            <kbd>{isMac ? "⌥" : "Alt"}</kbd>
-            <kbd>←</kbd>
-            <kbd>→</kbd>
-          </span>
+          {shared ? (
+            <span className="keys">
+              {[...comboLabels(left).slice(0, -1), comboLabels(left).at(-1), comboLabels(right).at(-1)].map((k, i) => (
+                <kbd key={i}>{k}</kbd>
+              ))}
+            </span>
+          ) : left || right ? (
+            <span className="keys-stack">
+              {[left, right].map(
+                (c, i) =>
+                  c && (
+                    <span className="keys" key={i}>
+                      {comboLabels(c).map((k, j) => (
+                        <kbd key={j}>{k}</kbd>
+                      ))}
+                    </span>
+                  ),
+              )}
+            </span>
+          ) : (
+            <span className="row-value">未设置</span>
+          )}
         </div>
       )}
     </>

@@ -12,11 +12,15 @@
 //! - [`clipboard`]：剪贴板同步防回环。
 //! - [`files`]：跨设备复制文件（清单、路径校验、接收校验、什么时候去取）。
 //! - [`throttle`]：鼠标位置发送节流。
+//! - [`hotkeys`]：自定义快捷键与快捷键映射。
+//! - [`diagnose`]：连接失败的原因和排查步骤、睡眠唤醒的判断。
 
 pub mod clipboard;
 pub mod cursor;
+pub mod diagnose;
 pub mod files;
 pub mod geometry;
+pub mod hotkeys;
 pub mod keys;
 pub mod layout;
 pub mod pairing;

@@ -81,6 +81,8 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             dwell: false,
             edge_glow: !layer_shell,
             local_input: true,
+            // 可以把边缘窗口铺满屏幕接住光标，见 `linux_wlr_input.rs` 的 `apply_summon`。
+            commanded_switch: false,
         },
         // 另外，光标一撞上屏障合成器就开始捕获，等不了停留时间；GNOME 没有 layer-shell，画不了浮光。
         Backend::Portal => Limits {
@@ -89,6 +91,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             dwell: true,
             edge_glow: !layer_shell,
             local_input: true,
+            commanded_switch: true,
         },
     }
 }

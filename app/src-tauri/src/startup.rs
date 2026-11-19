@@ -15,9 +15,31 @@ use tauri_plugin_autostart::ManagerExt;
 /// 开机自启时传给流界的参数。
 pub const AUTOSTART_ARG: &str = "--autostart";
 
+/// 让正在运行的流界把键鼠切走的命令行参数：`flowacross --switch <目标>`（也接受 `--switch=<目标>`）。
+/// 目标见 `Engine::switch_command`。给看不到全局键盘的桌面（Wayland）在合成器里绑快捷键用，
+/// 也方便脚本和宏按键调用。
+pub const SWITCH_ARG: &str = "--switch";
+
 /// 本次启动是否由开机启动项触发。
 pub fn launched_by_autostart() -> bool {
     std::env::args_os().skip(1).any(|a| a == AUTOSTART_ARG)
+}
+
+/// 命令行里 `--switch` 的目标；没有这个参数、或后面没跟目标时返回 `None`。
+pub fn switch_target(args: &[String]) -> Option<&str> {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == SWITCH_ARG {
+            return it.next().map(String::as_str).filter(|t| !t.is_empty());
+        }
+        if let Some(target) = arg
+            .strip_prefix(SWITCH_ARG)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            return Some(target).filter(|t| !t.is_empty());
+        }
+    }
+    None
 }
 
 /// 更新后重新打开时会沿用原来的启动参数。开机自启的流界更新后不应该"消失"，
@@ -39,7 +61,10 @@ pub fn show_window_on_next_start(app: &AppHandle) {
 /// 启动时是否应该隐藏窗口：开机自启且没有"下次显示窗口"的标记。标记读一次就删掉。
 pub fn start_hidden(app: &AppHandle) -> bool {
     let forced_show = show_marker(app).is_some_and(|p| std::fs::remove_file(p).is_ok());
-    launched_by_autostart() && !forced_show
+    // 流界没在运行时执行 `flowacross --switch …`：照常启动，但不弹出窗口（多半是按快捷键触发的）。
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let background = launched_by_autostart() || args.iter().any(|a| a.starts_with(SWITCH_ARG));
+    background && !forced_show
 }
 
 fn read_state(app: &AppHandle) -> Result<bool, String> {
@@ -94,4 +119,31 @@ fn fix_hint() -> &'static str {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn fix_hint() -> &'static str {
     "请在系统的开机启动设置里手动设置流界。"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::switch_target;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn switch_target_is_read_from_either_form() {
+        assert_eq!(
+            switch_target(&args(&["flowacross", "--switch", "right"])),
+            Some("right")
+        );
+        assert_eq!(
+            switch_target(&args(&["--autostart", "--switch=书房台式机"])),
+            Some("书房台式机")
+        );
+        // 没有目标、没有这个参数。
+        assert_eq!(switch_target(&args(&["flowacross", "--switch"])), None);
+        assert_eq!(switch_target(&args(&["flowacross", "--switch="])), None);
+        assert_eq!(switch_target(&args(&["flowacross", "--autostart"])), None);
+        // 别的以它开头的参数不算。
+        assert_eq!(switch_target(&args(&["--switcher", "x"])), None);
+    }
 }

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { PermissionKind, Settings, StateView, UpdateInfo, UpdateProgress } from "./types";
+import type { PermissionKind, Settings, StateView, TransferView, UpdateInfo, UpdateProgress } from "./types";
 import { createMock } from "./mock";
 
 /** 是否运行在 Tauri 窗口里。直接用浏览器打开 Vite 页面时为 false，改用内存中的演示数据。 */
@@ -17,6 +17,14 @@ export interface Api {
   setDevicePaused(device: string, paused: boolean): Promise<void>;
   /** 请一台已连接的设备点亮屏幕。失败时抛出给用户看的原因。 */
   wakeDevice(device: string): Promise<void>;
+  /** 把键鼠切到指定的设备（本机的 ID 表示回到本机）。失败时抛出给用户看的原因。 */
+  switchToDevice(device: string): Promise<void>;
+  /** 开始 / 结束录制快捷键：录制期间流界不响应任何快捷键。 */
+  setHotkeysSuspended(suspended: boolean): Promise<void>;
+  /** 用系统浏览器打开官网的下载页。 */
+  openDownloadPage(): Promise<void>;
+  /** 重新申请系统授权（之前被拒绝或超时）。需要的话系统会再弹窗。 */
+  retryAuthorization(): Promise<void>;
   /** `snap`：吸附距离（布局逻辑点）。失败时以字符串原因 reject。 */
   moveDevice(device: string, dx: number, dy: number, snap?: number): Promise<void>;
   pairWith(device: string): Promise<void>;
@@ -24,7 +32,8 @@ export interface Api {
   removeDevice(device: string): Promise<void>;
   /** 手动连接离线的已配对设备。 */
   connectDevice(device: string): Promise<void>;
-  requestPermission(kind: PermissionKind): Promise<StateView>;
+  /** 申请权限；新的授权状态随状态事件推送。 */
+  requestPermission(kind: PermissionKind): Promise<void>;
   openPermissionSettings(kind: PermissionKind): Promise<void>;
   openLogs(): Promise<void>;
   openDataDir(): Promise<void>;
@@ -52,6 +61,8 @@ export interface Api {
   setAutostart(enabled: boolean): Promise<boolean>;
   onState(cb: (s: StateView) => void): Promise<Unlisten>;
   onNotice(cb: (msg: string) => void): Promise<Unlisten>;
+  /** 传输进度：只带传输列表，传文件期间每秒几次；其余变化仍走完整的状态事件。 */
+  onTransfers(cb: (list: TransferView[]) => void): Promise<Unlisten>;
   onUpdateAvailable(cb: (info: UpdateInfo) => void): Promise<Unlisten>;
   onUpdateProgress(cb: (p: UpdateProgress) => void): Promise<Unlisten>;
 }
@@ -64,6 +75,10 @@ const tauriApi: Api = {
   setLocked: (locked) => invoke("set_locked", { locked }),
   setDevicePaused: (device, paused) => invoke("set_device_paused", { device, paused }),
   wakeDevice: (device) => invoke("wake_device", { device }),
+  switchToDevice: (device) => invoke("switch_to_device", { device }),
+  setHotkeysSuspended: (suspended) => invoke("set_hotkeys_suspended", { suspended }),
+  openDownloadPage: () => invoke("open_download_page"),
+  retryAuthorization: () => invoke("retry_authorization"),
   moveDevice: (device, dx, dy, snap) => invoke("move_device", { device, dx, dy, snap: snap ?? null }),
   pairWith: (device) => invoke("pair_with", { device }),
   respondPairing: (device, accept) => invoke("respond_pairing", { device, accept }),
@@ -87,8 +102,16 @@ const tauriApi: Api = {
   setAutostart: (enabled) => invoke("set_autostart", { enabled }),
   onState: (cb) => listen<StateView>("state", (e) => cb(e.payload)),
   onNotice: (cb) => listen<string>("notice", (e) => cb(e.payload)),
+  onTransfers: (cb) => listen<TransferView[]>("transfers", (e) => cb(e.payload)),
   onUpdateAvailable: (cb) => listen<UpdateInfo>("update-available", (e) => cb(e.payload)),
   onUpdateProgress: (cb) => listen<UpdateProgress>("update-progress", (e) => cb(e.payload)),
 };
 
-export const api: Api = inTauri ? tauriApi : createMock();
+/**
+ * 演示数据只在开发时的浏览器预览里用（`npm run dev` 直接用浏览器打开），或者用
+ * `VITE_PREVIEW=1 npx vite build` 特意打一份预览。正式构建里这个条件在编译时就是 false，
+ * `mock.ts` 整个不会进安装包。
+ */
+const preview = import.meta.env.DEV || import.meta.env.VITE_PREVIEW === "1";
+
+export const api: Api = preview && !inTauri ? createMock() : tauriApi;

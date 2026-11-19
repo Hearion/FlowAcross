@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { api } from "./api";
-import type { NearbyView, Os, PairingView, PermissionKind, PermissionView } from "./types";
+import type { NearbyView, Os, PairingView, PermissionKind, PermissionView, ProblemView } from "./types";
 import { AlertIcon, CheckIcon, DeviceIcon } from "./ui";
 
 export const OS_TEXT: Record<Os, string> = {
@@ -24,6 +24,22 @@ export function Spinner() {
   return <span className="spinner" aria-hidden="true" />;
 }
 
+/** 连不上的原因和按顺序排查的步骤（设备详情、「添加设备」窗口共用）。 */
+export function ProblemNote({ problem }: { problem: ProblemView }) {
+  return (
+    <div className="problem" role="status">
+      <p className="problem-summary">{problem.summary}</p>
+      {problem.steps.length > 0 && (
+        <ol className="problem-steps">
+          {problem.steps.map((s, i) => (
+            <li key={i}>{s}</li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 /** 附近运行流界、尚未配对的电脑。 */
 export function NearbyList({ nearby }: { nearby: NearbyView[] }) {
   if (nearby.length === 0) {
@@ -36,7 +52,9 @@ export function NearbyList({ nearby }: { nearby: NearbyView[] }) {
         <ul className="tips">
           <li>在另一台电脑上安装并打开流界</li>
           <li>两台电脑需要连接同一个 Wi‑Fi 或局域网</li>
-          <li>公司或公共网络可能屏蔽设备发现，可以换成家用网络试试</li>
+          <li>公司或公共网络、访客 Wi‑Fi 可能不让设备互相发现，可以换成家用网络试试</li>
+          <li>开着 VPN 或代理软件时，先关掉它的「虚拟网卡 / TUN 模式」</li>
+          <li>Windows 第一次打开流界时，防火墙的弹窗要点「允许」；Mac 要允许流界访问「本地网络」</li>
         </ul>
       </div>
     );
@@ -44,15 +62,18 @@ export function NearbyList({ nearby }: { nearby: NearbyView[] }) {
   return (
     <ul className="nearby-list">
       {nearby.map((d) => (
-        <li key={d.id}>
-          <DeviceIcon os={d.os} hue={4} />
-          <span className="device-info">
-            <span className="device-name">{d.name}</span>
-            <span className="device-sub">{OS_TEXT[d.os]}</span>
+        <li key={d.id} className={d.problem ? "with-problem" : undefined}>
+          <span className="nearby-row">
+            <DeviceIcon os={d.os} hue={4} />
+            <span className="device-info">
+              <span className="device-name">{d.name}</span>
+              <span className="device-sub">{OS_TEXT[d.os]}</span>
+            </span>
+            <button className="btn small primary" disabled={d.connecting} onClick={() => api.pairWith(d.id)}>
+              {d.connecting ? "连接中…" : d.problem ? "重试" : "配对"}
+            </button>
           </span>
-          <button className="btn small primary" disabled={d.connecting} onClick={() => api.pairWith(d.id)}>
-            {d.connecting ? "连接中…" : "配对"}
-          </button>
+          {d.problem && !d.connecting && <ProblemNote problem={d.problem} />}
         </li>
       ))}
     </ul>
@@ -154,7 +175,16 @@ export const PERMISSION_TEXT: Record<PermissionKind, { name: string; why: string
   local_network: { name: "本地网络", why: "发现并连接同一网络中的其他电脑" },
 };
 
-export function PermissionList({ permissions, hint }: { permissions: PermissionView[]; hint?: string | null }) {
+export function PermissionList({
+  permissions,
+  hint,
+  onError,
+}: {
+  permissions: PermissionView[];
+  hint?: string | null;
+  /** 打不开系统设置时把原因告诉用户。 */
+  onError?: (msg: string) => void;
+}) {
   if (permissions.length === 0) {
     return <p className="muted">当前系统不需要额外授权。</p>;
   }
@@ -180,7 +210,7 @@ export function PermissionList({ permissions, hint }: { permissions: PermissionV
                 <button className="btn small primary" onClick={() => api.requestPermission(p.kind)}>
                   授权
                 </button>
-                <button className="btn small" onClick={() => api.openPermissionSettings(p.kind)}>
+                <button className="btn small" onClick={() => api.openPermissionSettings(p.kind).catch((e) => onError?.(String(e)))}>
                   打开设置
                 </button>
               </span>

@@ -6,7 +6,7 @@ pkgrel=1
 pkgdesc="流界 FlowAcross：一套键鼠，自由跨屏（局域网键鼠共享）"
 arch=('x86_64')
 url="https://github.com/Hearion/FlowAcross-releases"
-license=('LicenseRef-proprietary')
+license=('GPL-3.0-only')
 # 和 .deb 的依赖对应：WebView、GTK、托盘图标；xkbcommon 是 Wayland 上注入键盘用的。
 depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'libxkbcommon')
 provides=('flowacross')

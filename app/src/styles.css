@@ -2295,3 +2295,193 @@ kbd {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 连不上的原因和排查步骤（设备详情、「添加设备」窗口） */
+.problem {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-group);
+  background: var(--warn-soft);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.6;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.problem-summary {
+  font-weight: 600;
+}
+
+.problem-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding-left: 1.4em;
+  color: var(--fg-2);
+  list-style: decimal;
+}
+
+.nearby-list li.with-problem {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+.nearby-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 文字里的链接按钮（「修改快捷键」） */
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.link:hover {
+  text-decoration: underline;
+}
+
+.keys-stack {
+  display: inline-flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+/* 设置 › 快捷键 */
+.settings-subtitle {
+  margin-top: 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-note.warn {
+  padding: 8px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: var(--r-group);
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.recorder-wrap {
+  display: inline-flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.recorder-wrap small {
+  font-size: 12px;
+}
+
+.recorder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 96px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  outline: none;
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color var(--t-fast),
+    box-shadow var(--t-fast);
+}
+
+.recorder:hover {
+  border-color: var(--fg-3);
+}
+
+.recorder:focus-visible,
+.recorder.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.recorder-empty {
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+.recorder-hint {
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.setting.muted {
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+.mapping-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mapping-arrow,
+.mapping-to {
+  color: var(--fg-3);
+  font-size: 13px;
+}
+
+.select {
+  height: 34px;
+  max-width: 180px;
+  padding: 0 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  outline: none;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+
+.select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.mapping-row > .btn.ghost-link {
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.settings-note code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 授权倒计时里的秒数：等宽数字，数字变化时文字不抖。 */
+.countdown {
+  font-variant-numeric: tabular-nums;
+}

@@ -11,7 +11,8 @@ use crate::engine::{Engine, StateView, parse_permission};
 
 #[tauri::command]
 pub fn get_state(engine: State<'_, Engine>) -> StateView {
-    engine.view()
+    // 界面主动来要（打开窗口、从系统设置回来）：权限状态重新查，不用一秒内的缓存。
+    engine.fresh_view()
 }
 
 #[tauri::command]
@@ -37,6 +38,24 @@ pub fn set_locked(engine: State<'_, Engine>, locked: bool) {
 #[tauri::command]
 pub fn set_device_paused(engine: State<'_, Engine>, device: DeviceId, paused: bool) {
     engine.set_device_paused(&device, paused);
+}
+
+/// 把键鼠切到指定的设备（本机的 ID 表示回到本机）。失败时返回给用户看的原因。
+#[tauri::command]
+pub fn switch_to_device(engine: State<'_, Engine>, device: DeviceId) -> Result<(), String> {
+    engine.switch_to(&device)
+}
+
+/// 设置页开始 / 结束录制快捷键：录制期间不响应任何快捷键，按下的键原样交给界面。
+#[tauri::command]
+pub fn set_hotkeys_suspended(engine: State<'_, Engine>, suspended: bool) {
+    engine.set_hotkeys_suspended(suspended);
+}
+
+/// 重新申请系统授权（Linux 的 GNOME / KDE：捕获和控制键鼠要在系统弹窗里同意）。
+#[tauri::command]
+pub fn retry_authorization(engine: State<'_, Engine>) {
+    engine.retry_authorization();
 }
 
 /// 请一台已连接的设备点亮屏幕。失败时返回给用户看的原因。
@@ -81,7 +100,7 @@ pub fn remove_device(engine: State<'_, Engine>, device: DeviceId) {
 /// 申请权限。macOS 的授权弹窗只会出现一次（拒绝过或问过之后再调用不会有任何反应），
 /// 所以申请后仍未授权时，直接打开系统设置里对应的页面。
 #[tauri::command]
-pub fn request_permission(engine: State<'_, Engine>, kind: String) -> StateView {
+pub fn request_permission(engine: State<'_, Engine>, kind: String) {
     if let Some(p) = parse_permission(&kind) {
         let perms = flow_platform::permissions();
         perms.request(p);
@@ -89,7 +108,8 @@ pub fn request_permission(engine: State<'_, Engine>, kind: String) -> StateView 
             let _ = perms.open_settings(p);
         }
     }
-    engine.view()
+    // 新的授权状态通过状态事件推给界面。
+    engine.refresh_view();
 }
 
 /// 用系统文件管理器打开目录。

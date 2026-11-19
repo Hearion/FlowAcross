@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const dryRun = process.argv.includes("--dry-run");
 const env = (name, required = true) => {
@@ -121,6 +122,13 @@ async function main() {
   const release = await (await github(releaseId ? `${api}/releases/${releaseId}` : `${api}/releases/tags/${tagInput}`, token)).json();
   const tag = release.tag_name;
   const version = tag.replace(/^v/, "");
+  // 发布信息里附带的文件列表只有第一页（30 个），单独分页取全。
+  release.assets = [];
+  for (let page = 1; ; page++) {
+    const batch = await (await github(`${api}/releases/${release.id}/assets?per_page=100&page=${page}`, token)).json();
+    release.assets.push(...batch);
+    if (batch.length < 100) break;
+  }
   console.log(`发布 ${tag}（${release.draft ? "草稿" : "已发布"}${prerelease ? "，测试版" : ""}），${release.assets.length} 个文件`);
   if (release.prerelease && !prerelease) {
     fail(`${tag} 在发布仓库里是测试版，补传时要勾选「这是测试版」，否则会把应用内更新指向测试版。`);
@@ -254,6 +262,7 @@ async function mirror({ token, release, tag, version, prerelease, baseUrl, prefi
   console.log(`\n完成：${check} 可以访问。`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+// 用 fileURLToPath：路径里有空格或中文时，URL 的 pathname 是转义过的，和命令行给的路径对不上，脚本会什么都不做就退出。
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((e) => fail(e.message));
 }

@@ -1,17 +1,19 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { PermissionList } from "./Dialogs";
+import { HotkeySettings } from "./HotkeySettings";
 import { ClipboardSetting, CrossScreenSettings, WinKeysSetting, useDeviceNameInput } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
 import { ChevronLeftIcon, Logo, SETTINGS_ICONS, Toggle } from "./ui";
-import { ProgressBar, type Updater } from "./Updater";
+import { ProgressBar, installNote, type Updater } from "./Updater";
 
-export type SettingsSection = "general" | "permissions" | "crossing" | "clipboard" | "updates" | "about";
+export type SettingsSection = "general" | "permissions" | "crossing" | "hotkeys" | "clipboard" | "updates" | "about";
 
 const NAV: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "通用" },
   { id: "permissions", label: "系统权限" },
   { id: "crossing", label: "跨屏与键鼠" },
+  { id: "hotkeys", label: "快捷键" },
   { id: "clipboard", label: "剪贴板" },
   { id: "updates", label: "软件更新" },
   { id: "about", label: "关于" },
@@ -23,9 +25,11 @@ interface Props {
   section: SettingsSection;
   onSection: (s: SettingsSection) => void;
   onClose: () => void;
+  /** 操作失败时显示原因。 */
+  onError: (msg: string) => void;
 }
 
-export function SettingsPage({ state, updater, section, onSection, onClose }: Props) {
+export function SettingsPage({ state, updater, section, onSection, onClose, onError }: Props) {
   const update = (patch: Partial<Settings>) => api.updateSettings({ ...state.settings, ...patch });
   const missing = state.permissions.filter((p) => p.state !== "granted" && p.state !== "not_applicable").length;
 
@@ -70,6 +74,13 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
                   onChange={(v) => update({ keep_awake: v })}
                 />
               </div>
+              <div className="setting inline">
+                <div className="setting-text">
+                  <span>同步设备布局</span>
+                  <small>在任意一台电脑上拖动屏幕，其他电脑的布局跟着变（对方需要 0.2.4 或更新版本）</small>
+                </div>
+                <Toggle label="同步设备布局" checked={state.settings.sync_layout} onChange={(v) => update({ sync_layout: v })} />
+              </div>
             </Panel>
             {state.local.os === "MacOs" && (
               <p className="settings-note">
@@ -81,7 +92,7 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
 
         {section === "permissions" && (
           <Section title="系统权限" desc="流界需要这些权限才能在电脑之间传递键盘和鼠标。点「授权」后如果系统没有弹窗，会直接打开系统设置的对应页面，在列表里打开流界的开关即可。">
-            <PermissionList permissions={state.permissions} hint={state.permission_hint} />
+            <PermissionList permissions={state.permissions} hint={state.permission_hint} onError={onError} />
             <p className="settings-note">
               授予「输入监控」后，macOS 可能要求重新打开流界才会生效。设置页回到前台时会自动刷新授权状态。
             </p>
@@ -95,7 +106,7 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
         {section === "crossing" && (
           <Section title="跨屏与键鼠">
             <Panel>
-              <CrossScreenSettings settings={state.settings} update={update} unsupported={state.unsupported} />
+              <CrossScreenSettings settings={state.settings} update={update} unsupported={state.unsupported} onHotkeys={() => onSection("hotkeys")} />
             </Panel>
             {state.local.os === "MacOs" ? (
               <>
@@ -115,6 +126,12 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
           </Section>
         )}
 
+        {section === "hotkeys" && (
+          <Section title="快捷键" desc="用键盘把键鼠切到别的电脑，或者让别的电脑收到指定的按键。这里设置的是这台电脑的键盘。">
+            <HotkeySettings state={state} update={(hotkeys) => update({ hotkeys })} />
+          </Section>
+        )}
+
         {section === "clipboard" && (
           <Section title="剪贴板" desc="内容通过加密连接直接在电脑之间传输，不经过任何服务器。">
             <Panel>
@@ -125,7 +142,7 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
                   <small>{state.receive_dir ?? "找不到本机的下载文件夹，暂时无法接收文件"}</small>
                 </div>
                 {state.receive_dir && (
-                  <button className="btn small" onClick={() => api.openReceivedFiles()}>
+                  <button className="btn small" onClick={() => api.openReceivedFiles().catch((e) => onError(String(e)))}>
                     打开文件夹
                   </button>
                 )}
@@ -158,6 +175,12 @@ export function SettingsPage({ state, updater, section, onSection, onClose }: Pr
             <p className="settings-note">
               更新时流界会先断开与其他电脑的键鼠共享，安装完成后自动重新打开并重新连接。两台电脑请尽量保持相同版本。
             </p>
+            {state.local.os === "Linux" && (
+              <p className="settings-note">
+                Linux 上按安装方式更新：AppImage 直接替换文件；deb 和 Arch 安装包下载并校验签名后交给系统的包管理器安装，这时系统会弹出授权窗口。
+                Sway、Hyprland 等桌面要有 polkit 认证代理在运行才会弹窗。自己编译或别人打包的版本不会自动安装，只提示有新版本。
+              </p>
+            )}
           </Section>
         )}
 
@@ -335,7 +358,7 @@ function UpdateStatus({ version, updater }: { version: string; updater: Updater 
       status = "已是最新版本";
       break;
     case "available":
-      status = `新版本 ${info?.version} 可以安装${info?.date ? `（${info.date} 发布）` : ""}`;
+      status = `新版本 ${info?.version} ${info?.manual ? "已发布" : "可以安装"}${info?.date ? `（${info.date} 发布）` : ""}`;
       break;
     case "downloading":
       status = `正在下载 ${info?.version}${progress !== null ? `（${Math.round(progress * 100)}%）` : "…"}`;
@@ -355,7 +378,14 @@ function UpdateStatus({ version, updater }: { version: string; updater: Updater 
       {phase === "checking" ? "检查中…" : "检查更新"}
     </button>
   );
-  if (phase === "available" || (phase === "error" && installFailed && !needsRestart)) {
+  // 只在查到了新版本时显示：检查失败（phase 为 error）时要留着「检查更新」按钮可以重试。
+  if (info?.manual && phase === "available") {
+    action = (
+      <button className="btn small primary" onClick={() => api.openDownloadPage()}>
+        打开下载页
+      </button>
+    );
+  } else if (phase === "available" || (phase === "error" && installFailed && !needsRestart)) {
     action = (
       <button className="btn small primary" onClick={updater.install}>
         {phase === "error" ? "重试" : "立即更新"}
@@ -375,6 +405,7 @@ function UpdateStatus({ version, updater }: { version: string; updater: Updater 
         <div className="setting-text">
           <span>当前版本 {version}</span>
           {status && <small className={phase === "error" ? "text-danger" : undefined}>{status}</small>}
+          {phase === "available" && info && installNote(info) && <small>{installNote(info)}</small>}
         </div>
         {action}
       </div>

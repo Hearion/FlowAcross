@@ -8,7 +8,7 @@
 
 ## 验证
 
-按 [CLAUDE.md](CLAUDE.md) 运行格式、Clippy、Rust 测试和前端构建。依赖或锁文件变化后运行 `node scripts/generate-third-party-notices.mjs`，检查第三方声明和源码获取方式。
+按 [CLAUDE.md](CLAUDE.md) 运行格式、Clippy、Rust 测试和前端构建；改了 `scripts/` 下的发版脚本时再跑 `node --test "scripts/*.test.mjs"`（CI 也会跑）。依赖或锁文件变化后运行 `node scripts/generate-third-party-notices.mjs`，检查第三方声明和源码获取方式。
 
 ## 仓库与签名权限
 

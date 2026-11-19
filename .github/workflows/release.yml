@@ -2,7 +2,8 @@ name: 发布新版本
 
 # 推送 v* 标签时运行：校验版本号 → 打包 Windows、macOS 和 Linux → 发布到公开的发布仓库。
 # 发布前把安装包和更新文件复制一份到阿里云 OSS（scripts/mirror-to-oss.mjs），国内下载和应用内更新走 OSS；
-# 已安装的流界（Windows、macOS）先读 OSS 上的 latest.json，读不到再读发布仓库的。Linux 版没有接入应用内更新。
+# 已安装的流界先读 OSS 上的 latest.json，读不到再读发布仓库的。Linux 的三种安装包（AppImage、deb、Arch 包）
+# 在打包后单独签名，由发布任务写进 latest.json（scripts/add-linux-updates.mjs）。
 # 一次性配置和发版步骤见 docs/release.md。
 #
 # 版本号带后缀的标签（如 v0.2.2-beta.1）是测试版：发布成 Pre-release，不会成为 latest，
@@ -261,7 +262,8 @@ jobs:
           includeUpdaterJson: true
           args: ${{ matrix.args }}
 
-  # Linux 安装包（deb、AppImage、Arch 包）。没有接入应用内自动更新，不生成更新包、不写 latest.json。
+  # Linux 安装包（deb、AppImage、Arch 包）。这里不写 latest.json（和另外两个打包任务同时改会互相覆盖），
+  # 只给三个安装包签名并把签名传上去；发布任务再把它们写进 latest.json。
   build-linux:
     name: 打包 Linux
     needs: prepare
@@ -302,7 +304,8 @@ jobs:
         working-directory: app
         run: npm ci
 
-      # 不生成更新包、不写 latest.json：Linux 版不走应用内自动更新。
+      # 不让 tauri-action 写 latest.json：它会写成 linux-x86_64 / linux-x86_64-deb，旧版本的流界
+      # 在 Arch 上会照着去装 deb（见 scripts/add-linux-updates.mjs 开头的说明）。
       - name: 打包并上传
         uses: tauri-apps/tauri-action@v0
         env:
@@ -321,7 +324,36 @@ jobs:
       - name: 打 Arch 安装包
         run: scripts/build-arch-pkg.sh target/release/bundle/deb/*.deb "$GITHUB_REF_NAME" arch-package
 
-      - name: 上传 Arch 安装包
+      # 应用内更新下载安装包后要验签名。三个安装包都用更新私钥签一遍，签名文件放到同一个目录里一起上传。
+      - name: 给 Linux 安装包签名
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(../target/release/bundle/deb/*.deb ../target/release/bundle/appimage/*.AppImage ../arch-package/*.pkg.tar.zst)
+          if [ "${#files[@]}" -ne 3 ]; then
+            echo "::error::应当正好有 3 个 Linux 安装包（deb、AppImage、Arch 包），实际找到 ${#files[@]} 个：${files[*]:-无}"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            # 私钥从环境变量读；密码显式传入，没有密码时是空字符串，不会停下来等人输入。
+            npx tauri signer sign --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" "$f" > /dev/null
+            if [ ! -s "$f.sig" ]; then
+              echo "::error::没有生成 $(basename "$f") 的签名文件。"
+              exit 1
+            fi
+            # Arch 包的签名本来就生成在 arch-package 里，不用复制（把文件复制到它自己会报错）。
+            case "$f" in
+              ../arch-package/*) ;;
+              *) cp "$f.sig" ../arch-package/ ;;
+            esac
+            echo "已签名 $(basename "$f")"
+          done
+
+      - name: 上传 Arch 安装包和三个签名
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
@@ -335,14 +367,14 @@ jobs:
             const release_id = Number(process.env.RELEASE_ID);
             const dir = 'arch-package';
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner, repo, release_id });
-            for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.pkg.tar.zst'))) {
+            for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.pkg.tar.zst') || n.endsWith('.sig'))) {
               // 重新运行时先删掉上次传的同名文件。
               const old = assets.find((a) => a.name === name);
               if (old) await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: old.id });
               const data = fs.readFileSync(path.join(dir, name));
               await github.rest.repos.uploadReleaseAsset({
                 owner, repo, release_id, name, data,
-                headers: { 'content-type': 'application/zstd', 'content-length': data.length },
+                headers: { 'content-type': name.endsWith('.sig') ? 'text/plain' : 'application/zstd', 'content-length': data.length },
               });
               core.info(`已上传 ${name}（${(data.length / 1048576).toFixed(1)} MB）`);
             }
@@ -354,6 +386,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      # 三个打包任务都结束了，latest.json 不会再被别人改：把 Linux 的三种安装包写进去。
+      - name: 把 Linux 安装包写进更新清单
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          RELEASE_REPO: ${{ env.RELEASE_OWNER }}/${{ env.RELEASE_REPO }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        run: node scripts/add-linux-updates.mjs
 
       - name: 检查草稿
         uses: actions/github-script@v8
@@ -379,10 +419,19 @@ jobs:
             const platforms = Object.keys(latest.platforms ?? {});
             core.info(`latest.json：版本 ${latest.version}，平台 ${platforms.join(', ')}`);
             // 两个打包任务同时写 latest.json 时可能互相覆盖，缺平台就不发布，重新运行失败的任务即可。
-            const required = ['windows-x86_64', 'darwin-aarch64', 'darwin-x86_64'];
+            const required = [
+              'windows-x86_64', 'darwin-aarch64', 'darwin-x86_64',
+              'linux-x86_64-appimage', 'linux-x86_64-dpkg', 'linux-x86_64-pacman',
+            ];
             const missing = required.filter((p) => !platforms.includes(p));
             if (missing.length) {
               core.setFailed(`latest.json 缺少 ${missing.join(', ')}，草稿未发布。在 Actions 页面重新运行全部任务即可。`);
+              return;
+            }
+            // 这两项会让 0.2.3 及更早、装在 Arch 上的流界去装 deb（见 scripts/add-linux-updates.mjs）。
+            const unsafe = ['linux-x86_64', 'linux-x86_64-deb'].filter((p) => platforms.includes(p));
+            if (unsafe.length) {
+              core.setFailed(`latest.json 里不应该有 ${unsafe.join(', ')}，草稿未发布。`);
               return;
             }
             // Linux 安装包也要齐。

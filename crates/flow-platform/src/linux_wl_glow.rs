@@ -209,6 +209,11 @@ fn play(
         surface.damage(0, 0, i32::MAX, i32::MAX);
         surface.commit();
         conn.flush()?;
+        // 把合成器发来的事件读进来再分发（不等待）：只分发不读的话，窗口中途被关掉
+        // （显示器拔了）在这个循环里永远看不到。
+        if let Some(guard) = queue.prepare_read() {
+            let _ = guard.read();
+        }
         queue.dispatch_pending(&mut state)?;
         std::thread::sleep(FRAME);
     }

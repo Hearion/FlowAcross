@@ -76,6 +76,22 @@ unsafe extern "C" {
 ///
 /// 直接调用 CoreGraphics：core-graphics 库的 `all_display_modes` 会把数组中借用的元素
 /// 当作自有对象释放，导致重复释放崩溃。
+/// 面板的原生分辨率不会变，而查一次要列出这块屏幕的全部显示模式：按屏幕编号记住结果，
+/// 引擎每隔几秒枚举一次显示器时不用每次都查。已经不在的屏幕从表里清掉。
+fn cached_native_resolution(id: u32, active: &[u32]) -> Option<(u32, u32)> {
+    /// (屏幕编号, 查到的原生分辨率)。
+    type Entry = (u32, Option<(u32, u32)>);
+    static CACHE: std::sync::Mutex<Vec<Entry>> = std::sync::Mutex::new(Vec::new());
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache.retain(|(known, _)| active.contains(known));
+    if let Some((_, found)) = cache.iter().find(|(known, _)| *known == id) {
+        return *found;
+    }
+    let found = native_resolution(id);
+    cache.push((id, found));
+    found
+}
+
 fn native_resolution(id: u32) -> Option<(u32, u32)> {
     // SAFETY: Copy 规则返回 +1 的数组，用完 CFRelease；数组元素按 Get 规则借用，不释放。
     unsafe {
@@ -112,7 +128,7 @@ impl DisplayProvider for MacDisplays {
             .map_err(|e| PlatformError::Os(format!("CGGetActiveDisplayList 失败（{e}）")))?;
         let mut external = 0;
         let mut out = Vec::new();
-        for id in ids {
+        for &id in &ids {
             let d = CGDisplay::new(id);
             // 镜像显示器与主屏内容相同，不作为独立屏幕。
             if d.mirrors_display() != 0 {
@@ -140,7 +156,7 @@ impl DisplayProvider for MacDisplays {
                 rect: Rect::new(b.origin.x, b.origin.y, b.size.width, b.size.height),
                 scale,
                 primary: d.is_main(),
-                native: native_resolution(id),
+                native: cached_native_resolution(id, &ids),
             });
         }
         Ok(out)

@@ -23,6 +23,8 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGGetOnlineDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayIsAsleep(display: u32) -> u32;
+    /// 当前登录会话的信息；没有图形会话时返回空指针。返回的字典归调用方所有。
+    fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
 }
 
 /// `kIOPMUserActiveLocal`：坐在电脑前的用户有操作。
@@ -101,9 +103,41 @@ pub fn displays_asleep() -> bool {
         .any(|&id| unsafe { CGDisplayIsAsleep(id) } != 0)
 }
 
+/// 现在是不是停在锁屏界面。会话字典里有 `CGSSessionScreenIsLocked` 且为真时就是锁着；
+/// 没锁时系统不写这一项。拿不到会话信息（没有图形会话）时返回 `None`。
+pub fn screen_locked() -> Option<bool> {
+    use core_foundation::base::CFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+
+    // SAFETY: 无参数；返回值按"创建规则"归我们所有，下面交给 CFDictionary 负责释放。
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: raw 是刚拿到的、非空的字典。
+    let dict: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_create_rule(raw) };
+    let key = CFString::from_static_string("CGSSessionScreenIsLocked");
+    let locked = dict
+        .find(&key)
+        .and_then(|v| v.downcast::<CFBoolean>())
+        .is_some_and(bool::from);
+    Some(locked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 查询锁屏状态不会出错。不断言结果：跑测试的时候屏幕可能正锁着（人不在电脑前），
+    /// CI 上没有图形会话时查不到。用 `--nocapture` 可以看到查到的值。
+    #[test]
+    fn lock_state_can_be_queried() {
+        let locked = screen_locked();
+        eprintln!("screen_locked() = {locked:?}");
+        // 连着查两次结果一致，说明读到的是系统的状态而不是偶然值。
+        assert_eq!(screen_locked(), locked);
+    }
 
     /// 断言能建、能重复建、能释放；查询熄屏状态不会出错（CI 上没有真屏幕，不断言结果）。
     #[test]

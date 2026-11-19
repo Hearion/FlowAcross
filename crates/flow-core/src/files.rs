@@ -91,15 +91,24 @@ impl FileOffer {
         match msg {
             Message::FileOffer(offer) => Some(Self {
                 image: false,
-                ..offer
+                ..offer.cleaned()
             }),
             // 图片只能是单个文件；撤回一律走 `FileOffer`。
             Message::ImageOffer(offer) => Some(Self {
                 image: offer.items == 1 && offer.files == 1,
-                ..offer
+                ..offer.cleaned()
             }),
             _ => None,
         }
+    }
+
+    /// 对端发来的名称要显示在界面上：最多留 [`MAX_LISTED`] 个，去掉控制字符并截短。
+    fn cleaned(mut self) -> Self {
+        self.names.truncate(MAX_LISTED);
+        for name in &mut self.names {
+            *name = crate::protocol::clean_name(name);
+        }
+        self
     }
 
     pub fn is_withdrawn(&self) -> bool {
@@ -137,9 +146,10 @@ pub fn is_junk(name: &str) -> bool {
     matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini") || name.starts_with("._")
 }
 
-const RESERVED: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+const RESERVED: [&str; 26] = [
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+    "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CONIN$", "CONOUT$",
 ];
 
 /// 把一段文件名改成在 macOS 和 Windows 上都合法的名字：替换 Windows 不允许的字符和控制字符，
@@ -175,6 +185,10 @@ pub fn sanitize_component(name: &str) -> String {
         while s.ends_with(['.', ' ']) {
             s.pop();
         }
+        // 前 255 个字节全是点和空格时会被去光：空名字拼到路径上就是目录本身。
+        if s.is_empty() {
+            s.push('_');
+        }
     }
     s
 }
@@ -208,6 +222,15 @@ pub fn unique_name(name: &str, dir: bool, exists: impl Fn(&str) -> bool) -> Stri
         .map(|i| format!("{stem} ({i}){ext}"))
         .find(|c| !exists(c))
         .expect("总能找到不重名的名字")
+}
+
+/// 对端给的出错原因最多显示这么多个字符。
+const MAX_REASON_CHARS: usize = 200;
+
+/// 清理对端给的出错原因（直接显示给用户）：去掉控制字符，截到 [`MAX_REASON_CHARS`] 个字符。
+fn clean_reason(reason: &str) -> String {
+    let text: String = reason.chars().filter(|c| !c.is_control()).collect();
+    text.trim().chars().take(MAX_REASON_CHARS).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -253,10 +276,12 @@ pub struct Incoming {
 
 impl Incoming {
     /// 已收到的文件字节数。
+    #[cfg(test)]
     pub fn received(&self) -> u64 {
         self.received
     }
 
+    #[cfg(test)]
     pub fn finished(&self) -> bool {
         self.finished
     }
@@ -275,7 +300,9 @@ impl Incoming {
                     return Err(ReceiveError::TooMany);
                 }
                 let parts =
-                    parse_rel_path(path).ok_or_else(|| ReceiveError::BadPath(path.clone()))?;
+                    // 报错会显示给用户：路径是对端给的，可以任意长、带控制字符。
+                    parse_rel_path(path)
+                        .ok_or_else(|| ReceiveError::BadPath(crate::protocol::clean_name(path)))?;
                 if *dir {
                     return Ok(ReceiveStep::MakeDir(parts));
                 }
@@ -307,7 +334,7 @@ impl Incoming {
                 self.finished = true;
                 Ok(ReceiveStep::Finished)
             }
-            Message::FileError { reason } => Err(ReceiveError::Remote(reason.clone())),
+            Message::FileError { reason } => Err(ReceiveError::Remote(clean_reason(reason))),
             _ => Err(ReceiveError::Unexpected),
         }
     }
@@ -400,6 +427,37 @@ impl OfferBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_that_sanitize_to_nothing_get_a_placeholder() {
+        // 截断到 255 字节后全是点：去光之后不能是空名字。
+        let name = format!("{}x", ".".repeat(255));
+        assert_eq!(sanitize_component(&name), "_");
+        assert_eq!(sanitize_component("COM0"), "_COM0");
+        assert_eq!(sanitize_component("conin$.txt"), "_conin$.txt");
+    }
+
+    #[test]
+    fn offers_from_the_network_are_trimmed_for_display() {
+        let offer = FileOffer {
+            id: 1,
+            names: (0..1000).map(|i| format!("文件\u{7}{i}")).collect(),
+            items: 1000,
+            files: 1000,
+            bytes: 1,
+            image: false,
+        };
+        let got = FileOffer::from_message(Message::FileOffer(offer)).unwrap();
+        assert_eq!(got.names.len(), MAX_LISTED);
+        assert_eq!(got.names[0], "文件0");
+        // 出错原因同样清理、截短。
+        assert_eq!(
+            clean_reason(&format!(" 坏了\u{0}{} ", "x".repeat(500)))
+                .chars()
+                .count(),
+            MAX_REASON_CHARS
+        );
+    }
 
     fn dev(s: &str) -> DeviceId {
         DeviceId(s.into())

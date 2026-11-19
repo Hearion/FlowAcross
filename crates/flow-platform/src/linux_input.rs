@@ -62,6 +62,8 @@ struct Shared {
     wake_atom: xproto::Atom,
     pointer: u16,
     keyboard: u16,
+    /// 连接所在的屏幕编号（`DISPLAY=:0.1` 这类多 screen 配置下不是 0）。
+    screen: usize,
     /// 引擎要求锁定（正在控制远端）。
     captured: AtomicBool,
     /// 已经抓住键盘和指针。`captured` 为真而它为假：被别的程序占着，等下一个事件重试。
@@ -204,7 +206,7 @@ impl InputCapture for X11Capture {
     fn start(&mut self, handler: CaptureHandler) -> Result<(), PlatformError> {
         self.stop();
         let shared = Arc::new(open(self.accept_xtest)?);
-        if let Ok(list) = linux::monitors_on(&shared.conn, 0) {
+        if let Ok(list) = linux::monitors_on(&shared.conn, shared.screen) {
             linux::update_monitors(list);
         }
         let for_thread = shared.clone();
@@ -322,6 +324,7 @@ fn open(accept_xtest: bool) -> Result<Shared, PlatformError> {
 
     Ok(Shared {
         conn,
+        screen,
         root,
         wake,
         wake_atom,
@@ -496,6 +499,10 @@ impl Loop {
             (pos.0 - lx, pos.1 - ly, pos)
         } else {
             let (dx, dy) = xy_from_valuators(mask, values);
+            // 只带滚动轴的原始事件（滚轮每滚一格都有）没有位移：别为它去问一次光标位置。
+            if dx == 0.0 && dy == 0.0 {
+                return;
+            }
             // 锁定期间位置没有意义，省掉一次往返。
             let pos = if captured {
                 self.last_pos.unwrap_or((0.0, 0.0))

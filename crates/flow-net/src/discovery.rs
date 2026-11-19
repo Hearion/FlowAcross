@@ -76,6 +76,10 @@ fn scoped_socket_addr(ip: IpAddr, port: u16, scope_id: u32) -> Option<SocketAddr
     if ip.is_unspecified() || ip.is_multicast() {
         return None;
     }
+    // 169.254.x.x 是网卡没拿到地址时自己分配的，连不上，每试一个都要白等到超时。
+    if matches!(ip, IpAddr::V4(v4) if v4.is_link_local()) {
+        return None;
+    }
     match ip {
         // fe80::/10 的网卡编号来自本机收到 mDNS 的接口，不能丢弃或使用对端的编号。
         IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
@@ -140,7 +144,14 @@ impl Discovery {
                                 continue;
                             }
                             let addrs = resolved_addrs(s.addresses.into_iter(), s.port);
-                            by_fullname.insert(s.fullname.clone(), device.clone());
+                            // 同一个服务名换了设备 ID：原来那台如果没有别的服务名指着，就是消失了。
+                            let replaced = by_fullname.insert(s.fullname.clone(), device.clone());
+                            if let Some(old) = replaced.filter(|old| old != &device)
+                                && !by_fullname.values().any(|d| d == &old)
+                                && tx.send(DiscoveryEvent::Lost(old)).is_err()
+                            {
+                                break;
+                            }
                             DiscoveryEvent::Found(Found {
                                 device,
                                 name: Some(clean_name(
@@ -156,8 +167,12 @@ impl Discovery {
                         }
                         ServiceEvent::ServiceRemoved(_, fullname) => {
                             match by_fullname.remove(&fullname) {
-                                Some(d) => DiscoveryEvent::Lost(d),
-                                None => continue,
+                                // 还有别的服务名指着同一台设备时它还在：有人用另一个名字冒充它的
+                                // ID 再撤掉，不能把真的那台也报成消失。
+                                Some(d) if !by_fullname.values().any(|other| other == &d) => {
+                                    DiscoveryEvent::Lost(d)
+                                }
+                                _ => continue,
                             }
                         }
                         _ => continue,

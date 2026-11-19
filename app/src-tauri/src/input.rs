@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use flow_core::Point;
 use flow_core::cursor::VirtualCursor;
+use flow_core::hotkeys::{HotkeyAction, Hotkeys, KeyCombo};
 use flow_core::keys::{InputEvent, InputRouter, KeyCode, Modifiers, Route};
 use flow_core::layout::{Crossing, DeviceId, DisplayId, EdgeMapping, Layout};
 use flow_core::protocol::Message;
@@ -59,6 +60,10 @@ pub struct ControllerConfig {
     pub enabled: bool,
     /// 会回复心跳回执的设备（版本不低于 `SECURE_SINCE`）。只对它们做快速断线检测。
     pub acks: HashSet<DeviceId>,
+    /// 这台电脑上的快捷键（左右切换、切到指定电脑、快捷键映射）。
+    pub hotkeys: Hotkeys,
+    /// 认得 `Message::KeyStroke` 的设备（版本不低于 `REMOTE_ACTIONS_SINCE`），快捷键映射只发给它们。
+    pub remote_keys: HashSet<DeviceId>,
 }
 
 struct Active {
@@ -101,6 +106,12 @@ pub struct Controller {
     caps_probe: Option<CapsProbe>,
     /// 按滚轮速度换算后不足一个单位的余量（横向、纵向，单位是 1/100 个滚动单位）。
     wheel_rest: (i32, i32),
+    /// 暂时不响应快捷键：设置页正在录制新的快捷键，按下的键要原样交给界面。
+    hotkeys_suspended: bool,
+    /// 物理上正按着的修饰键。单独记一份，不从按键路由里算：键鼠从一台远端切走时，路由会把
+    /// 在那台远端按下的键全部"释放"并忘掉，而手其实还按着——不松开 Ctrl+Alt 接着按第二个
+    /// 快捷键时就对不上了，主键还会被当成普通键打到新的那台电脑上。
+    mods_down: HashSet<KeyCode>,
 }
 
 /// 查询本机大写锁定是否打开；查不到时返回 `None`。
@@ -176,6 +187,8 @@ impl Controller {
             caps: None,
             caps_probe: None,
             wheel_rest: (0, 0),
+            hotkeys_suspended: false,
+            mods_down: HashSet::new(),
         }
     }
 
@@ -188,6 +201,11 @@ impl Controller {
     /// 就发一次 [`ControlEvent::LocalInput`]。
     pub fn set_away(&mut self, away: bool) {
         self.away = away;
+    }
+
+    /// 设置页录制快捷键期间暂停响应快捷键（否则刚按下的组合键会直接触发切换）。
+    pub fn set_hotkeys_suspended(&mut self, suspended: bool) {
+        self.hotkeys_suspended = suspended;
     }
 
     /// 正在控制的远端设备；`None` 表示键鼠在本机。
@@ -256,9 +274,17 @@ impl Controller {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    /// 物理上正按着的修饰键。
+    fn held_modifiers(&self) -> Modifiers {
+        self.mods_down
+            .iter()
+            .filter_map(|k| k.modifier())
+            .fold(Modifiers::NONE, |acc, m| acc | m)
+    }
+
     fn held(&self) -> HeldInput {
         HeldInput {
-            modifiers: self.router.held_modifiers(),
+            modifiers: self.held_modifiers(),
             buttons: self.router.any_button_held(),
         }
     }
@@ -329,21 +355,26 @@ impl Controller {
     }
 
     fn key(&mut self, code: KeyCode, down: bool, repeat: bool) -> Verdict {
+        if code.modifier().is_some() {
+            if down {
+                self.mods_down.insert(code);
+            } else {
+                self.mods_down.remove(&code);
+            }
+        }
         if self.swallow.contains(&code) {
             if !down {
                 self.swallow.remove(&code);
             }
             return Verdict::Suppress;
         }
-        // 快捷键：Ctrl + Alt（Mac 上 ⌃⌥）+ ←/→ 切到左右相邻的电脑。
+        // 快捷键（默认 Ctrl + Alt + ←/→ 切到左右相邻的电脑，可以在设置里改）。修饰键要恰好相等。
+        // 动作没做成时（没有那台电脑、对方没连着）不算快捷键，按键照常交给原来的去处。
         if down
             && !repeat
-            && (code == KeyCode::LEFT || code == KeyCode::RIGHT)
-            && self
-                .router
-                .held_modifiers()
-                .contains(Modifiers::CTRL | Modifiers::ALT)
-            && self.hotkey_switch(code == KeyCode::RIGHT)
+            && !self.hotkeys_suspended
+            && let Some(action) = self.cfg.hotkeys.action(self.held_modifiers(), code)
+            && self.run_hotkey(action)
         {
             self.swallow.insert(code);
             return Verdict::Suppress;
@@ -530,41 +561,47 @@ impl Controller {
         let _ = self.events.send(ControlEvent::Changed);
     }
 
-    /// 快捷键切换：按设备在布局中的水平位置，切到左边或右边最近的一台。
-    fn hotkey_switch(&mut self, right: bool) -> bool {
-        if !self.cfg.enabled || self.cfg.policy.locked || self.cfg.outputs.is_empty() {
+    fn run_hotkey(&mut self, action: HotkeyAction) -> bool {
+        match action {
+            HotkeyAction::SwitchLeft => self.hotkey_switch(false),
+            HotkeyAction::SwitchRight => self.hotkey_switch(true),
+            HotkeyAction::SwitchTo(device) => self.switch_to_device(&device),
+            HotkeyAction::Send { device, keys } => self.send_keys(&device, keys),
+        }
+    }
+
+    /// 快捷键映射：让 `device` 按一下 `keys`，键鼠不用切过去。对方没连着、被暂停、
+    /// 或版本太旧不认得这条消息时返回 `false`。锁定在本机不影响（它只限制键鼠切出去）。
+    fn send_keys(&mut self, device: &DeviceId, keys: KeyCombo) -> bool {
+        if !self.cfg.enabled || !self.cfg.remote_keys.contains(device) {
             return false;
         }
-        let layout = &self.cfg.layout;
-        let center_x = |dev: &DeviceId| {
-            let (min, max) = layout
-                .displays_of(dev)
-                .fold((f64::MAX, f64::MIN), |(lo, hi), d| {
-                    (lo.min(d.rect.left()), hi.max(d.rect.right()))
-                });
-            (min <= max).then_some((min + max) / 2.0)
-        };
-        let current = self.active_device().unwrap_or(&self.local).clone();
-        let Some(cx) = center_x(&current) else {
+        let Some(tx) = self.cfg.outputs.get(device) else {
             return false;
         };
-        let target = layout
-            .devices()
-            .into_iter()
-            .filter(|d| d != &current && (d == &self.local || self.cfg.outputs.contains_key(d)))
-            .filter_map(|d| center_x(&d).map(|x| (d, x)))
-            .filter(|(_, x)| if right { *x > cx } else { *x < cx })
-            .min_by(|a, b| (a.1 - cx).abs().total_cmp(&(b.1 - cx).abs()))
-            .map(|(d, _)| d);
-        let Some(target) = target else {
+        info!(device = %device.short(), "快捷键映射：发送按键");
+        tx.send(Message::KeyStroke { keys: keys.keys() }).is_ok()
+    }
+
+    /// 把键鼠切到指定的设备（快捷键、托盘菜单、界面按钮、对方的请求都走这里）。`target` 是本机时
+    /// 回到本机。已经在那台设备上时算成功、什么都不做；切不过去（没连着、被暂停、锁定在本机）
+    /// 时返回 `false`。
+    pub fn switch_to_device(&mut self, target: &DeviceId) -> bool {
+        if !self.cfg.enabled {
             return false;
-        };
-        if target == self.local {
+        }
+        if self.active_device().unwrap_or(&self.local) == target {
+            return true;
+        }
+        if target == &self.local {
             self.leave_to_local(None);
             return true;
         }
+        if self.cfg.policy.locked || !self.cfg.outputs.contains_key(target) {
+            return false;
+        }
         // 进入目标设备面积最大的屏幕的中央。
-        let Some(d) = layout.displays_of(&target).max_by(|a, b| {
+        let Some(d) = self.cfg.layout.displays_of(target).max_by(|a, b| {
             (a.rect.width * a.rect.height).total_cmp(&(b.rect.width * b.rect.height))
         }) else {
             return false;
@@ -576,6 +613,40 @@ impl Controller {
         let id = d.id.clone();
         self.enter(id, center, None);
         true
+    }
+
+    /// 快捷键切换：按设备在布局中的水平位置，切到左边或右边最近的一台。
+    fn hotkey_switch(&mut self, right: bool) -> bool {
+        if !self.cfg.enabled || self.cfg.policy.locked || self.cfg.outputs.is_empty() {
+            return false;
+        }
+        match self.neighbor(right) {
+            Some(target) => self.switch_to_device(&target),
+            None => false,
+        }
+    }
+
+    /// 键鼠现在所在的设备左边或右边最近的一台（按布局里的水平位置；只在本机和可控制的设备里找）。
+    pub fn neighbor(&self, right: bool) -> Option<DeviceId> {
+        let layout = &self.cfg.layout;
+        let center_x = |dev: &DeviceId| {
+            let (min, max) = layout
+                .displays_of(dev)
+                .fold((f64::MAX, f64::MIN), |(lo, hi), d| {
+                    (lo.min(d.rect.left()), hi.max(d.rect.right()))
+                });
+            (min <= max).then_some((min + max) / 2.0)
+        };
+        let current = self.active_device().unwrap_or(&self.local).clone();
+        let cx = center_x(&current)?;
+        layout
+            .devices()
+            .into_iter()
+            .filter(|d| d != &current && (d == &self.local || self.cfg.outputs.contains_key(d)))
+            .filter_map(|d| center_x(&d).map(|x| (d, x)))
+            .filter(|(_, x)| if right { *x > cx } else { *x < cx })
+            .min_by(|a, b| (a.1 - cx).abs().total_cmp(&(b.1 - cx).abs()))
+            .map(|(d, _)| d)
     }
 
     /// 定时调用（约每 40 毫秒）：发送心跳、检查心跳回执、处理贴边停留计时。
@@ -682,6 +753,8 @@ mod tests {
             wheel_percent: 100,
             enabled: true,
             acks: HashSet::new(),
+            hotkeys: Hotkeys::default(),
+            remote_keys: HashSet::from([dev("p")]),
         }
     }
 
@@ -907,6 +980,220 @@ mod tests {
         let (cap, at) = *r.cursor.lock().unwrap().last().unwrap();
         assert!(!cap);
         assert_eq!(at, Some((500.0, 500.0)));
+    }
+
+    const CTRL_ALT: Modifiers = Modifiers(Modifiers::CTRL.0 | Modifiers::ALT.0);
+    const KEY_S: KeyCode = KeyCode(0x16);
+    const KEY_1: KeyCode = KeyCode(0x1E);
+
+    fn hold_ctrl_alt(r: &mut Rig) {
+        r.ctl.handle(key(KeyCode::LEFT_CTRL, true));
+        r.ctl.handle(key(KeyCode::LEFT_ALT, true));
+    }
+
+    #[test]
+    fn switch_hotkeys_can_be_rebound_or_turned_off() {
+        let mut r = rig(SwitchPolicy::default());
+        let mut cfg = config(SwitchPolicy::default(), r.pc_tx.clone(), true);
+        // 「切到右边」改成 Ctrl+Alt+S，「切到左边」关掉。
+        cfg.hotkeys.switch_right = Some(KeyCombo::new(CTRL_ALT, KEY_S));
+        cfg.hotkeys.switch_left = None;
+        r.ctl.configure(cfg);
+        hold_ctrl_alt(&mut r);
+        // 原来的方向键不再是快捷键。
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Pass);
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, false)), Verdict::Pass);
+        assert_eq!(r.ctl.active_device(), None);
+        assert_eq!(r.ctl.handle(key(KEY_S, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert_eq!(r.ctl.handle(key(KEY_S, false)), Verdict::Suppress);
+        drain(&mut r.pc_rx);
+        // 「切到左边」关掉了：在 PC 上按 Ctrl+Alt+← 就是普通按键，发给 PC。
+        assert_eq!(r.ctl.handle(key(KeyCode::LEFT, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert!(drain(&mut r.pc_rx).contains(&Message::Key {
+            code: KeyCode::LEFT,
+            down: true,
+            repeat: false
+        }));
+    }
+
+    #[test]
+    fn extra_modifiers_do_not_trigger_a_hotkey() {
+        let mut r = rig(SwitchPolicy::default());
+        hold_ctrl_alt(&mut r);
+        r.ctl.handle(key(KeyCode::LEFT_SHIFT, true));
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Pass);
+        assert_eq!(r.ctl.active_device(), None);
+    }
+
+    #[test]
+    fn device_hotkey_switches_there_and_back() {
+        use flow_core::hotkeys::DeviceHotkey;
+        let mut r = rig(SwitchPolicy::default());
+        let mut cfg = config(SwitchPolicy::default(), r.pc_tx.clone(), true);
+        cfg.hotkeys.devices = vec![
+            DeviceHotkey {
+                device: dev("p"),
+                combo: KeyCombo::new(CTRL_ALT, KEY_1),
+            },
+            DeviceHotkey {
+                device: dev("m"),
+                combo: KeyCombo::new(CTRL_ALT, KeyCode(0x27)),
+            },
+        ];
+        r.ctl.configure(cfg);
+        r.ctl.handle(mv(500.0, 500.0, 0.0, 0.0));
+        hold_ctrl_alt(&mut r);
+        assert_eq!(r.ctl.handle(key(KEY_1, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert_eq!(r.ctl.handle(key(KEY_1, false)), Verdict::Suppress);
+        // 已经在那台电脑上：吞掉按键，什么都不做，也不会把 Ctrl+Alt+1 发过去。
+        drain(&mut r.pc_rx);
+        assert_eq!(r.ctl.handle(key(KEY_1, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.handle(key(KEY_1, false)), Verdict::Suppress);
+        assert!(drain(&mut r.pc_rx).is_empty());
+        // 回到本机的快捷键。
+        assert_eq!(r.ctl.handle(key(KeyCode(0x27), true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), None);
+        assert_eq!(
+            *r.cursor.lock().unwrap().last().unwrap(),
+            (false, Some((500.0, 500.0)))
+        );
+    }
+
+    /// 在远端按下的修饰键，切走后手还按着：接着按第二个快捷键照样要认。
+    #[test]
+    fn modifiers_held_across_a_switch_still_count_for_the_next_hotkey() {
+        let mut r = rig(SwitchPolicy::default());
+        r.ctl.handle(mv(500.0, 500.0, 0.0, 0.0));
+        // 先用鼠标切到 PC，在 PC 上按下 Ctrl+Alt（这两个键是发给 PC 的）。
+        r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0));
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        hold_ctrl_alt(&mut r);
+        // ← 切回本机：PC 那边的 Ctrl+Alt 被释放，但手没松。
+        assert_eq!(r.ctl.handle(key(KeyCode::LEFT, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.handle(key(KeyCode::LEFT, false)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), None);
+        drain(&mut r.pc_rx);
+        // 不松手接着按 →：仍然是快捷键，切到 PC，本机收不到裸的方向键。
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, false)), Verdict::Suppress);
+        // 松开修饰键后就不是快捷键了。
+        r.ctl.handle(key(KeyCode::LEFT_CTRL, false));
+        r.ctl.handle(key(KeyCode::LEFT_ALT, false));
+        drain(&mut r.pc_rx);
+        assert_eq!(r.ctl.handle(key(KeyCode::LEFT, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert!(drain(&mut r.pc_rx).contains(&Message::Key {
+            code: KeyCode::LEFT,
+            down: true,
+            repeat: false
+        }));
+    }
+
+    #[test]
+    fn mapped_hotkey_sends_keys_without_switching() {
+        use flow_core::hotkeys::KeyMapping;
+        let mut r = rig(SwitchPolicy::default());
+        let mapping = |keys: KeyCombo| {
+            let mut cfg = config(SwitchPolicy::default(), mpsc::unbounded_channel().0, true);
+            cfg.hotkeys.mappings = vec![KeyMapping {
+                trigger: KeyCombo::new(CTRL_ALT, KEY_S),
+                send: keys,
+                device: dev("p"),
+            }];
+            cfg
+        };
+        let mut cfg = mapping(KeyCombo::new(Modifiers::SHIFT, KEY_S));
+        cfg.outputs.insert(dev("p"), r.pc_tx.clone());
+        r.ctl.configure(cfg);
+        hold_ctrl_alt(&mut r);
+        // 在本机按 Ctrl+Alt+S：PC 收到 Shift+S，键鼠留在本机，本机收不到这个 S。
+        assert_eq!(r.ctl.handle(key(KEY_S, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), None);
+        assert_eq!(
+            drain(&mut r.pc_rx),
+            vec![Message::KeyStroke {
+                keys: vec![KeyCode::LEFT_SHIFT, KEY_S]
+            }]
+        );
+        // 长按的连发和抬起都吞掉，不重复发。
+        assert_eq!(
+            r.ctl.handle(CapturedEvent::Key {
+                code: KEY_S,
+                down: true,
+                repeat: true
+            }),
+            Verdict::Suppress
+        );
+        assert_eq!(r.ctl.handle(key(KEY_S, false)), Verdict::Suppress);
+        assert!(drain(&mut r.pc_rx).is_empty());
+
+        // 锁定在本机时映射照常能用（没有把键鼠切出去）。
+        let mut cfg = mapping(KeyCombo::new(Modifiers::NONE, KEY_S));
+        cfg.outputs.insert(dev("p"), r.pc_tx.clone());
+        cfg.policy.locked = true;
+        r.ctl.configure(cfg);
+        assert_eq!(r.ctl.handle(key(KEY_S, true)), Verdict::Suppress);
+        r.ctl.handle(key(KEY_S, false));
+        assert_eq!(
+            drain(&mut r.pc_rx),
+            vec![Message::KeyStroke { keys: vec![KEY_S] }]
+        );
+
+        // 对方的版本太旧、不认得这条消息：不算快捷键，按键照常留在本机。
+        let mut cfg = mapping(KeyCombo::new(Modifiers::NONE, KEY_S));
+        cfg.outputs.insert(dev("p"), r.pc_tx.clone());
+        cfg.remote_keys.clear();
+        r.ctl.configure(cfg);
+        assert_eq!(r.ctl.handle(key(KEY_S, true)), Verdict::Pass);
+        assert_eq!(r.ctl.handle(key(KEY_S, false)), Verdict::Pass);
+        assert!(drain(&mut r.pc_rx).is_empty());
+    }
+
+    #[test]
+    fn recording_a_hotkey_suspends_all_hotkeys() {
+        let mut r = rig(SwitchPolicy::default());
+        r.ctl.set_hotkeys_suspended(true);
+        hold_ctrl_alt(&mut r);
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Pass);
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, false)), Verdict::Pass);
+        assert_eq!(r.ctl.active_device(), None);
+        r.ctl.set_hotkeys_suspended(false);
+        assert_eq!(r.ctl.handle(key(KeyCode::RIGHT, true)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+    }
+
+    #[test]
+    fn switching_to_a_device_on_request() {
+        let mut r = rig(SwitchPolicy::default());
+        // 不认识的、没连着的设备切不过去。
+        assert!(!r.ctl.switch_to_device(&dev("x")));
+        assert!(r.ctl.switch_to_device(&dev("p")));
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        assert!(matches!(
+            drain(&mut r.pc_rx).first(),
+            Some(Message::Enter { .. })
+        ));
+        // 再回到本机。
+        assert!(r.ctl.switch_to_device(&dev("m")));
+        assert_eq!(r.ctl.active_device(), None);
+        assert!(matches!(
+            drain(&mut r.pc_rx).last(),
+            Some(Message::Leave { .. })
+        ));
+        // 锁定在本机时切不出去。
+        r.ctl.configure(config(
+            SwitchPolicy {
+                locked: true,
+                ..Default::default()
+            },
+            r.pc_tx.clone(),
+            true,
+        ));
+        assert!(!r.ctl.switch_to_device(&dev("p")));
     }
 
     #[test]

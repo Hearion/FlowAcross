@@ -18,6 +18,8 @@
 - [SignPath 申请资料](docs/signpath-application.md)：英文申请内容与提交检查项
 - [Download / 下载](docs/downloads.md)：安装包入口、源码、许可和签名状态
 
+流界运行时，可以用命令把键鼠切到别的电脑（给桌面的快捷键、脚本、宏按键用）：`flowacross --switch right`，目标还可以是 `left`、`home`（回到这台电脑）或设备名称。
+
 ## License
 
 Copyright (C) 2026 Hearion and the FlowAcross contributors.
@@ -44,7 +46,7 @@ docs/                  架构与路线图
 ## 开发环境
 
 - Rust stable（≥ 1.85）：<https://rustup.rs>
-- Node.js ≥ 20
+- Node.js ≥ 22（或 20.19 以上的 20.x）
 - macOS：Xcode Command Line Tools；Windows：Visual Studio C++ 生成工具 + WebView2
 - Linux（X11，以及 Wayland 的 Sway / Hyprland / GNOME / KDE；各桌面的验证情况见 [路线图](docs/roadmap.md)）：`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libxkbcommon-dev build-essential`。
   需要图形环境的测试默认跳过，要跑的话：
@@ -89,7 +91,7 @@ cd app && npm run tauri dev
 scripts/build-mac.sh
 ```
 
-发布正式版本（自动打包 Windows、macOS 和 Linux，并向 Windows / macOS 推送应用内更新）：改版本号、打 `v*` 标签推送即可，一次性配置和步骤见 [docs/release.md](docs/release.md)。
+发布正式版本（自动打包 Windows、macOS 和 Linux，并向已安装的流界推送应用内更新）：改版本号、打 `v*` 标签推送即可，一次性配置和步骤见 [docs/release.md](docs/release.md)。
 
 ## macOS 系统权限（开发时必读）
 

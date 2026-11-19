@@ -2,7 +2,7 @@
   "name": "flowacross-app",
   "private": true,
   "license": "GPL-3.0-only",
-  "version": "0.2.3",
+  "version": "0.2.4-beta.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

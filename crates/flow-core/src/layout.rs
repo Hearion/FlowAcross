@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::geometry::{EDGE_EPSILON, Edge, Point, Rect, overlap};
 
-/// 设备 ID：设备证书公钥指纹的十六进制串，见 [`crate::pairing`]。
+/// 设备 ID：设备证书（整张证书的 DER）SHA-256 指纹的十六进制串，见 [`crate::pairing`]。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub String);
 
@@ -327,7 +327,11 @@ impl Layout {
     /// 校验布局：ID 不重复、尺寸和缩放有效、任意两块屏幕不重叠。
     pub fn validate(&self) -> Result<(), LayoutError> {
         for (i, a) in self.displays.iter().enumerate() {
-            if !(a.rect.width > 0.0 && a.rect.height > 0.0 && a.scale > 0.0) {
+            let r = a.rect;
+            let finite = [r.x, r.y, r.width, r.height, a.scale]
+                .iter()
+                .all(|v| v.is_finite());
+            if !(finite && r.width > 0.0 && r.height > 0.0 && a.scale > 0.0) {
                 return Err(LayoutError::InvalidDisplay(a.id.clone()));
             }
             for b in &self.displays[i + 1..] {
@@ -340,6 +344,70 @@ impl Layout {
             }
         }
         Ok(())
+    }
+}
+
+/// 一份布局里最多带这么多台设备的位置（对端发来的超出就不认）。
+pub const MAX_SHARED_DEVICES: usize = 64;
+
+/// 设备在布局里的位置：它的显示器整体的偏移（布局坐标 = 该设备自己的系统坐标 + 偏移）。
+pub type Offset = (f64, f64);
+
+/// 一台电脑眼里的整份布局，用来在各台电脑之间同步（用户需求：在一台上拖动屏幕，别的电脑跟着变）。
+///
+/// 每台电脑各有各的布局坐标系，原点不一样，所以偏移的绝对值没法直接照搬；但每台设备的显示器
+/// 矩形是它自己上报的、大家手里一样，所以**两台设备偏移的差**在哪台电脑上都该相同。采纳别人的
+/// 布局时整体平移一下，让本机自己的位置不动（[`SharedLayout::adopt`]）。
+///
+/// 谁的算数：`rev` 是修改次数，用户每拖一次加一，大的赢；一样大时（两边同时拖、或者都还没
+/// 拖过）`by` 大的赢。这样任意两台电脑比出来的结果一致，不会来回覆盖。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedLayout {
+    pub rev: u64,
+    /// 最后改动它的设备。
+    pub by: DeviceId,
+    /// 各设备的偏移，包含发送方自己。
+    pub offsets: Vec<(DeviceId, Offset)>,
+}
+
+impl SharedLayout {
+    /// 这份布局是不是比本机手里的（修改次数 `rev`、最后改动者 `by`）新。
+    pub fn is_newer_than(&self, rev: u64, by: &DeviceId) -> bool {
+        (self.rev, &self.by) > (rev, by)
+    }
+
+    /// 内容是否可用：设备数不超限、偏移都是有限且不离谱的数、ID 合法且不重复。
+    /// 布局来自对端，不合法的整份不要。
+    pub fn is_sane(&self) -> bool {
+        self.offsets.len() <= MAX_SHARED_DEVICES
+            && self.by.is_well_formed()
+            && self.offsets.iter().enumerate().all(|(i, (id, (x, y)))| {
+                id.is_well_formed()
+                    && [x, y].iter().all(|v| v.is_finite() && v.abs() <= 1e7)
+                    && !self.offsets[..i].iter().any(|(other, _)| other == id)
+            })
+    }
+
+    /// 把这份布局换算到本机的坐标系：整体平移，让本机自己的位置（`local_offset`）不变，返回其中
+    /// 每台设备换算后的偏移。布局里没有本机时（发送方还没把本机放进它的布局）没法对上坐标系，
+    /// 返回 `None`。结果有没有重叠由调用方用 [`Layout::validate`] 检查。
+    pub fn rebased(
+        &self,
+        local: &DeviceId,
+        local_offset: Offset,
+    ) -> Option<Vec<(DeviceId, Offset)>> {
+        let (tx, ty) = self
+            .offsets
+            .iter()
+            .find(|(d, _)| d == local)
+            .map(|(_, o)| *o)?;
+        let (dx, dy) = (local_offset.0 - tx, local_offset.1 - ty);
+        Some(
+            self.offsets
+                .iter()
+                .map(|(id, (x, y))| (id.clone(), (x + dx, y + dy)))
+                .collect(),
+        )
     }
 }
 
@@ -420,6 +488,84 @@ pub fn logical_arrangement(displays: &[PhysDisplay]) -> Vec<Rect> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn hex_id(c: char) -> DeviceId {
+        DeviceId(c.to_string().repeat(64))
+    }
+
+    #[test]
+    fn shared_layout_is_rebased_onto_the_local_device() {
+        let (a, b, c) = (hex_id('a'), hex_id('b'), hex_id('c'));
+        // A 眼里：A 在原点，B 在它右边 1440 处，C 在它左边。
+        let from_a = SharedLayout {
+            rev: 3,
+            by: a.clone(),
+            offsets: vec![
+                (a.clone(), (0.0, 0.0)),
+                (b.clone(), (1440.0, 100.0)),
+                (c.clone(), (-1920.0, 0.0)),
+            ],
+        };
+        assert!(from_a.is_sane());
+        // B 的坐标系里自己在 (500, 500)。换算后 B 不动，A 在 B 的左边 1440、上面 100，
+        // C 相对 A 的位置和 A 眼里一样。
+        assert_eq!(
+            from_a.rebased(&b, (500.0, 500.0)).unwrap(),
+            vec![
+                (a.clone(), (-940.0, 400.0)),
+                (b.clone(), (500.0, 500.0)),
+                (c, (-2860.0, 400.0)),
+            ]
+        );
+        // 那份布局里没有本机（发送方还没收到本机的屏幕信息）：对不上坐标系。
+        let without_b = SharedLayout {
+            offsets: vec![(a, (0.0, 0.0))],
+            ..from_a
+        };
+        assert_eq!(without_b.rebased(&b, (500.0, 500.0)), None);
+    }
+
+    #[test]
+    fn newer_layout_wins_and_ties_break_the_same_way_on_both_sides() {
+        let (a, b) = (hex_id('a'), hex_id('b'));
+        let at = |rev, by: &DeviceId| SharedLayout {
+            rev,
+            by: by.clone(),
+            offsets: vec![],
+        };
+        assert!(at(2, &a).is_newer_than(1, &b));
+        assert!(!at(1, &b).is_newer_than(2, &a));
+        // 修改次数一样：ID 大的赢，两边比出来一致。
+        assert!(at(1, &b).is_newer_than(1, &a));
+        assert!(!at(1, &a).is_newer_than(1, &b));
+        // 同一份不算新。
+        assert!(!at(1, &a).is_newer_than(1, &a));
+    }
+
+    #[test]
+    fn malformed_shared_layouts_are_rejected() {
+        let a = hex_id('a');
+        let with = |offsets| SharedLayout {
+            rev: 1,
+            by: a.clone(),
+            offsets,
+        };
+        assert!(with(vec![(a.clone(), (1.0, 2.0))]).is_sane());
+        assert!(!with(vec![(a.clone(), (f64::NAN, 0.0))]).is_sane());
+        assert!(!with(vec![(a.clone(), (0.0, 1e9))]).is_sane());
+        assert!(!with(vec![(a.clone(), (0.0, 0.0)), (a.clone(), (1.0, 1.0))]).is_sane());
+        assert!(!with(vec![(DeviceId("x".into()), (0.0, 0.0))]).is_sane());
+        let many = (0..=MAX_SHARED_DEVICES)
+            .map(|i| (DeviceId(format!("{i:064x}")), (0.0, 0.0)))
+            .collect();
+        assert!(!with(many).is_sane());
+        let bad_by = SharedLayout {
+            rev: 1,
+            by: DeviceId("nope".into()),
+            offsets: vec![],
+        };
+        assert!(!bad_by.is_sane());
+    }
     use crate::geometry::assert_near;
 
     fn phys(rect: (i32, i32, i32, i32), scale: f64, primary: bool) -> PhysDisplay {

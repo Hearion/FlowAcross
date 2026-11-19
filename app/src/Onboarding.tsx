@@ -74,7 +74,8 @@ export function Onboarding({ state }: { state: StateView }) {
                 value={name}
                 maxLength={40}
                 onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && next()}
+                // 输入法用回车上屏时不算（WebKit 这时报的 isComposing 是 false，只能看 keyCode 229）。
+                onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229 && next()}
               />
             </label>
           </section>

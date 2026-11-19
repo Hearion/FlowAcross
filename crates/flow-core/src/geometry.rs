@@ -55,10 +55,15 @@ impl Rect {
     }
 
     /// 把点夹到矩形内（右/下边界最多到 `right - EDGE_EPSILON`）。
+    ///
+    /// 用 `max().min()` 而不是 `f64::clamp`：后者在边界是 NaN 时会 panic，而这个函数在键鼠捕获
+    /// 回调里调用，矩形又来自对端上报的显示器。不合法的显示器在收到时就丢掉了
+    /// （[`crate::protocol::sane_displays`]），这里是最后一道保险。
     pub fn clamp(&self, p: Point) -> Point {
+        let within = |v: f64, lo: f64, hi: f64| v.max(lo).min(hi.max(lo));
         Point::new(
-            p.x.clamp(self.left(), (self.right() - EDGE_EPSILON).max(self.left())),
-            p.y.clamp(self.top(), (self.bottom() - EDGE_EPSILON).max(self.top())),
+            within(p.x, self.left(), self.right() - EDGE_EPSILON),
+            within(p.y, self.top(), self.bottom() - EDGE_EPSILON),
         )
     }
 
@@ -163,6 +168,22 @@ pub(crate) fn assert_near(a: Point, b: Point) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_never_panics_on_non_finite_rects() {
+        let p = Point::new(5.0, 5.0);
+        // 正常情况不变。
+        assert_eq!(
+            Rect::new(0.0, 0.0, 10.0, 10.0)
+                .clamp(Point::new(20.0, -3.0))
+                .y,
+            0.0
+        );
+        // 边界是 NaN 或无穷大时不 panic（`f64::clamp` 会）。
+        let _ = Rect::new(f64::NAN, 0.0, 10.0, 10.0).clamp(p);
+        let _ = Rect::new(0.0, 0.0, f64::NAN, f64::INFINITY).clamp(p);
+        let _ = Rect::new(f64::INFINITY, f64::NEG_INFINITY, 1.0, 1.0).clamp(p);
+    }
 
     #[test]
     fn contains_is_half_open() {

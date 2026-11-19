@@ -179,6 +179,49 @@ pub fn wake_display() -> Result<(), crate::PlatformError> {
     ])
 }
 
+/// 现在是不是停在锁屏界面：查当前终端服务会话的锁定标志。查不到时返回 `None`。
+pub fn screen_locked() -> Option<bool> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK, WTSFreeMemory,
+        WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
+    };
+    let mut buf: *mut u16 = std::ptr::null_mut();
+    let mut len = 0u32;
+    // SAFETY: 服务器句柄传空表示本机；buf、len 指向有效的变量，成功时由系统分配缓冲区。
+    let ok = unsafe {
+        WTSQuerySessionInformationW(
+            std::ptr::null_mut(),
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buf,
+            &mut len,
+        )
+    };
+    if ok == 0 || buf.is_null() {
+        return None;
+    }
+    let locked = if (len as usize) < std::mem::size_of::<WTSINFOEXW>() {
+        None
+    } else {
+        // SAFETY: 缓冲区由系统分配，长度已核对，按文档是一个 WTSINFOEXW；Level 为 1 时
+        // 联合体里是 WTSInfoExLevel1。用 read_unaligned，不假设对齐。
+        let info = unsafe { std::ptr::read_unaligned(buf.cast::<WTSINFOEXW>()) };
+        if info.Level == 1 {
+            // SAFETY: Level 为 1 时这个分支有效。
+            match unsafe { info.Data.WTSInfoExLevel1.SessionFlags } as u32 {
+                WTS_SESSIONSTATE_LOCK => Some(true),
+                WTS_SESSIONSTATE_UNLOCK => Some(false),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+    // SAFETY: buf 是上面由系统分配的缓冲区，只释放一次。
+    unsafe { WTSFreeMemory(buf.cast()) };
+    locked
+}
+
 /// 正在阻止熄屏时，结束它用的发送端：丢掉它，持有状态的线程就恢复默认并退出。
 static KEEP_AWAKE: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> =
     std::sync::Mutex::new(None);

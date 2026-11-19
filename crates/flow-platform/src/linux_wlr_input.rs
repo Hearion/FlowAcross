@@ -8,8 +8,9 @@
 //! **捕获**：Wayland 的普通程序看不到全局的键鼠事件，也不知道光标在哪。做法和同类工具一样：
 //! 在可以切到别的电脑的那些屏幕边上各放一条 1 个逻辑点宽的透明 layer-shell 窗口，光标碰到它就等于
 //! "推到了边上"，这时合成一次向外推的移动交给控制器判断。控制器决定切换后（[`set_cursor_captured`]）：
-//! 锁定指针（`pointer-constraints`）、用 `relative-pointer` 读位移、让这条窗口独占键盘焦点并请合成器
-//! 不再处理快捷键（`keyboard-shortcuts-inhibit`）。回到本机时全部放开，再用虚拟指针把光标放到跨回来的位置。
+//! 把这条窗口铺满整块屏幕并独占键盘焦点（不依赖合成器肯不肯锁定指针，见 `Shared::engage`），再锁定指针
+//! （`pointer-constraints`）、用 `relative-pointer` 读位移、请合成器不再处理快捷键
+//! （`keyboard-shortcuts-inhibit`）。回到本机时全部放开，再用虚拟指针把光标放到跨回来的位置。
 //!
 //! 和其他系统不同的地方：
 //! - 没切到远端时看不到键盘，所以「按住修饰键才切换」和本机上的 Ctrl+Alt+←/→ 不起作用
@@ -300,11 +301,15 @@ impl WlrInjector {
 
         let plain = pointers.create_virtual_pointer(Some(&seat), &qh, ());
         let keyboard = keyboards.create_virtual_keyboard(&seat, &qh, ());
-        let file = anonymous_file(keys.text.as_bytes()).map_err(|e| fail(&e))?;
+        // 键盘映射是一段文本，合成器把它当 C 字符串解析：结尾带上 NUL，长度也算上它。
+        // 不带的话只是碰巧能用（映射到内存后页尾是零），文本长度正好是整页时合成器会读过头。
+        let mut keymap = keys.text.clone().into_bytes();
+        keymap.push(0);
+        let file = anonymous_file(&keymap).map_err(|e| fail(&e))?;
         keyboard.keymap(
             wl_keyboard::KeymapFormat::XkbV1 as u32,
             file.as_fd(),
-            keys.text.len() as u32,
+            keymap.len() as u32,
         );
         queue.roundtrip(&mut state).map_err(|e| fail(&e))?;
 
@@ -345,32 +350,33 @@ impl WlrInjector {
     }
 
     /// 绑定到这块显示器的虚拟指针；合成器不支持绑定时返回 `None`。
-    fn pointer_for(&mut self, monitor: &Monitor) -> Option<ZwlrVirtualPointerV1> {
+    /// 绑定到这块输出（全局对象编号 `wl_global`）的虚拟指针。
+    fn pointer_for(&mut self, wl_global: u32) -> Option<ZwlrVirtualPointerV1> {
         if !self.per_output {
             return None;
         }
-        if let Some(p) = self.bound.get(&monitor.wl_global) {
+        if let Some(p) = self.bound.get(&wl_global) {
             return Some(p.clone());
         }
         let qh = self.queue.handle();
-        if !self.outputs.contains_key(&monitor.wl_global) {
+        if !self.outputs.contains_key(&wl_global) {
             let (_, version) = globals_of(&self.globals, "wl_output")
                 .into_iter()
-                .find(|(name, _)| *name == monitor.wl_global)?;
+                .find(|(name, _)| *name == wl_global)?;
             let output: wl_output::WlOutput =
                 self.globals
                     .registry()
-                    .bind(monitor.wl_global, version.min(4), &qh, ());
-            self.outputs.insert(monitor.wl_global, output);
+                    .bind(wl_global, version.min(4), &qh, ());
+            self.outputs.insert(wl_global, output);
         }
-        let output = self.outputs.get(&monitor.wl_global)?;
+        let output = self.outputs.get(&wl_global)?;
         let pointer = self.pointers.create_virtual_pointer_with_output(
             Some(&self.seat),
             Some(output),
             &qh,
             (),
         );
-        self.bound.insert(monitor.wl_global, pointer.clone());
+        self.bound.insert(wl_global, pointer.clone());
         Some(pointer)
     }
 }
@@ -406,10 +412,11 @@ impl InputInjector for WlrInjector {
     }
 
     fn move_to(&mut self, display_local_id: &str, x: f64, y: f64) -> Result<(), PlatformError> {
+        // 每次鼠标移动都走这里：只取用得到的两样（位置尺寸、输出编号），不复制整个显示器记录。
         let find = |list: &[Monitor]| {
             list.iter()
                 .find(|m| m.id == display_local_id)
-                .map(|m| (m.clone(), bounding_box(list)))
+                .map(|m| (m.logical, m.wl_global))
         };
         let mut found = linux::with_monitors(find);
         if found.is_none()
@@ -419,10 +426,10 @@ impl InputInjector for WlrInjector {
             found = find(&list);
             linux::update_monitors(list);
         }
-        let Some((monitor, layout)) = found else {
+        let Some((logical, wl_global)) = found else {
             return Ok(());
         };
-        let (w, h) = (monitor.logical.width, monitor.logical.height);
+        let (w, h) = (logical.width, logical.height);
         // 最后一个逻辑点的右边缘已经在屏幕外，收一点。
         let (x, y) = (
             x.clamp(0.0, w - 1.0 / SUBPIXEL),
@@ -430,18 +437,18 @@ impl InputInjector for WlrInjector {
         );
         let time = self.time();
         mark_injected_move();
-        match self.pointer_for(&monitor) {
+        match self.pointer_for(wl_global) {
             Some(pointer) => {
                 pointer.motion_absolute(time, subpixel(x), subpixel(y), subpixel(w), subpixel(h));
                 pointer.frame();
             }
             None => {
                 // 不能绑定输出：坐标按全部显示器的外接矩形算。
-                let (left, top, lw, lh) = layout;
+                let (left, top, lw, lh) = linux::with_monitors(bounding_box);
                 self.plain.motion_absolute(
                     time,
-                    subpixel(monitor.logical.x - left + x),
-                    subpixel(monitor.logical.y - top + y),
+                    subpixel(logical.x - left + x),
+                    subpixel(logical.y - top + y),
                     subpixel(lw),
                     subpixel(lh),
                 );
@@ -567,8 +574,12 @@ struct Inner {
     outputs: HashMap<u32, wl_output::WlOutput>,
     /// 这个时刻（毫秒）之前碰到边不算。
     quiet_until_ms: u64,
-    /// 合成器确认指针已锁定。
+    /// 合成器确认指针已锁定。流界不依赖它（见 `engage`），只有测试把它打印出来供参考。
+    #[cfg(test)]
     pointer_locked: bool,
+    /// 要求锁定时光标不在任何边缘窗口上：边缘窗口应当临时铺满屏幕去接住它。
+    /// 锁定成功或放开后清掉。
+    summon: bool,
 }
 
 struct Shared {
@@ -644,14 +655,32 @@ impl Shared {
             layer: focus.layer,
             edge: focus.edge,
         });
+        inner.summon = false;
         let _ = self.conn.flush();
+    }
+
+    /// 让合成器重新算一遍光标在哪个窗口上：用一个临时的虚拟指针发一次位移为零的移动。
+    /// 窗口在不动的光标底下变大时，有的合成器要等下一次鼠标移动才发"进入"事件。
+    fn poke_pointer(&self) {
+        let Some(manager) = self.virtual_pointers.as_ref() else {
+            return;
+        };
+        let pointer = manager.create_virtual_pointer(Some(&self.seat), &self.qh, ());
+        mark_injected_move();
+        pointer.motion(0, 0.0, 0.0);
+        pointer.frame();
+        pointer.destroy();
     }
 
     /// 放开键鼠，可选把光标放到本机系统坐标（逻辑点）的某个位置。
     fn release(&self, restore_at: Option<(f64, f64)>) {
         let mut inner = self.inner();
         inner.want = false;
-        inner.pointer_locked = false;
+        inner.summon = false;
+        #[cfg(test)]
+        {
+            inner.pointer_locked = false;
+        }
         if let Some(grab) = inner.grab.take() {
             grab.locked.destroy();
             grab.relative.destroy();
@@ -731,6 +760,13 @@ pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
         let mut inner = shared.inner();
         inner.want = true;
         shared.engage(&mut inner);
+        if inner.grab.is_none() {
+            // 光标不在边缘窗口上（不是推过屏幕边切的：快捷键命令、托盘菜单）：请事件线程把
+            // 边缘窗口铺满屏幕去"接住"光标，见 `Capture::apply_summon`。
+            inner.summon = true;
+            drop(inner);
+            shared.wake();
+        }
     } else {
         shared.release(restore_at);
     }
@@ -745,6 +781,8 @@ struct Strip {
     viewport: Option<WpViewport>,
     /// 窗口当前铺满了整块屏幕（控制远端期间，或刚放开还没缩回去）。这时光标在它上面不代表碰到了边。
     expanded: bool,
+    /// 为了接住不在屏幕边上的光标而临时铺满了屏幕（见 `Capture::apply_summon`）。
+    summoned: bool,
     monitor: Monitor,
     edge: Edge,
 }
@@ -1021,6 +1059,7 @@ impl Capture {
                 buffer: None,
                 viewport,
                 expanded: false,
+                summoned: false,
                 monitor,
                 edge,
             });
@@ -1037,6 +1076,53 @@ impl Capture {
         self.built_for = wanted;
     }
 
+    /// 按 `Inner::summon` 铺开或收回边缘窗口。
+    ///
+    /// 不是推过屏幕边切过去的时候（快捷键命令、托盘菜单），光标不在任何边缘窗口上，流界拿不到
+    /// 指针，也就锁不住它。这时每块屏幕挑一条边缘窗口铺满整屏：光标所在的那块屏幕上，合成器会
+    /// 报"进入"，`touch` 里随即完成锁定，其余屏幕上的再缩回去。没有边缘窗口的屏幕（它的哪条边
+    /// 都不通往别的电脑）接不住，光标在那里时要等它碰到一条边。
+    fn apply_summon(&mut self) {
+        let (summon, grabbed) = {
+            let inner = self.shared.inner();
+            (
+                inner.summon && inner.want && inner.grab.is_none(),
+                inner.grab.as_ref().map(|g| g.surface.clone()),
+            )
+        };
+        let mut covered: Vec<u32> = Vec::new();
+        let mut changed = false;
+        for strip in &mut self.strips {
+            let first_on_monitor = !covered.contains(&strip.monitor.wl_global);
+            if summon && first_on_monitor && !strip.summoned {
+                covered.push(strip.monitor.wl_global);
+                strip
+                    .layer
+                    .set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+                strip.layer.set_size(0, 0);
+                strip.surface.commit();
+                strip.summoned = true;
+                changed = true;
+            } else if summon && strip.summoned {
+                covered.push(strip.monitor.wl_global);
+            } else if !summon && strip.summoned {
+                strip.summoned = false;
+                // 正锁着的那条由 `release` 负责缩回去。
+                if grabbed.as_ref() != Some(&strip.surface) {
+                    let (anchor, w, h) = strip_placement(strip.edge);
+                    strip.layer.set_anchor(anchor);
+                    strip.layer.set_size(w, h);
+                    strip.surface.commit();
+                    changed = true;
+                }
+            }
+        }
+        // 铺开后光标进窗口的事件，要等合成器确认了新尺寸（`Configure`）才会有，见那里的处理。
+        if changed {
+            let _ = self.shared.conn.flush();
+        }
+    }
+
     fn strip_of(&self, surface: &wl_surface::WlSurface) -> Option<&Strip> {
         self.strips.iter().find(|s| s.surface == *surface)
     }
@@ -1049,18 +1135,23 @@ impl Capture {
         let Some(strip) = self.strip_of(&surface) else {
             return;
         };
-        if strip.expanded {
-            return;
-        }
-        let event = push_event(strip.edge, strip.edge_point(sx, sy));
+        let (expanded, edge, point) = (strip.expanded, strip.edge, strip.edge_point(sx, sy));
+        let event = push_event(edge, point);
         {
             let mut inner = self.shared.inner();
             if inner.grab.is_some() {
                 return;
             }
             if inner.want {
-                // 之前要求锁定时光标不在边上，现在碰到了：补上。
+                // 之前要求锁定时光标不在边上，现在碰到了边、或进了为它铺满屏幕的窗口：补上。
                 self.shared.engage(&mut inner);
+                drop(inner);
+                // 接住了：其他屏幕上铺开的窗口缩回去。
+                self.apply_summon();
+                return;
+            }
+            // 铺满屏幕的窗口（刚放开还没缩回去）上的移动不代表碰到了边。
+            if expanded {
                 return;
             }
             // 流界自己把光标推到边上（被远端控制，或刚回到本机）不算。
@@ -1103,8 +1194,10 @@ impl Dispatch<wl_callback::WlCallback, ()> for Capture {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // 别的线程叫醒：刚放开键盘的话补上按键的抬起，再看看可切换的边是不是变了。
+        // 别的线程叫醒：刚放开键盘的话补上按键的抬起，要不要铺开窗口去接住光标，
+        // 再看看可切换的边是不是变了。
         state.release_held_keys();
+        state.apply_summon();
         let wanted = SWITCH_EDGES
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1358,6 +1451,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for Capture {
                 }
                 strip.surface.attach(strip.buffer.as_ref(), 0, 0);
                 strip.surface.commit();
+                // 为了接住光标而铺开的窗口现在才真的变大：光标要是没动，合成器不会主动报"进入"，
+                // 推它一下。
+                if strip.summoned && strip.expanded {
+                    state.shared.poke_pointer();
+                    let _ = state.shared.conn.flush();
+                }
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 // 所在的显示器没了；由显示器变化触发的重建来清理。
@@ -1387,8 +1486,14 @@ impl Dispatch<ZwpLockedPointerV1, ()> for Capture {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // 只是记下合成器有没有真的锁定（不锁也能工作，见 `engage`）。
-        state.shared.inner().pointer_locked = matches!(event, zwp_locked_pointer_v1::Event::Locked);
+        // 合成器有没有真的锁定不影响工作（见 `engage`），只有测试记下来打印。
+        #[cfg(test)]
+        {
+            state.shared.inner().pointer_locked =
+                matches!(event, zwp_locked_pointer_v1::Event::Locked);
+        }
+        #[cfg(not(test))]
+        let _ = (state, event);
     }
 }
 delegate_noop!(Capture: ZwpRelativePointerManagerV1);
@@ -1879,6 +1984,99 @@ mod tests {
         assert_eq!(x + dx, d.rect.x);
         assert!((y - (d.rect.y + 400.0)).abs() <= 1.0, "沿边位置 {y}");
         assert!(active().unwrap().inner().grab.is_none(), "没有要求就不锁定");
+
+        cap.stop();
+        assert!(active().is_none());
+    }
+
+    /// 不是推过屏幕边切过去的（快捷键命令、托盘菜单）：光标在屏幕中间也要能接管键鼠，
+    /// 放开后边缘窗口缩回去，屏幕中间不再拦输入。
+    #[test]
+    #[ignore = "需要 wlroots 系合成器"]
+    fn capture_on_request_without_touching_an_edge() {
+        assert_eq!(
+            linux_wl::backend(),
+            linux_wl::Backend::Wlr,
+            "要在 sway 里跑"
+        );
+        let displays = crate::display_provider().displays().expect("枚举显示器");
+        let d = displays[0].clone();
+        let (w, h) = (d.rect.width, d.rect.height);
+        let mut inj = WlrInjector::new().expect("注入器");
+        inj.move_to(&d.local_id, w / 2.0, h / 2.0).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut cap = WlrCapture::accepting_injected();
+        cap.start(Box::new(move |ev| {
+            let _ = tx.send(ev);
+            Verdict::Pass
+        }))
+        .expect("启动捕获");
+        std::thread::sleep(Duration::from_millis(200));
+        while rx.try_recv().is_ok() {}
+
+        // 光标在屏幕中间，没有碰任何边：直接要求接管。
+        set_cursor_captured(true, None);
+        let grabbed = || active().unwrap().inner().grab.is_some();
+        for _ in 0..40 {
+            if grabbed() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(grabbed(), "光标不在屏幕边上时也应该能接管键鼠");
+        std::thread::sleep(Duration::from_millis(200));
+        while rx.try_recv().is_ok() {}
+
+        // 之后和推过屏幕边切过去一样：移动按位移上报，键盘归流界。
+        nudge(&mut inj, 9.0, -4.0);
+        let Some(CapturedEvent::MouseMove { dx, dy, .. }) = recv_until(&rx, is_move) else {
+            panic!("接管后的移动没有上报");
+        };
+        assert_eq!((dx, dy), (9.0, -4.0));
+        inj.key(KeyCode::A, true, false).unwrap();
+        inj.key(KeyCode::A, false, false).unwrap();
+        let key = |down| CapturedEvent::Key {
+            code: KeyCode::A,
+            down,
+            repeat: false,
+        };
+        assert!(recv_until(&rx, |e| *e == key(true)).is_some(), "按下 A");
+        assert!(recv_until(&rx, |e| *e == key(false)).is_some(), "抬起 A");
+
+        // 放开：窗口缩回屏幕边上，屏幕中间的移动和按键不再归流界。
+        set_cursor_captured(false, Some((d.rect.x + w / 2.0, d.rect.y + h / 2.0)));
+        assert!(!grabbed());
+        std::thread::sleep(Duration::from_millis(RESTORE_QUIET_MS + 150));
+        while rx.try_recv().is_ok() {}
+        inj.move_to(&d.local_id, w / 2.0 + 40.0, h / 2.0).unwrap();
+        inj.key(KeyCode::A, true, false).unwrap();
+        inj.key(KeyCode::A, false, false).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
+            "放开后屏幕中间不应该再有上报"
+        );
+        // 推到屏幕边照常上报，说明边缘窗口回到了原来的样子。
+        inj.move_to(&d.local_id, w - 0.25, 300.0).unwrap();
+        let Some(CapturedEvent::MouseMove { dx, .. }) = recv_until(&rx, is_move) else {
+            panic!("放开后推到右边缘没有上报");
+        };
+        assert_eq!(dx, PUSH);
+        assert!(!grabbed(), "没有要求就不锁定");
+
+        // 要求接管后马上又放开（还没等到光标进窗口）：不能留下铺满屏幕的窗口。
+        inj.move_to(&d.local_id, w / 2.0, h / 2.0).unwrap();
+        std::thread::sleep(Duration::from_millis(RESTORE_QUIET_MS + 150));
+        set_cursor_captured(true, None);
+        set_cursor_captured(false, None);
+        std::thread::sleep(Duration::from_millis(RESTORE_QUIET_MS + 300));
+        assert!(!grabbed());
+        while rx.try_recv().is_ok() {}
+        inj.move_to(&d.local_id, w / 2.0 - 40.0, h / 2.0).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
+            "马上放开后屏幕中间不应该有上报"
+        );
 
         cap.stop();
         assert!(active().is_none());

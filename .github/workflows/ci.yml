@@ -43,6 +43,11 @@ jobs:
           npm ci
           npm run build
 
+      # 发版脚本里的纯函数（往更新清单里加 Linux 安装包等）。
+      - name: 脚本测试
+        if: runner.os == 'Linux'
+        run: node --test "scripts/*.test.mjs"
+
       - name: rustfmt
         run: cargo fmt --all -- --check
 

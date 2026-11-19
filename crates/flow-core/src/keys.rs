@@ -14,17 +14,11 @@ pub struct KeyCode(pub u16);
 impl KeyCode {
     pub const A: KeyCode = KeyCode(0x04);
     pub const C: KeyCode = KeyCode(0x06);
-    pub const V: KeyCode = KeyCode(0x19);
-    pub const ENTER: KeyCode = KeyCode(0x28);
-    pub const ESCAPE: KeyCode = KeyCode(0x29);
     pub const BACKSPACE: KeyCode = KeyCode(0x2A);
-    pub const TAB: KeyCode = KeyCode(0x2B);
     pub const SPACE: KeyCode = KeyCode(0x2C);
     pub const CAPS_LOCK: KeyCode = KeyCode(0x39);
     pub const RIGHT: KeyCode = KeyCode(0x4F);
     pub const LEFT: KeyCode = KeyCode(0x50);
-    pub const DOWN: KeyCode = KeyCode(0x51);
-    pub const UP: KeyCode = KeyCode(0x52);
 
     pub const LEFT_CTRL: KeyCode = KeyCode(0xE0);
     pub const LEFT_SHIFT: KeyCode = KeyCode(0xE1);
@@ -261,6 +255,16 @@ impl PressedState {
             .fold(Modifiers::NONE, |acc, m| acc | m)
     }
 
+    /// 现在按着的修饰键（具体是哪几个键）。被控制方执行快捷键映射发来的按键前，先把它们
+    /// 临时抬起，按完再按回去，否则对方手上还按着的 Ctrl、Alt 会和发来的键组合在一起。
+    pub fn modifier_keys(&self) -> Vec<KeyCode> {
+        self.keys
+            .iter()
+            .copied()
+            .filter(|k| k.modifier().is_some())
+            .collect()
+    }
+
     /// 清空状态并返回需要发送的"抬起"事件：先鼠标按钮（结束拖拽），再普通键，最后修饰键，
     /// 避免释放过程中意外组合出快捷键。
     pub fn release_all(&mut self) -> Vec<InputEvent> {
@@ -398,6 +402,21 @@ mod tests {
         assert_eq!(s.modifiers(), Modifiers::SHIFT | Modifiers::META);
         assert!(s.modifiers().contains(Modifiers::SHIFT));
         assert!(!s.modifiers().contains(Modifiers::CTRL));
+    }
+
+    #[test]
+    fn modifier_keys_lists_only_held_modifiers() {
+        let mut s = PressedState::default();
+        assert!(s.modifier_keys().is_empty());
+        s.on_key(KeyCode::A, true);
+        s.on_key(KeyCode::RIGHT_ALT, true);
+        s.on_key(KeyCode::LEFT_CTRL, true);
+        assert_eq!(
+            s.modifier_keys(),
+            vec![KeyCode::LEFT_CTRL, KeyCode::RIGHT_ALT]
+        );
+        s.on_key(KeyCode::LEFT_CTRL, false);
+        assert_eq!(s.modifier_keys(), vec![KeyCode::RIGHT_ALT]);
     }
 
     #[test]

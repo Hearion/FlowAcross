@@ -2,21 +2,25 @@
 
 目标：在 Windows 电脑上跑起流界，和 Mac 互相发现、配对、自动重连，并测试键鼠跨屏。
 
-## 1. 把源码拷到 Windows
+## 1. 把源码拿到 Windows
 
-在 Mac 的项目根目录生成源码压缩包（只含 git 跟踪的文件，不含依赖、构建产物和未跟踪的文件，几 MB；新建的源文件先 `git add`）：
+已经提交并推送的代码，直接在 Windows 上克隆（放在一个**不含中文和空格的路径**下，例如 `C:\dev\FlowAcross`；Rust 的部分工具对中文路径支持不好）：
+
+```powershell
+git clone https://github.com/Hearion/FlowAcross.git C:\dev\FlowAcross
+```
+
+要测的是 Mac 上**还没提交**的改动时，在 Mac 的项目根目录生成源码压缩包（只含 git 跟踪的文件，不含依赖、构建产物和未跟踪的文件，几 MB；新建的源文件先 `git add`）：
 
 ```bash
 scripts/pack-source.sh
 ```
 
-把生成的 `share/flowacross-src.zip` 用 U 盘、隔空投送到手机再转、网盘等方式拷到 Windows，解压到一个**不含中文和空格的路径**，例如 `C:\dev\FlowAcross`（Rust 的部分工具对中文路径支持不好）。
-
-以后项目推到 Git 仓库后，可以直接在 Windows 上 `git clone`。
+把生成的 `share/flowacross-src.zip` 用 U 盘、隔空投送到手机再转、网盘等方式拷到 Windows，同样解压到不含中文和空格的路径。
 
 ## 2. 一键配置开发环境
 
-在解压后的目录打开 PowerShell，运行：
+在源码目录打开 PowerShell，运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1

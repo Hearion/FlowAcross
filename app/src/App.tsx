@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, inTauri } from "./api";
-import { AddDeviceDialog, ConfirmDialog, OS_TEXT, PERMISSION_TEXT, PairingDialog } from "./Dialogs";
+import { AddDeviceDialog, ConfirmDialog, OS_TEXT, PERMISSION_TEXT, PairingDialog, ProblemNote } from "./Dialogs";
 import { LayoutMap } from "./LayoutMap";
 import { Onboarding } from "./Onboarding";
 import { ClipboardSetting, CrossScreenSettings, useDeviceNameInput } from "./SettingsControls";
 import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { FileTransfers } from "./Transfers";
-import type { DeviceView, Settings, StateView } from "./types";
+import type { AuthKind, DeviceView, Settings, StateView } from "./types";
 import { UpdateBanner, useUpdater } from "./Updater";
-import { CursorIcon, DeviceIcon, GearIcon, LockIcon, Logo, PauseIcon, PlayIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
+import { CursorIcon, DeviceIcon, GearIcon, InfoIcon, LockIcon, Logo, PauseIcon, PlayIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
 
 function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
@@ -18,6 +18,12 @@ function statusChip(d: DeviceView) {
   if (d.status === "connected" && d.remote_paused)
     return (
       <span className="chip muted" title="对方暂停了共享，恢复后可以再切过去">
+        {text}
+      </span>
+    );
+  if (d.status === "connected" && d.locked)
+    return (
+      <span className="chip muted" title="对方停在锁屏界面，需要在那台电脑上解锁">
         {text}
       </span>
     );
@@ -32,7 +38,19 @@ interface Toast {
 }
 
 export default function App() {
-  const [state, setState] = useState<StateView | null>(null);
+  const [state, setStateRaw] = useState<StateView | null>(null);
+  // 引擎并发推送时，先算出来的状态可能后到：只收不比手里旧的。
+  // 布局没变时沿用原来那个对象：每份状态都是新反序列化出来的，不这样的话布局图里按 `layout`
+  // 缓存的计算每次推送都白算一遍。
+  const setState = useCallback(
+    (next: StateView) =>
+      setStateRaw((prev) => {
+        if (prev && next.seq < prev.seq) return prev;
+        const sameLayout = prev && JSON.stringify(prev.layout) === JSON.stringify(next.layout);
+        return sameLayout ? { ...next, layout: prev.layout } : next;
+      }),
+    [],
+  );
   const [selected, setSelected] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [adding, setAdding] = useState(false);
@@ -49,7 +67,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const unsubs: Promise<() => void>[] = [api.onState(setState), api.onNotice(toast)];
+    const unsubs: Promise<() => void>[] = [
+      api.onState(setState),
+      api.onNotice(toast),
+      // 传文件期间只有进度在变：单独更新传输列表。
+      api.onTransfers((transfers) => setStateRaw((prev) => prev && { ...prev, transfers })),
+    ];
     api.getState().then(setState);
     // 从系统设置授权回来后刷新权限状态。
     const onFocus = () => api.getState().then(setState);
@@ -58,7 +81,7 @@ export default function App() {
       window.removeEventListener("focus", onFocus);
       unsubs.forEach((p) => p.then((f) => f()));
     };
-  }, [toast]);
+  }, [toast, setState]);
 
   // 配对开始后关闭"添加设备"对话框，避免两个弹窗叠在一起。
   const pairingCount = state?.pairings.length ?? 0;
@@ -148,6 +171,7 @@ export default function App() {
           section={settingsSection}
           onSection={setSettingsSection}
           onClose={() => setSettingsSection(null)}
+          onError={toast}
         />
       ) : (
       <main className="content">
@@ -182,6 +206,8 @@ export default function App() {
               </button>
             </div>
           )}
+
+          <AuthBanners state={state} />
 
           <UpdateBanner updater={updater} />
 
@@ -255,18 +281,44 @@ export default function App() {
                     </li>
                   ))}
                 </ul>
+                {sel.problem && sel.status !== "connected" && <ProblemNote problem={sel.problem} />}
                 {sel.status === "offline" && (
                   <p className="detail-note">
                     {sel.manual
-                      ? "多次自动连接没有成功，已停止自动连接。确认对方的流界已打开后点「连接」。"
+                      ? "多次自动连接没有成功，已停止自动连接。处理好之后点「连接」；对方的流界重新打开时也会自己连回来。"
                       : "正在等待对方上线，会自动重新连接。"}
+                  </p>
+                )}
+                {sel.status === "connecting" && sel.problem && <p className="detail-note">正在重新连接…</p>}
+                {sel.status === "connected" && sel.locked && (
+                  <p className="detail-note">
+                    {sel.os === "Linux" || sel.os === "Other"
+                      ? "对方停在锁屏界面。可以切过去直接输入密码试试，输不进去的话需要在那台电脑上解锁。"
+                      : "对方停在锁屏界面，需要在那台电脑上用它自己的键盘解锁：系统的锁屏界面不接受其他电脑发来的按键。"}
                   </p>
                 )}
                 {sel.status === "connected" && !sel.can_wake && (
                   <p className="detail-note">「唤醒屏幕」用不了：对方的流界版本太旧，升级到 0.2.3 或更高版本后可用。</p>
                 )}
+                {sel.status === "local" && sel.can_switch && (
+                  <div className="detail-actions">
+                    <button className="btn small primary" onClick={() => api.switchToDevice(sel.id).catch((e) => toast(String(e)))}>
+                      把键鼠切回这里
+                    </button>
+                  </div>
+                )}
                 {sel.status !== "local" && (
                   <div className="detail-actions">
+                    {sel.status === "connected" && !sel.has_input && (
+                      <button
+                        className="btn small primary"
+                        disabled={!sel.can_switch}
+                        title={sel.can_switch ? "不用把鼠标推过屏幕边，直接把键鼠切过去" : "现在切不过去：已暂停、已锁定在本机，或对方暂停了共享"}
+                        onClick={() => api.switchToDevice(sel.id).catch((e) => toast(String(e)))}
+                      >
+                        把键鼠切到这里
+                      </button>
+                    )}
                     {sel.status === "offline" && (
                       <button className="btn small primary" onClick={() => api.connectDevice(sel.id)}>
                         连接
@@ -308,7 +360,7 @@ export default function App() {
                 更多设置
               </button>
             </div>
-            <CrossScreenSettings settings={s} update={update} unsupported={state.unsupported} />
+            <CrossScreenSettings settings={s} update={update} unsupported={state.unsupported} onHotkeys={() => setSettingsSection("hotkeys")} />
           </section>
 
           <section className="panel">
@@ -323,7 +375,11 @@ export default function App() {
       {removing && (
         <ConfirmDialog
           title={`移除「${removing.name}」？`}
-          body="移除后两台电脑都会删除彼此的配对记录，不再自动连接。之后想再用需要重新配对。"
+          body={
+            removing.status === "connected"
+              ? "移除后两台电脑都会删除彼此的配对记录，不再自动连接。之后想再用需要重新配对。"
+              : "对方现在没有连着，只会删除这台电脑上的配对记录；对方那边还留着这台电脑，要在它的流界里也移除一次。之后想再用需要重新配对。"
+          }
           confirm="移除"
           danger
           onCancel={() => setRemoving(null)}
@@ -346,6 +402,57 @@ export default function App() {
         ))}
       </div>
     </div>
+  );
+}
+
+const AUTH_TEXT: Record<AuthKind, { ask: string; lost: string }> = {
+  capture: { ask: "捕获这台电脑的键鼠", lost: "键鼠暂时切不到其他电脑" },
+  inject: { ask: "控制这台电脑的键鼠", lost: "其他电脑的键鼠暂时操作不了这台电脑" },
+};
+
+/**
+ * 系统授权（Linux 的 GNOME / KDE）：弹窗在等时显示倒计时，没拿到授权时给「重新授权」。
+ * 剩余秒数由引擎在弹窗出现时给一次，之后界面自己往下数。
+ */
+function AuthBanners({ state }: { state: StateView }) {
+  const prompt = state.auth_prompt;
+  const [left, setLeft] = useState(prompt?.seconds_left ?? 0);
+  useEffect(() => {
+    if (!prompt) return;
+    const end = Date.now() + prompt.seconds_left * 1000;
+    const tick = () => setLeft(Math.max(0, Math.ceil((end - Date.now()) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [prompt?.kind, prompt?.seconds_left]);
+
+  return (
+    <>
+      {prompt && (
+        <div className="banner info">
+          <span className="banner-icon">
+            <InfoIcon />
+          </span>
+          <span className="banner-text">
+            系统正在询问是否允许流界{AUTH_TEXT[prompt.kind].ask}，请在弹出的系统窗口里点「允许」或「共享」。
+            还剩 <strong className="countdown">{left}</strong> 秒，到时间没选的话窗口会自动关闭，需要时再问。
+          </span>
+        </div>
+      )}
+      {!prompt && state.auth_denied.length > 0 && (
+        <div className="banner">
+          <span className="banner-icon">
+            <WarnIcon />
+          </span>
+          <span className="banner-text">
+            流界没有拿到系统授权：{state.auth_denied.map((k) => AUTH_TEXT[k].lost).join("，")}。下次需要时会再询问一次。
+          </span>
+          <button className="btn small primary" onClick={() => api.retryAuthorization()}>
+            重新授权
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 

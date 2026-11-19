@@ -32,20 +32,6 @@ pub fn fingerprint(cert_der: &[u8]) -> Fingerprint {
     Sha256::digest(cert_der).into()
 }
 
-/// 从设备 ID（十六进制指纹）解析回指纹。
-pub fn parse_device_id(id: &DeviceId) -> Option<Fingerprint> {
-    if !id.is_well_formed() {
-        return None;
-    }
-    let s = id.0.as_bytes();
-    let mut out = [0u8; 32];
-    for (i, chunk) in s.chunks(2).enumerate() {
-        let hex = std::str::from_utf8(chunk).ok()?;
-        out[i] = u8::from_str_radix(hex, 16).ok()?;
-    }
-    Some(out)
-}
-
 /// 设备 ID 即指纹的小写十六进制。
 pub fn device_id(fp: &Fingerprint) -> DeviceId {
     DeviceId(fp.iter().map(|b| format!("{b:02x}")).collect())
@@ -55,6 +41,8 @@ pub fn device_id(fp: &Fingerprint) -> DeviceId {
 pub struct PairingCode(u32);
 
 impl PairingCode {
+    /// 只有测试要看原始数值，界面显示用 `Display`。
+    #[cfg(test)]
     pub fn value(self) -> u32 {
         self.0
     }
@@ -157,9 +145,6 @@ mod tests {
         let id = device_id(&fp);
         assert_eq!(id.0.len(), 64);
         assert!(id.0.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(parse_device_id(&id), Some(fp));
-        assert_eq!(parse_device_id(&DeviceId("zz".into())), None);
         // from_str_radix 接受 "+f"，必须先校验格式，否则同一指纹有多种写法。
-        assert_eq!(parse_device_id(&DeviceId("+f".repeat(32))), None);
     }
 }

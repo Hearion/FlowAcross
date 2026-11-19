@@ -100,6 +100,19 @@ export function useUpdater(): Updater {
   };
 }
 
+/** 这种安装方式下，点「立即更新」之后会发生什么（没什么特别的时返回 null）。 */
+export function installNote(info: UpdateInfo): string | null {
+  switch (info.kind) {
+    case "deb":
+    case "pacman":
+      return "由系统的包管理器安装：下载完成后系统会弹出授权窗口，输入密码即可。取消的话流界照常运行。";
+    case "manual":
+      return "这份流界不是用官方安装包装的，不能自动安装。请到下载页下载新版本。";
+    default:
+      return null;
+  }
+}
+
 export function ProgressBar({ value }: { value: number | null }) {
   return (
     <div className={`progress ${value === null ? "indeterminate" : ""}`}>
@@ -119,15 +132,21 @@ export function UpdateBanner({ updater }: { updater: Updater }) {
           <InfoIcon />
         </span>
         <span className="banner-text">
-          流界 {info.version} 已发布。更新时会先断开键鼠共享，安装完成后自动重新打开。
+          流界 {info.version} 已发布。{installNote(info) ?? "更新时会先断开键鼠共享，安装完成后自动重新打开。"}
         </span>
         <span className="banner-actions">
           <button className="btn small" onClick={updater.dismiss}>
             稍后
           </button>
-          <button className="btn small primary" onClick={updater.install}>
-            立即更新
-          </button>
+          {info.manual ? (
+            <button className="btn small primary" onClick={() => api.openDownloadPage()}>
+              打开下载页
+            </button>
+          ) : (
+            <button className="btn small primary" onClick={updater.install}>
+              立即更新
+            </button>
+          )}
         </span>
       </div>
     );

@@ -1138,20 +1138,22 @@ dependencies = [
 
 [[package]]
 name = "flow-core"
-version = "0.2.3"
+version = "0.2.4-beta.1"
 dependencies = [
  "postcard",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "flow-net"
-version = "0.2.3"
+version = "0.2.4-beta.1"
 dependencies = [
  "bytes",
  "flow-core",
+ "if-addrs",
  "mdns-sd",
  "quinn",
  "rcgen",
@@ -1164,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "flow-platform"
-version = "0.2.3"
+version = "0.2.4-beta.1"
 dependencies = [
  "ashpd",
  "core-foundation 0.10.1",
@@ -1193,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "flowacross"
-version = "0.2.3"
+version = "0.2.4-beta.1"
 dependencies = [
  "flow-core",
  "flow-net",

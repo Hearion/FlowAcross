@@ -23,7 +23,7 @@ pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 /// 不让未认证的连接让本机缓冲 8 MB。
 pub const HANDSHAKE_FRAME_LEN: usize = 16 * 1024;
 
-/// 剪贴板文本最大字节数，超过则不同步（界面提示"内容过大"）。
+/// 剪贴板文本最大字节数，超过则不同步（静默跳过，界面没有提示）。
 pub const MAX_CLIPBOARD_TEXT: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,15 +60,59 @@ pub struct DisplayInfo {
     pub primary: bool,
     /// 屏幕的物理分辨率（像素）：macOS 为面板原生分辨率，Windows 为当前分辨率。
     /// 只用于显示，坐标换算一律用 `rect` 和 `scale`。
+    ///
+    /// `serde(default)` 只对 config.json（JSON，按字段名）有用；网络上用的 postcard 按顺序编码，
+    /// 没有"缺字段用默认值"这回事，给这个结构加字段就是不兼容的协议改动。
     #[serde(default)]
     pub native: Option<(u32, u32)>,
 }
 
+/// 对端一次最多上报这么多块显示器，多出来的不要。
+pub const MAX_DISPLAYS: usize = 16;
+
+impl DisplayInfo {
+    /// 对端上报的这块显示器能不能用：标识不为空、不太长、不含控制字符；位置、尺寸、缩放都是
+    /// 有限的数，而且在合理范围内。
+    ///
+    /// 非有限的数没有任何别的地方拦：NaN 写进 config.json 会变成 `null`，下次启动整个配置
+    /// 读不出来（配对全丢）；带 NaN 的矩形还会让光标计算出错。所以收到时就丢掉。
+    pub fn is_sane(&self) -> bool {
+        let r = &self.rect;
+        !self.local_id.is_empty()
+            && self.local_id.len() <= 128
+            && !self.local_id.chars().any(char::is_control)
+            && [r.x, r.y].iter().all(|v| v.is_finite() && v.abs() <= 1e7)
+            && [r.width, r.height]
+                .iter()
+                .all(|v| v.is_finite() && (1.0..=1e5).contains(v))
+            && self.scale.is_finite()
+            && (0.1..=16.0).contains(&self.scale)
+    }
+}
+
+/// 清理对端上报的显示器列表：丢掉不合法的（见 [`DisplayInfo::is_sane`]）和标识重复的，名称去掉
+/// 控制字符并截短，最多留 [`MAX_DISPLAYS`] 块。标识原样保留：之后还要原样发回给对方。
+pub fn sane_displays(list: Vec<DisplayInfo>) -> Vec<DisplayInfo> {
+    let mut out: Vec<DisplayInfo> = Vec::new();
+    for mut d in list {
+        if out.len() >= MAX_DISPLAYS {
+            break;
+        }
+        if !d.is_sane() || out.iter().any(|o| o.local_id == d.local_id) {
+            continue;
+        }
+        d.name = clean_name(&d.name);
+        out.push(d);
+    }
+    out
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ByeReason {
-    /// 应用退出或电脑关机。
+    /// 应用退出或电脑关机。**现在没有人发**：退出时直接关闭连接，关闭原因里带 `shutdown`。
+    /// 留着是因为 postcard 按序号编码，删掉会让后面的变体错位（`Paused`、`PairingRejected` 同理）。
     Shutdown,
-    /// 用户暂停了共享。
+    /// 用户暂停了共享。现在没有人发：暂停时连接保留，用 [`Message::Availability`] 通知。
     Paused,
     /// 用户移除了这台设备。
     Removed,
@@ -76,7 +120,7 @@ pub enum ByeReason {
     VersionMismatch,
     /// 对方不在本机的可信设备列表中（未配对，或已被移除）。
     Unpaired,
-    /// 用户拒绝或取消了配对。
+    /// 用户拒绝或取消了配对。现在没有人发：拒绝用 [`Message::PairReject`]。
     PairingRejected,
 }
 
@@ -196,7 +240,38 @@ pub enum Message {
     // ---- 以下为 0.2.3 新增，只发给版本不低于 [`WAKE_SINCE`] 的设备。
     /// 请对方点亮屏幕（屏幕熄灭后在控制方点「唤醒屏幕」）。对方做不到时什么都不发生。
     Wake,
+    // ---- 以下为 0.2.4 新增，只发给版本不低于 [`REMOTE_ACTIONS_SINCE`] 的设备。
+    /// 快捷键映射：请对方按一下这组键（修饰键在前，依次按下、反序抬起）。不需要先 `Enter`，
+    /// 键鼠不用切过去。最多 [`MAX_KEYSTROKE_KEYS`] 个键；对方暂停了共享时不理会。
+    KeyStroke {
+        keys: Vec<KeyCode>,
+    },
+    /// 被控制的一方请控制方把键鼠切到 `device`（在被控制的电脑上点托盘里的「切换到」）。
+    /// `device` 是控制方自己时表示回到它本机。只有正在控制发送方的设备才理会。
+    SwitchTo {
+        device: DeviceId,
+    },
+    /// 本机的状态：现在是否停在锁屏界面。会话建立时和变化时发送，对方据此提示
+    /// "需要在那台电脑上解锁"。
+    Status {
+        locked: bool,
+    },
+    /// 发送方眼里的整份设备布局（见 [`crate::layout::SharedLayout`]）。会话建立后、用户拖动了屏幕、
+    /// 或采纳了别的电脑的布局之后发送；对方比自己手里的新就照着摆。
+    Layout(crate::layout::SharedLayout),
 }
+
+/// 从这个版本起支持 [`Message::KeyStroke`]、[`Message::SwitchTo`]、[`Message::Status`] 和
+/// [`Message::Layout`]。
+pub const REMOTE_ACTIONS_SINCE: (u32, u32, u32) = (0, 2, 4);
+
+/// 对方是否认得 0.2.4 新增的消息（见 [`REMOTE_ACTIONS_SINCE`]）。
+pub fn peer_supports_remote_actions(peer_version: &str) -> bool {
+    version_at_least(peer_version, REMOTE_ACTIONS_SINCE)
+}
+
+/// 一条 [`Message::KeyStroke`] 最多带几个键（四个修饰键加一个主键绰绰有余）。
+pub const MAX_KEYSTROKE_KEYS: usize = 8;
 
 /// 从这个版本起支持 [`Message::Wake`]。
 pub const WAKE_SINCE: (u32, u32, u32) = (0, 2, 3);
@@ -361,6 +436,9 @@ pub fn version_at_least(version: &str, min: (u32, u32, u32)) -> bool {
 #[derive(Debug)]
 pub struct FrameDecoder {
     buf: Vec<u8>,
+    /// `buf` 里已经取走的字节数。取一帧只挪这个游标，等没有完整的帧了再一次性把剩下的搬到开头；
+    /// 每取一帧就搬一次的话，一次读进来很多小帧时是平方级的开销。
+    start: usize,
     limit: usize,
 }
 
@@ -368,16 +446,23 @@ impl Default for FrameDecoder {
     fn default() -> Self {
         Self {
             buf: Vec::new(),
+            start: 0,
             limit: MAX_FRAME_LEN,
         }
     }
 }
 
+/// 缓冲区空下来之后，容量超过这个数就还给系统（收过一次大帧不该一直占着几 MB）。
+const DECODER_KEEP_CAPACITY: usize = 256 * 1024;
+
 impl FrameDecoder {
-    /// 单帧最大长度为 `limit`（不超过 [`MAX_FRAME_LEN`]）。
+    /// 单帧最大长度为 `limit`（不超过 [`MAX_FRAME_LEN`]）。实际使用时是先建默认的再 `set_limit`，
+    /// 这个只有测试用。
+    #[cfg(test)]
     pub fn with_limit(limit: usize) -> Self {
         Self {
             buf: Vec::new(),
+            start: 0,
             limit: limit.min(MAX_FRAME_LEN),
         }
     }
@@ -388,22 +473,36 @@ impl FrameDecoder {
     }
 
     pub fn push(&mut self, data: &[u8]) {
+        self.compact();
         self.buf.extend_from_slice(data);
     }
 
-    pub fn next_message(&mut self) -> Result<Option<Message>, ProtocolError> {
-        if self.buf.len() < 4 {
-            return Ok(None);
+    /// 把还没取走的数据搬到缓冲区开头。
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
         }
-        let len = u32::from_be_bytes(self.buf[..4].try_into().expect("4 bytes")) as usize;
+        self.buf.drain(..self.start);
+        self.start = 0;
+        if self.buf.is_empty() && self.buf.capacity() > DECODER_KEEP_CAPACITY {
+            self.buf = Vec::new();
+        }
+    }
+
+    pub fn next_message(&mut self) -> Result<Option<Message>, ProtocolError> {
+        let pending = &self.buf[self.start..];
+        let Some((head, rest)) = pending.split_first_chunk::<4>() else {
+            return Ok(None);
+        };
+        let len = u32::from_be_bytes(*head) as usize;
         if len > self.limit {
             return Err(ProtocolError::TooLarge(len));
         }
-        if self.buf.len() < 4 + len {
+        if rest.len() < len {
             return Ok(None);
         }
-        let msg = decode_payload(&self.buf[4..4 + len]);
-        self.buf.drain(..4 + len);
+        let msg = decode_payload(&rest[..len]);
+        self.start += 4 + len;
         msg.map(Some)
     }
 }
@@ -475,6 +574,19 @@ mod tests {
             Message::PairCommit([3; 32]),
             Message::PairNonce([9; 32]),
             Message::Availability { accepting: false },
+            Message::Wake,
+            Message::KeyStroke {
+                keys: vec![KeyCode::LEFT_CTRL, KeyCode::C],
+            },
+            Message::SwitchTo {
+                device: DeviceId("ab12".into()),
+            },
+            Message::Status { locked: true },
+            Message::Layout(crate::layout::SharedLayout {
+                rev: 4,
+                by: DeviceId("ab12".into()),
+                offsets: vec![(DeviceId("ab12".into()), (0.0, -120.5))],
+            }),
         ]
     }
 
@@ -496,6 +608,32 @@ mod tests {
         );
         assert!(peer_supports_secure("0.1.7"));
         assert!(!peer_supports_secure("0.1.6"));
+        // 0.2.4 新增的三条排在 Wake（27）后面。
+        assert_eq!(encode_payload(&Message::Wake).unwrap()[0], 27);
+        assert_eq!(
+            encode_payload(&Message::KeyStroke { keys: vec![] }).unwrap()[0],
+            28
+        );
+        assert_eq!(
+            encode_payload(&Message::SwitchTo {
+                device: DeviceId(String::new())
+            })
+            .unwrap()[0],
+            29
+        );
+        assert_eq!(
+            encode_payload(&Message::Status { locked: false }).unwrap()[0],
+            30
+        );
+        let layout = crate::layout::SharedLayout {
+            rev: 0,
+            by: DeviceId(String::new()),
+            offsets: vec![],
+        };
+        assert_eq!(encode_payload(&Message::Layout(layout)).unwrap()[0], 31);
+        assert!(peer_supports_remote_actions("0.2.4"));
+        assert!(peer_supports_remote_actions("0.2.4-beta.1"));
+        assert!(!peer_supports_remote_actions("0.2.3"));
     }
 
     /// 旧版本按变体序号解析消息，已有消息的编码不能变。
@@ -574,8 +712,89 @@ mod tests {
         assert_eq!(got, samples());
     }
 
+    fn display_at(id: &str, rect: Rect, scale: f64) -> DisplayInfo {
+        DisplayInfo {
+            local_id: id.into(),
+            name: "屏幕".into(),
+            rect,
+            scale,
+            primary: false,
+            native: None,
+        }
+    }
+
     #[test]
-    fn datagram_roundtrip() {
+    fn displays_with_non_finite_or_absurd_numbers_are_dropped() {
+        let ok = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        assert!(display_at("1", ok, 2.0).is_sane());
+        for bad in [
+            display_at("1", Rect::new(f64::NAN, 0.0, 1920.0, 1080.0), 1.0),
+            display_at("1", Rect::new(0.0, f64::INFINITY, 1920.0, 1080.0), 1.0),
+            display_at("1", Rect::new(0.0, 0.0, f64::INFINITY, 1080.0), 1.0),
+            display_at("1", Rect::new(0.0, 0.0, 0.0, 1080.0), 1.0),
+            display_at("1", Rect::new(0.0, 0.0, 1920.0, -1.0), 1.0),
+            display_at("1", Rect::new(1e9, 0.0, 1920.0, 1080.0), 1.0),
+            display_at("1", ok, f64::NAN),
+            display_at("1", ok, 0.0),
+            display_at("", ok, 1.0),
+            display_at("a\u{0}b", ok, 1.0),
+            display_at(&"x".repeat(200), ok, 1.0),
+        ] {
+            assert!(!bad.is_sane(), "{bad:?}");
+        }
+        // 清理：不合法的和标识重复的丢掉，名称清理，数量封顶；标识原样保留。
+        let mut named = display_at("DP-1", ok, 1.0);
+        named.name = "  主\u{7}屏  ".into();
+        let list = vec![
+            named,
+            display_at("DP-1", Rect::new(1920.0, 0.0, 1920.0, 1080.0), 1.0),
+            display_at("2", Rect::new(f64::NAN, 0.0, 1.0, 1.0), 1.0),
+            display_at("3", Rect::new(1920.0, 0.0, 1280.0, 720.0), 1.5),
+        ];
+        let clean = sane_displays(list);
+        assert_eq!(
+            clean
+                .iter()
+                .map(|d| d.local_id.as_str())
+                .collect::<Vec<_>>(),
+            ["DP-1", "3"]
+        );
+        assert_eq!(clean[0].name, "主屏");
+        let many = (0..40)
+            .map(|i| {
+                display_at(
+                    &i.to_string(),
+                    Rect::new(f64::from(i) * 100.0, 0.0, 100.0, 100.0),
+                    1.0,
+                )
+            })
+            .collect();
+        assert_eq!(sane_displays(many).len(), MAX_DISPLAYS);
+    }
+
+    #[test]
+    fn decoder_handles_many_small_frames_and_partial_tails() {
+        let m = Message::Heartbeat { seq: 7 };
+        let frame = encode_frame(&m).unwrap();
+        let mut dec = FrameDecoder::default();
+        // 一次推进来很多帧，外加半帧。
+        let mut bytes = frame.repeat(1000);
+        bytes.extend_from_slice(&frame[..frame.len() - 1]);
+        dec.push(&bytes);
+        let mut n = 0;
+        while let Some(got) = dec.next_message().unwrap() {
+            assert_eq!(got, m);
+            n += 1;
+        }
+        assert_eq!(n, 1000);
+        // 补上最后一个字节：剩下的半帧接得上。
+        dec.push(&frame[frame.len() - 1..]);
+        assert_eq!(dec.next_message().unwrap(), Some(m));
+        assert_eq!(dec.next_message().unwrap(), None);
+    }
+
+    #[test]
+    fn payload_roundtrip() {
         let m = Message::MouseMove {
             session: 1,
             display: "2".into(),

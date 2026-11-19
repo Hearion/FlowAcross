@@ -18,10 +18,19 @@
 //! - 合成器可以单方面结束捕获（GNOME / KDE 都留了强制退出的快捷键），这时流界不会立刻知道，
 //!   要等心跳超时或再次撞到屏幕边。
 //!
-//! portal 和 EIS 都是异步接口，各用一个专门的线程跑单线程的 tokio 运行时；对外仍是同步的句柄。
+//! portal 和 EIS 都是异步接口，全部放在一条常驻线程上跑（单线程的 tokio 运行时），对外仍是同步的句柄。
+//! 必须是同一条：ashpd 全进程共用一条 D-Bus 连接，连接的读循环挂在创建它的那个运行时上；以前注入和
+//! 捕获各建各的运行时，先建连接的那个一结束，连接就废了，另一边再也收不到回复。
+//!
+//! **授权**（[`prompt`]）：系统的授权弹窗同一时刻只弹一个，最多等 [`AUTH_TIMEOUT`]；到时间没人点，
+//! 或者流界这边不需要了（停止捕获），就把弹窗关掉，不会一直挂在屏幕上，也不会把停止卡住。
+//! 等待期间界面显示倒计时（[`pending_authorization`]）。被拒绝、超时、被桌面收回之后不是从此作罢：
+//! 下次真的要用时（有设备连上、别的电脑把键鼠切过来）重新申请，需要的话再弹一次。
+//!
 //! 弹窗可能很久没人点，所以启动只等几秒：很快失败的（没有 portal、接口太旧）当场报错，其余在后台继续。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
@@ -33,9 +42,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use ashpd::desktop::PersistMode;
+use ashpd::desktop::ResponseError;
 use ashpd::desktop::clipboard::Clipboard;
 use ashpd::desktop::input_capture::{ActivatedBarrier, Barrier, Capabilities, InputCapture};
 use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop};
+use ashpd::zbus;
 use flow_core::geometry::Edge;
 use flow_core::keys::{KeyCode, MouseButton};
 use futures_util::{Stream, StreamExt};
@@ -49,12 +60,17 @@ use crate::linux_wlr_input::{
     Repeat, SWITCH_EDGES, button_code, button_from_code, push_event, repeat_loop,
 };
 use crate::{
-    CaptureHandler, CapturedEvent, InputCapture as CaptureTrait, InputInjector, PlatformError,
-    keymap,
+    AuthKind, AuthPrompt, CaptureHandler, CapturedEvent, InputCapture as CaptureTrait,
+    InputInjector, PlatformError, keymap,
 };
 
 /// 启动时最多等这么久：很快失败的当场报错，等用户点弹窗的在后台继续。
 const START_WAIT: Duration = Duration::from_secs(3);
+/// 建注入器时最多等这么久（它是在处理别的电脑发来的键鼠时建的，不能久等）。
+const INJECTOR_WAIT: Duration = Duration::from_millis(300);
+/// 系统的授权弹窗最多等这么久，到时间没人点就自动关掉。
+pub const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+const PORTAL_BUS: &str = "org.freedesktop.portal.Desktop";
 /// 在 EIS 握手时报的程序名。
 const EI_NAME: &str = "FlowAcross";
 /// 滚轮一格的单位（和流界、libei 的约定相同）。
@@ -81,6 +97,223 @@ pub(crate) fn runtime() -> Result<tokio::runtime::Runtime, String> {
         .enable_all()
         .build()
         .map_err(text)
+}
+
+// ---------------------------------------------------------------------------
+// 常驻的 portal 线程
+// ---------------------------------------------------------------------------
+
+/// 交给 portal 线程的一件事。闭包要能跨线程送过去，它造出来的任务只在那条线程上跑。
+type Job = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + Send>;
+
+/// 把一件事交给常驻的 portal 线程（第一次用到时启动，之后一直在）。见模块说明：所有 portal 的
+/// 活必须在同一个运行时上。
+fn spawn_on_portal_thread(job: Job) -> Result<(), String> {
+    static JOBS: OnceLock<Result<UnboundedSender<Job>, String>> = OnceLock::new();
+    let jobs = JOBS.get_or_init(|| {
+        let (tx, mut rx) = unbounded_channel::<Job>();
+        std::thread::Builder::new()
+            .name("flowacross-portal".into())
+            .spawn(move || {
+                let Ok(rt) = runtime() else {
+                    return;
+                };
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    while let Some(job) = rx.recv().await {
+                        tokio::task::spawn_local(job());
+                    }
+                });
+            })
+            .map(|_| tx)
+            .map_err(|e| format!("无法创建线程：{e}"))
+    });
+    match jobs {
+        Ok(tx) => tx
+            .send(job)
+            .map_err(|_| "流界的 portal 线程已经退出".to_owned()),
+        Err(e) => Err(e.clone()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 授权：倒计时、超时自动关闭
+// ---------------------------------------------------------------------------
+
+/// portal 这边出的问题。分两种，上层的处理不同。
+#[derive(Debug, Clone, PartialEq)]
+enum Failure {
+    /// 没拿到授权：用户点了拒绝、到时间没点、或者桌面后来把权限收回了。下次需要时重新申请。
+    Denied(String),
+    /// 别的问题：没有 portal、桌面版本太旧、通道出错。
+    Broken(String),
+}
+
+impl Failure {
+    fn to_platform(&self) -> PlatformError {
+        match self {
+            Failure::Denied(why) => PlatformError::Denied(why.clone()),
+            Failure::Broken(why) => PlatformError::Os(why.clone()),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Failure::Broken(why)
+    }
+}
+
+/// 正在等用户点的授权弹窗：哪一种、什么时候到期。
+static PENDING: Mutex<Option<(AuthKind, Instant)>> = Mutex::new(None);
+
+/// 距到期还有几秒（向上取整，到期后是 0）。
+fn seconds_left(deadline: Instant, now: Instant) -> u32 {
+    deadline.saturating_duration_since(now).as_secs_f64().ceil() as u32
+}
+
+/// 现在有没有系统的授权弹窗在等用户点，还剩多少秒自动关闭。界面据此显示倒计时。
+pub fn pending_authorization() -> Option<AuthPrompt> {
+    let (kind, deadline) = (*lock(&PENDING))?;
+    Some(AuthPrompt {
+        kind,
+        seconds_left: seconds_left(deadline, Instant::now()),
+    })
+}
+
+/// 本连接发出的请求在 portal 那边的对象路径的上一级。
+fn request_root(unique_name: &str) -> String {
+    format!(
+        "/org/freedesktop/portal/desktop/request/{}",
+        unique_name.trim_start_matches(':').replace('.', "_")
+    )
+}
+
+/// 从 D-Bus 的自省结果里取出直接下级的名字（`<node name="…"/>`）。
+fn child_nodes(xml: &str) -> Vec<String> {
+    const TAG: &str = "<node name=\"";
+    xml.match_indices(TAG)
+        .filter_map(|(at, _)| {
+            let rest = &xml[at + TAG.len()..];
+            let name = &rest[..rest.find('"')?];
+            // 下级的名字就是请求的标识，只会有这些字符；带 `/` 的是别的层级。
+            let plain =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            plain.then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// 本连接现在还没结束的 portal 请求（每个对应一个可能开着的系统弹窗）。
+///
+/// ashpd 发请求时用的标识是它内部随机生成的，拿不到；但这些请求对象都挂在同一个上级路径下，
+/// 问 portal 这个路径下有哪些下级就知道了。问不到时返回空（弹窗就关不掉，只能等用户自己关）。
+async fn open_requests(conn: &zbus::Connection) -> Vec<String> {
+    let Some(name) = conn.unique_name() else {
+        return Vec::new();
+    };
+    let root = request_root(name.as_str());
+    let reply = conn
+        .call_method(
+            Some(PORTAL_BUS),
+            root.as_str(),
+            Some("org.freedesktop.DBus.Introspectable"),
+            "Introspect",
+            &(),
+        )
+        .await;
+    let xml: String = match reply {
+        Ok(reply) => reply.body().deserialize().unwrap_or_default(),
+        Err(_) => return Vec::new(),
+    };
+    child_nodes(&xml)
+        .into_iter()
+        .map(|child| format!("{root}/{child}"))
+        .collect()
+}
+
+/// 关掉这些请求：portal 会把对应的系统弹窗收起来。
+async fn close_requests(conn: &zbus::Connection, paths: Vec<String>) {
+    for path in paths {
+        let _ = conn
+            .call_method(
+                Some(PORTAL_BUS),
+                path.as_str(),
+                Some("org.freedesktop.portal.Request"),
+                "Close",
+                &(),
+            )
+            .await;
+    }
+}
+
+/// 等授权期间拿着它。没等到结果就被丢掉时（到时间了，或者流界这边不需要了、整个任务被取消），
+/// 把这期间新出现的请求关掉，系统弹窗随之消失；倒计时的显示也在这里收掉。
+struct PromptGuard {
+    conn: zbus::Connection,
+    /// 开始等之前就有的请求，不归这次管。
+    before: Vec<String>,
+    answered: bool,
+}
+
+impl Drop for PromptGuard {
+    fn drop(&mut self) {
+        *lock(&PENDING) = None;
+        if self.answered {
+            return;
+        }
+        let conn = self.conn.clone();
+        let before = std::mem::take(&mut self.before);
+        // 丢弃发生在 portal 线程的任务里，可以就地再起一个任务去关。
+        tokio::task::spawn_local(async move {
+            let stale: Vec<String> = open_requests(&conn)
+                .await
+                .into_iter()
+                .filter(|path| !before.contains(path))
+                .collect();
+            close_requests(&conn, stale).await;
+        });
+    }
+}
+
+/// 发一个可能弹出系统授权窗口的请求并等结果。
+///
+/// - 同一时刻只弹一个：注入和捕获各要一次授权，排着来，用户不会同时面对两个弹窗。
+/// - 最多等 [`AUTH_TIMEOUT`]；到时间没人点就自动关掉弹窗，算作没有授权。
+/// - 等待期间 [`pending_authorization`] 报告还剩多少秒，界面上显示倒计时。
+///
+/// `what`：出错时写在提示里的动作名。
+async fn prompt<T>(
+    kind: AuthKind,
+    what: &str,
+    conn: &zbus::Connection,
+    request: impl Future<Output = Result<T, ashpd::Error>>,
+) -> Result<T, Failure> {
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _turn = ONE_AT_A_TIME.lock().await;
+    let mut guard = PromptGuard {
+        conn: conn.clone(),
+        before: open_requests(conn).await,
+        answered: false,
+    };
+    *lock(&PENDING) = Some((kind, Instant::now() + AUTH_TIMEOUT));
+    let outcome = tokio::time::timeout(AUTH_TIMEOUT, request).await;
+    match outcome {
+        Ok(result) => {
+            guard.answered = true;
+            result.map_err(|e| match e {
+                ashpd::Error::Response(ResponseError::Cancelled) => {
+                    Failure::Denied("在系统的授权窗口里选了拒绝".into())
+                }
+                e => Failure::Broken(portal_error(what, e)),
+            })
+        }
+        // `guard` 在这里被丢掉：关掉弹窗。
+        Err(_) => Err(Failure::Denied(format!(
+            "{} 秒内没有在系统的授权窗口里选择，窗口已自动关闭",
+            AUTH_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// 把 portal 的报错换成给用户看的话。
@@ -159,7 +392,7 @@ enum RemoteCmd {
 enum Status {
     Starting,
     Ready,
-    Failed(String),
+    Failed(Failure),
 }
 
 #[derive(Default)]
@@ -176,14 +409,23 @@ struct Remote {
     tx: UnboundedSender<RemoteCmd>,
     status: Mutex<Status>,
     clip: Mutex<Clip>,
-    count: AtomicU64,
 }
 
+/// 剪贴板的变化计数。放在会话外面：会话可以重建，计数不能倒退。
+static CLIP_COUNT: AtomicU64 = AtomicU64::new(1);
+
 impl Remote {
-    fn check(&self) -> Result<(), PlatformError> {
+    fn failure(&self) -> Option<Failure> {
         match &*lock(&self.status) {
-            Status::Failed(e) => Err(PlatformError::Os(e.clone())),
-            _ => Ok(()),
+            Status::Failed(f) => Some(f.clone()),
+            _ => None,
+        }
+    }
+
+    fn check(&self) -> Result<(), PlatformError> {
+        match self.failure() {
+            Some(f) => Err(f.to_platform()),
+            None => Ok(()),
         }
     }
 
@@ -195,41 +437,56 @@ impl Remote {
     }
 }
 
-/// 进程里唯一的远程桌面会话，第一次用到时启动。
-fn remote() -> Arc<Remote> {
-    static REMOTE: OnceLock<Arc<Remote>> = OnceLock::new();
-    REMOTE
-        .get_or_init(|| {
-            let (tx, rx) = unbounded_channel();
-            let remote = Arc::new(Remote {
-                tx,
-                status: Mutex::new(Status::Starting),
-                clip: Mutex::new(Clip::default()),
-                count: AtomicU64::new(1),
-            });
-            let for_thread = remote.clone();
-            let spawned = std::thread::Builder::new()
-                .name("flowacross-portal-remote".into())
-                .spawn(move || {
-                    let result = runtime().and_then(|rt| rt.block_on(remote_main(rx, &for_thread)));
-                    let why = result.err().unwrap_or_else(|| "远程桌面会话已结束".into());
-                    *lock(&for_thread.status) = Status::Failed(why);
-                });
-            if let Err(e) = spawned {
-                *lock(&remote.status) = Status::Failed(format!("无法创建线程：{e}"));
-            }
-            remote
-        })
-        .clone()
+/// 为什么要用远程桌面会话：决定上一个会话已经失败时要不要重新申请。
+#[derive(Clone, Copy, PartialEq)]
+enum Need {
+    /// 要注入键鼠（有设备连上、别的电脑把键鼠切过来）：失败过就重新申请，需要的话再弹一次授权。
+    Input,
+    /// 只是读写剪贴板（每半秒查一次）：不为它弹窗，沿用现有的会话，失败了就报失败。
+    Clipboard,
 }
 
-/// 等会话启动：最多等 [`START_WAIT`]，已经失败就返回原因，还在等用户点弹窗的当作正常。
-fn wait_started(remote: &Remote) -> Result<(), PlatformError> {
-    let deadline = Instant::now() + START_WAIT;
+/// 当前的远程桌面会话。失败之后会被新的换掉，所以不是只建一次。
+static REMOTE: Mutex<Option<Arc<Remote>>> = Mutex::new(None);
+
+/// 取远程桌面会话：没有就启动一个；已经失败的按 `need` 决定是重新申请还是报失败。
+fn remote(need: Need) -> Arc<Remote> {
+    let mut slot = lock(&REMOTE);
+    if let Some(current) = slot.as_ref()
+        && (need == Need::Clipboard || current.failure().is_none())
+    {
+        return current.clone();
+    }
+    let (tx, rx) = unbounded_channel();
+    let remote = Arc::new(Remote {
+        tx,
+        status: Mutex::new(Status::Starting),
+        clip: Mutex::new(Clip::default()),
+    });
+    let for_task = remote.clone();
+    let job: Job = Box::new(move || {
+        Box::pin(async move {
+            let why = match remote_main(rx, &for_task).await {
+                Ok(()) => Failure::Broken("远程桌面会话已结束".into()),
+                Err(why) => why,
+            };
+            *lock(&for_task.status) = Status::Failed(why);
+        })
+    });
+    if let Err(e) = spawn_on_portal_thread(job) {
+        *lock(&remote.status) = Status::Failed(Failure::Broken(e));
+    }
+    *slot = Some(remote.clone());
+    remote
+}
+
+/// 等会话启动：最多等 `wait`，已经失败就返回原因，还在等用户点弹窗的当作正常。
+fn wait_started(remote: &Remote, wait: Duration) -> Result<(), PlatformError> {
+    let deadline = Instant::now() + wait;
     loop {
         match lock(&remote.status).clone() {
             Status::Ready => return Ok(()),
-            Status::Failed(e) => return Err(PlatformError::Os(e)),
+            Status::Failed(f) => return Err(f.to_platform()),
             Status::Starting if Instant::now() >= deadline => return Ok(()),
             Status::Starting => std::thread::sleep(Duration::from_millis(20)),
         }
@@ -317,7 +574,7 @@ impl Sender {
 
 type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + 'a>>;
 
-async fn remote_main(mut rx: UnboundedReceiver<RemoteCmd>, remote: &Remote) -> Result<(), String> {
+async fn remote_main(mut rx: UnboundedReceiver<RemoteCmd>, remote: &Remote) -> Result<(), Failure> {
     let proxy = RemoteDesktop::new()
         .await
         .map_err(|e| portal_error("连接远程桌面 portal ", e))?;
@@ -349,12 +606,22 @@ async fn remote_main(mut rx: UnboundedReceiver<RemoteCmd>, remote: &Remote) -> R
             .and_then(|r| r.response())
             .map_err(|e| portal_error("申请键鼠控制权限", e))?;
     }
-    // 这一步会弹系统窗口（没有可用的令牌时），用户点了才返回。
-    let started = proxy
-        .start(&session, None)
-        .await
-        .and_then(|r| r.response())
-        .map_err(|e| portal_error("申请键鼠控制权限", e))?;
+    // 这一步会弹系统窗口（没有可用的令牌时），用户点了才返回；最多等一分钟。
+    let started = prompt(
+        AuthKind::Inject,
+        "申请键鼠控制权限",
+        proxy.connection(),
+        async { proxy.start(&session, None).await.and_then(|r| r.response()) },
+    )
+    .await;
+    let started = match started {
+        Ok(started) => started,
+        Err(why) => {
+            // 没拿到授权：把会话也关掉，不留一个半开的在 portal 那边。
+            let _ = session.close().await;
+            return Err(why);
+        }
+    };
     if let Some(token) = started.restore_token() {
         save_token(token);
     }
@@ -432,10 +699,11 @@ async fn remote_main(mut rx: UnboundedReceiver<RemoteCmd>, remote: &Remote) -> R
             event = events.next() => {
                 match event {
                     Some(Ok(EiEvent::Disconnected(_))) | None => {
-                        return Err("输入通道已断开（桌面收回了键鼠控制权限）".into());
+                        // 算作"没有授权"：下次需要时重新申请。
+                        return Err(Failure::Denied("桌面收回了键鼠控制权限".into()));
                     }
                     Some(Ok(event)) => sender.on_event(event),
-                    Some(Err(e)) => return Err(format!("输入通道出错：{e}")),
+                    Some(Err(e)) => return Err(format!("输入通道出错：{e}").into()),
                 }
             }
             Some(change) = owner_changed.next() => {
@@ -446,7 +714,7 @@ async fn remote_main(mut rx: UnboundedReceiver<RemoteCmd>, remote: &Remote) -> R
                 }
                 clip.owned = None;
                 clip.types = change.mime_types();
-                remote.count.fetch_add(1, Ordering::SeqCst);
+                CLIP_COUNT.fetch_add(1, Ordering::SeqCst);
             }
             Some((mime, serial)) = transfers.next() => {
                 // 别的程序要粘贴我们提供的内容。
@@ -482,9 +750,11 @@ pub struct PortalInjector {
 }
 
 impl PortalInjector {
+    /// 上一个会话失败过（被拒绝、超时、被收回）的话，这里会重新申请：引擎只在"又需要了"的时候
+    /// 才重建注入器（见 `Engine::inject`），不会每个键鼠事件都来一次。
     pub fn new() -> Result<Self, PlatformError> {
-        let remote = remote();
-        wait_started(&remote)?;
+        let remote = remote(Need::Input);
+        wait_started(&remote, INJECTOR_WAIT)?;
         Ok(Self { remote })
     }
 }
@@ -536,14 +806,20 @@ impl InputInjector for PortalInjector {
     }
 }
 
-/// portal 的剪贴板（GNOME）。
-struct PortalSelection {
-    remote: Arc<Remote>,
+/// portal 的剪贴板（GNOME）。每次都取当前的远程桌面会话：会话失败后会被新的换掉，
+/// 不能一直抱着最初那个。
+struct PortalSelection;
+
+impl PortalSelection {
+    fn remote(&self) -> Arc<Remote> {
+        remote(Need::Clipboard)
+    }
 }
 
 impl Selection for PortalSelection {
     fn types(&self) -> Vec<String> {
-        let clip = lock(&self.remote.clip);
+        let remote = self.remote();
+        let clip = lock(&remote.clip);
         match &clip.owned {
             Some(offer) => offer.iter().map(|(t, _)| t.clone()).collect(),
             None => clip.types.clone(),
@@ -551,8 +827,9 @@ impl Selection for PortalSelection {
     }
 
     fn read(&self, mime: &str, timeout: Duration) -> Option<Vec<u8>> {
+        let remote = self.remote();
         {
-            let clip = lock(&self.remote.clip);
+            let clip = lock(&remote.clip);
             if let Some(offer) = &clip.owned {
                 return offer
                     .iter()
@@ -564,13 +841,12 @@ impl Selection for PortalSelection {
             }
         }
         let (tx, rx) = mpsc::channel();
-        self.remote
-            .send(RemoteCmd::ClipRead(mime.to_owned(), tx))
-            .ok()?;
+        remote.send(RemoteCmd::ClipRead(mime.to_owned(), tx)).ok()?;
         rx.recv_timeout(timeout).ok().flatten()
     }
 
     fn offer(&self, items: Vec<(&str, Vec<u8>)>) -> Result<(), PlatformError> {
+        let remote = self.remote();
         let offer: Offer = Arc::new(
             items
                 .into_iter()
@@ -579,28 +855,27 @@ impl Selection for PortalSelection {
         );
         let mimes: Vec<String> = offer.iter().map(|(t, _)| t.clone()).collect();
         {
-            let mut clip = lock(&self.remote.clip);
+            let mut clip = lock(&remote.clip);
             if !clip.available {
                 return Err(PlatformError::Os(
                     "写入剪贴板失败：还没有拿到桌面的剪贴板权限（请在系统弹窗里点允许）".into(),
                 ));
             }
             clip.owned = Some(offer);
-            self.remote.count.fetch_add(1, Ordering::SeqCst);
+            CLIP_COUNT.fetch_add(1, Ordering::SeqCst);
         }
-        self.remote.send(RemoteCmd::ClipSet(mimes))
+        remote.send(RemoteCmd::ClipSet(mimes))
     }
 
     fn change_count(&self) -> u64 {
-        self.remote.count.load(Ordering::SeqCst)
+        CLIP_COUNT.load(Ordering::SeqCst)
     }
 }
 
 /// GNOME 上的剪贴板后端。
 pub(crate) fn selection() -> Result<Arc<dyn Selection>, PlatformError> {
-    let remote = remote();
-    wait_started(&remote)?;
-    Ok(Arc::new(PortalSelection { remote }))
+    wait_started(&remote(Need::Clipboard), START_WAIT)?;
+    Ok(Arc::new(PortalSelection))
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +986,25 @@ impl Scroll {
     }
 }
 
+/// 启动阶段的每一步都和"停止"的命令赛跑：等授权弹窗、等 portal 回复的时候被叫停，马上返回
+/// `None`，不用等那一步走完（以前停止要一直等到有人点了弹窗）。期间收到的其他命令没有意义，丢掉。
+async fn unless_stopped<T>(
+    rx: &mut UnboundedReceiver<CaptureCmd>,
+    step: impl Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(step);
+    loop {
+        tokio::select! {
+            biased;
+            cmd = rx.recv() => match cmd {
+                None | Some(CaptureCmd::Stop) => return None,
+                Some(_) => {}
+            },
+            out = &mut step => return Some(out),
+        }
+    }
+}
+
 /// 读区域、设屏障、启用。返回屏障编号对应的边。
 async fn arm(
     portal: &InputCapture<'_>,
@@ -785,31 +1079,47 @@ async fn capture_main(
     mut rx: UnboundedReceiver<CaptureCmd>,
     shared: Arc<CaptureShared>,
     repeat: mpsc::Sender<Repeat>,
-    started: mpsc::Sender<Result<(), String>>,
-) -> Result<(), String> {
-    let portal = InputCapture::new()
-        .await
+    started: mpsc::Sender<Result<(), Failure>>,
+) -> Result<(), Failure> {
+    let Some(portal) = unless_stopped(&mut rx, InputCapture::new()).await else {
+        return Ok(());
+    };
+    let portal = portal
         .map_err(|e| portal_error("连接输入捕获 portal（需要 GNOME 45 / KDE 6.1 以上）", e))?;
-    // 这一步可能弹系统窗口。
-    let (session, _) = portal
-        .create_session(None, Capabilities::Keyboard | Capabilities::Pointer)
-        .await
-        .map_err(|e| portal_error("申请键鼠捕获权限", e))?;
-    let fd = portal
-        .connect_to_eis(&session)
-        .await
-        .map_err(|e| portal_error("建立输入通道", e))?;
+    // 这一步可能弹系统窗口：最多等一分钟，被叫停时弹窗跟着关掉。
+    let asked = prompt(
+        AuthKind::Capture,
+        "申请键鼠捕获权限",
+        portal.connection(),
+        portal.create_session(None, Capabilities::Keyboard | Capabilities::Pointer),
+    );
+    let Some(created) = unless_stopped(&mut rx, asked).await else {
+        return Ok(());
+    };
+    let (session, _) = created?;
+    // 之后的每一步被叫停时，都要把刚建好的会话关掉。
+    macro_rules! step {
+        ($future:expr) => {
+            match unless_stopped(&mut rx, $future).await {
+                Some(out) => out,
+                None => {
+                    let _ = session.close().await;
+                    return Ok(());
+                }
+            }
+        };
+    }
+    let fd = step!(portal.connect_to_eis(&session)).map_err(|e| portal_error("建立输入通道", e))?;
     let context = ei::Context::new(UnixStream::from(fd)).map_err(text)?;
-    let (connection, mut events) = context
-        .handshake_tokio(EI_NAME, ei::handshake::ContextType::Receiver)
-        .await
-        .map_err(|e| format!("输入通道握手失败：{e}"))?;
+    let (connection, mut events) =
+        step!(context.handshake_tokio(EI_NAME, ei::handshake::ContextType::Receiver))
+            .map_err(|e| format!("输入通道握手失败：{e}"))?;
     let fail = |e: ashpd::Error| portal_error("订阅键鼠捕获的通知", e);
-    let mut activated = Box::pin(portal.receive_activated().await.map_err(fail)?);
-    let mut deactivated = Box::pin(portal.receive_deactivated().await.map_err(fail)?);
-    let mut zones_changed = Box::pin(portal.receive_zones_changed().await.map_err(fail)?);
-    let mut disabled = Box::pin(portal.receive_disabled().await.map_err(fail)?);
-    let mut barriers = arm(&portal, &session).await?;
+    let mut activated = Box::pin(step!(portal.receive_activated()).map_err(fail)?);
+    let mut deactivated = Box::pin(step!(portal.receive_deactivated()).map_err(fail)?);
+    let mut zones_changed = Box::pin(step!(portal.receive_zones_changed()).map_err(fail)?);
+    let mut disabled = Box::pin(step!(portal.receive_disabled()).map_err(fail)?);
+    let mut barriers = step!(arm(&portal, &session))?;
     let _ = started.send(Ok(()));
 
     // 合成器正在把键鼠交给我们，以及这次的编号。
@@ -877,10 +1187,11 @@ async fn capture_main(
             event = events.next() => {
                 let event = match event {
                     Some(Ok(EiEvent::Disconnected(_))) | None => {
-                        return Err("输入通道已断开".into());
+                        // 桌面单方面结束了捕获：算作"没有授权"，下次需要时重新申请。
+                        return Err(Failure::Denied("桌面收回了键鼠捕获权限".into()));
                     }
                     Some(Ok(event)) => event,
-                    Some(Err(e)) => return Err(format!("输入通道出错：{e}")),
+                    Some(Err(e)) => return Err(format!("输入通道出错：{e}").into()),
                 };
                 if let EiEvent::SeatAdded(e) = &event {
                     e.seat.bind_capabilities(
@@ -958,10 +1269,13 @@ async fn capture_main(
     Ok(())
 }
 
+/// 捕获任务的结局。`None`：还在跑；`Some(None)`：被叫停，正常结束；`Some(Some(_))`：自己出了问题。
+type Ending = Mutex<Option<Option<Failure>>>;
+
 #[derive(Default)]
 pub struct PortalCapture {
     tx: Option<UnboundedSender<CaptureCmd>>,
-    thread: Option<JoinHandle<()>>,
+    ending: Option<Arc<Ending>>,
     repeat: Option<(mpsc::Sender<Repeat>, JoinHandle<()>)>,
 }
 
@@ -989,48 +1303,69 @@ impl CaptureTrait for PortalCapture {
                 )
             })
             .map_err(spawn_error)?;
-        let for_main = shared.clone();
-        let repeat_for_main = repeat_tx.clone();
-        let thread = std::thread::Builder::new()
-            .name("flowacross-portal-capture".into())
-            .spawn(move || {
-                let failed = started_tx.clone();
-                let result = runtime().and_then(|rt| {
-                    rt.block_on(capture_main(rx, for_main, repeat_for_main, started_tx))
-                });
-                if let Err(e) = result {
-                    let _ = failed.send(Err(e));
+        let ending: Arc<Ending> = Arc::default();
+        let (for_main, repeat_for_main) = (shared.clone(), repeat_tx.clone());
+        let (ending_for_task, want_for_task) = (ending.clone(), want.clone());
+        let job: Job = Box::new(move || {
+            Box::pin(async move {
+                let result = capture_main(rx, for_main, repeat_for_main, started_tx.clone()).await;
+                let failure = result.err();
+                if let Some(why) = &failure {
+                    let _ = started_tx.send(Err(why.clone()));
+                }
+                *lock(&ending_for_task) = Some(failure);
+                // 自己结束的（不是被 `stop` 叫停的）：全局的句柄还指着这一次，清掉。
+                let mut active = lock(&ACTIVE);
+                if active
+                    .as_ref()
+                    .is_some_and(|h| Arc::ptr_eq(&h.want, &want_for_task))
+                {
+                    *active = None;
                 }
             })
-            .map_err(spawn_error)?;
+        });
         self.repeat = Some((repeat_tx, repeat_thread));
-        self.thread = Some(thread);
         self.tx = Some(tx.clone());
-
-        // 很快失败的当场报错；等用户点弹窗的在后台继续。
-        if let Ok(Err(e)) = started_rx.recv_timeout(START_WAIT) {
+        self.ending = Some(ending);
+        if let Err(e) = spawn_on_portal_thread(job) {
             self.stop();
             return Err(PlatformError::Os(e));
         }
+
+        // 很快失败的当场报错；等用户点弹窗的在后台继续（之后的失败由 `failure` 报告）。
+        if let Ok(Err(why)) = started_rx.recv_timeout(START_WAIT) {
+            self.stop();
+            return Err(why.to_platform());
+        }
         *lock(&ACTIVE) = Some(CaptureHandle { tx, want });
-        // 顺便把注入用的会话也启动起来：它的授权弹窗最好在用户还坐在这台电脑前时出现，
-        // 而不是等别的电脑第一次把鼠标移过来的时候。
-        let _ = remote();
+        // 顺便把注入用的会话也准备好：它的授权弹窗最好在用户还坐在这台电脑前时出现，
+        // 而不是等别的电脑第一次把鼠标移过来的时候。上次没拿到授权的话，这里会重新申请。
+        let _ = remote(Need::Input);
         Ok(())
     }
 
+    /// 不等任务结束：任务在常驻的 portal 线程上，收到停止命令后自己收尾（正在等授权弹窗的话
+    /// 把弹窗关掉）。以前这里要等线程退出，弹窗没人点就一直卡着。
     fn stop(&mut self) {
-        *lock(&ACTIVE) = None;
         if let Some(tx) = self.tx.take() {
+            let mut active = lock(&ACTIVE);
+            if active.as_ref().is_some_and(|h| h.tx.same_channel(&tx)) {
+                *active = None;
+            }
+            drop(active);
             let _ = tx.send(CaptureCmd::Stop);
         }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        self.ending = None;
         if let Some((tx, t)) = self.repeat.take() {
             let _ = tx.send(Repeat::Stop);
             let _ = t.join();
         }
+    }
+
+    fn failure(&self) -> Option<PlatformError> {
+        let ending = self.ending.as_ref()?;
+        let failure = lock(ending).clone()??;
+        Some(failure.to_platform())
     }
 }
 
@@ -1055,6 +1390,67 @@ mod tests {
             primary: false,
             wl_global: 1,
         }
+    }
+
+    #[test]
+    fn request_paths_follow_the_portal_convention() {
+        // 连接名 `:1.42` 在路径里写成 `1_42`。
+        assert_eq!(
+            request_root(":1.42"),
+            "/org/freedesktop/portal/desktop/request/1_42"
+        );
+        let xml = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "x">
+<node>
+  <interface name="org.freedesktop.DBus.Introspectable"/>
+  <node name="ashpd_Ab12cD"/>
+  <node name="t_9"/>
+  <node name="bad/child"/>
+  <node name=""/>
+</node>"#;
+        assert_eq!(child_nodes(xml), vec!["ashpd_Ab12cD", "t_9"]);
+        assert!(child_nodes("<node></node>").is_empty());
+        assert!(child_nodes("").is_empty());
+    }
+
+    #[test]
+    fn countdown_rounds_up_and_stops_at_zero() {
+        let now = Instant::now();
+        assert_eq!(seconds_left(now + Duration::from_secs(60), now), 60);
+        assert_eq!(seconds_left(now + Duration::from_millis(59_100), now), 60);
+        assert_eq!(seconds_left(now + Duration::from_millis(900), now), 1);
+        assert_eq!(seconds_left(now, now), 0);
+        assert_eq!(seconds_left(now, now + Duration::from_secs(5)), 0);
+    }
+
+    #[test]
+    fn denied_and_broken_map_to_different_platform_errors() {
+        assert!(matches!(
+            Failure::Denied("x".into()).to_platform(),
+            PlatformError::Denied(_)
+        ));
+        assert!(matches!(
+            Failure::from("y".to_owned()).to_platform(),
+            PlatformError::Os(_)
+        ));
+    }
+
+    /// 启动阶段被叫停时不等那一步走完；其他命令不打断它。
+    #[test]
+    fn startup_steps_yield_to_stop() {
+        let rt = runtime().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            // 没有命令：正常走完。
+            assert_eq!(unless_stopped(&mut rx, async { 7 }).await, Some(7));
+            // 无关的命令不打断。
+            tx.send(CaptureCmd::Edges).unwrap();
+            let slow = tokio::time::sleep(Duration::from_millis(30));
+            assert_eq!(unless_stopped(&mut rx, slow).await, Some(()));
+            // 永远等不到结果的一步（没人点的授权弹窗）：一叫停就返回。
+            tx.send(CaptureCmd::Stop).unwrap();
+            let never = std::future::pending::<()>();
+            assert_eq!(unless_stopped(&mut rx, never).await, None);
+        });
     }
 
     #[test]

@@ -48,6 +48,20 @@ export interface DeviceView {
   remote_paused: boolean;
   /** 可以请它点亮屏幕：连着，而且对方的版本支持。 */
   can_wake: boolean;
+  /** 对方停在锁屏界面（它自己报告的；旧版本不报告）。 */
+  locked: boolean;
+  /** 现在可以把键鼠切到这台设备（本机这一项表示可以回到本机）。 */
+  can_switch: boolean;
+  /** 快捷键映射可以把按键发给它：连着，而且对方的版本支持（0.2.4 起）。 */
+  can_send_keys: boolean;
+  /** 没连上的原因和处理办法；连着、或没有可说的时为 null。 */
+  problem: ProblemView | null;
+}
+
+/** 设备连不上 / 离线的原因和按顺序排查的步骤。 */
+export interface ProblemView {
+  summary: string;
+  steps: string[];
 }
 
 export interface NearbyView {
@@ -56,6 +70,8 @@ export interface NearbyView {
   os: Os;
   /** 正在连接或配对中。 */
   connecting: boolean;
+  /** 上次配对没连上的原因和处理办法。 */
+  problem: ProblemView | null;
 }
 
 export interface PairingView {
@@ -101,6 +117,33 @@ export interface Settings {
   wheel_speed: number;
   /** 有设备连着时，不让这台电脑的屏幕自动熄灭。 */
   keep_awake: boolean;
+  /** 这台电脑上的快捷键。 */
+  hotkeys: Hotkeys;
+  /** 设备布局在各台电脑之间同步：在任意一台上拖动屏幕，其他电脑跟着变。 */
+  sync_layout: boolean;
+}
+
+/** 一组按键（flow-core hotkeys::KeyCombo）：`mods` 是修饰键位掩码（见 keys.ts 的 MOD），`key` 是 HID 键码。 */
+export interface KeyCombo {
+  mods: number;
+  key: number;
+}
+
+/** 这台电脑上的快捷键（flow-core hotkeys::Hotkeys）。只有物理键盘所在的电脑看得到按键，各台电脑各设各的。 */
+export interface Hotkeys {
+  /** 切到左边相邻的电脑；null 表示不用。 */
+  switch_left: KeyCombo | null;
+  switch_right: KeyCombo | null;
+  /** 切到指定的电脑（可以是本机：回到本机）。 */
+  devices: { device: string; combo: KeyCombo }[];
+  /** 快捷键映射：按下 trigger，让 device 收到 send。 */
+  mappings: KeyMapping[];
+}
+
+export interface KeyMapping {
+  trigger: KeyCombo;
+  send: KeyCombo;
+  device: string;
 }
 
 export type MacModifier = "control" | "option" | "command";
@@ -140,7 +183,14 @@ export interface UpdateInfo {
   current: string;
   notes: string | null;
   date: string | null;
+  /** 这份流界的安装方式，决定更新怎么装。 */
+  kind: InstallKind;
+  /** 不能自动安装（Linux 上认不出安装方式）：改为显示「打开下载页」。 */
+  manual: boolean;
 }
+
+/** bundled：Windows 安装包 / macOS 应用；其余是 Linux 的三种安装包和认不出来的情况。 */
+export type InstallKind = "bundled" | "app_image" | "deb" | "pacman" | "manual";
 
 export interface UpdateProgress {
   downloaded: number;
@@ -182,6 +232,8 @@ export interface FileOfferView {
 }
 
 export interface StateView {
+  /** 这份状态的序号，越大越新。并发推送时先算出来的可能后到，界面丢掉比手里旧的。 */
+  seq: number;
   local: { id: string; name: string; os: Os };
   onboarded: boolean;
   port: number;
@@ -213,4 +265,17 @@ export interface StateView {
   receive_dir: string | null;
   /** 启动时配置文件损坏的说明（原因和备份位置）；用户点「知道了」前一直显示。 */
   config_warning: string | null;
+  /** 系统的授权弹窗正在等用户点（只有 Linux 的 GNOME / KDE 会有），显示倒计时。 */
+  auth_prompt: AuthPromptView | null;
+  /** 没拿到授权的事：提示并给「重新授权」。 */
+  auth_denied: AuthKind[];
+}
+
+/** capture：捕获这台电脑的键鼠（切到别的电脑要用）；inject：控制这台电脑的键鼠（别的电脑过来要用）。 */
+export type AuthKind = "capture" | "inject";
+
+export interface AuthPromptView {
+  kind: AuthKind;
+  /** 收到这份状态时还剩多少秒；到时间没点，流界会把系统弹窗关掉。 */
+  seconds_left: number;
 }

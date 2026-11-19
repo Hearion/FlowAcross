@@ -139,6 +139,37 @@ pub fn keep_awake_problem() -> Option<String> {
     })
 }
 
+/// 现在是不是停在锁屏界面：读 logind 里本会话的 `LockedHint`。GNOME、KDE 锁屏时会设置；
+/// Sway、Hyprland 上要看锁屏程序是不是通过 logind 上锁的（`loginctl lock-session`），没设置时
+/// 一直是"没锁"。没有 logind、或两秒内没有回应时返回 `None`。
+pub fn screen_locked() -> Option<bool> {
+    let rt = linux_portal::runtime().ok()?;
+    rt.block_on(async {
+        let query = async {
+            let conn = zbus::Connection::system().await.ok()?;
+            // 直接调一次 `Properties.Get`，不建带属性缓存的代理（那要多订阅一次变化信号，
+            // 而这条连接查完就丢）。`session/auto`：调用方所在的会话；流界由用户服务管理器
+            // 启动时，是该用户的图形会话。
+            let reply = conn
+                .call_method(
+                    Some("org.freedesktop.login1"),
+                    "/org/freedesktop/login1/session/auto",
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &("org.freedesktop.login1.Session", "LockedHint"),
+                )
+                .await
+                .ok()?;
+            let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+            bool::try_from(value).ok()
+        };
+        tokio::time::timeout(Duration::from_secs(2), query)
+            .await
+            .ok()
+            .flatten()
+    })
+}
+
 async fn inhibit() -> Result<zbus::Connection, String> {
     let conn = zbus::Connection::session()
         .await
@@ -158,6 +189,16 @@ async fn inhibit() -> Result<zbus::Connection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 查询锁屏状态不会卡住、不会出错。不断言结果：没有 logind（容器、CI）时查不到，
+    /// 有的话跑测试的时候屏幕也可能正锁着。
+    #[test]
+    fn lock_state_query_returns_promptly() {
+        let started = std::time::Instant::now();
+        let locked = screen_locked();
+        eprintln!("screen_locked() = {locked:?}");
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
 
     /// Xvfb 里屏幕永远亮着；点亮屏幕的请求应当被接受。
     #[test]

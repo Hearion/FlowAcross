@@ -126,6 +126,14 @@ fn transport() -> Arc<quinn::TransportConfig> {
     ));
     // 数据报只用来发鼠标位置，过时的没有意义：发送缓冲放小，网络卡住时 quinn 会丢掉最旧的。
     t.datagram_send_buffer_size(16 * 1024);
+    // 收紧对方能让本机缓冲的数据量。任何人都能连进来，quinn 的默认值是每条连接 100 条双向流、
+    // 100 条单向流、每条流 1.25 MB、连接总量不限：还没通过认证的连接就能占掉几百 MB。
+    // 流界只用双向流：一条控制流，加上传文件时按需新开的（一次一份，两个方向各一条，留些余量）。
+    t.max_concurrent_uni_streams(0u32.into());
+    t.max_concurrent_bidi_streams(16u32.into());
+    // 整条连接没被应用读走的数据最多这么多。单条流的窗口（默认 1.25 MB）才是传文件速度的上限，
+    // 这个值只是封顶。
+    t.receive_window((8u32 * 1024 * 1024).into());
     Arc::new(t)
 }
 
@@ -243,7 +251,11 @@ mod tests {
         let a = Identity::generate().unwrap();
         let b = Identity::generate().unwrap();
         let ep_a = bind_endpoint(&a, 0).unwrap();
-        assert!(ep_a.local_addr().unwrap().is_ipv6(), "测试机需启用 IPv6");
+        // 没有 IPv6 的环境（有的容器、CI）里端点退回到只有 IPv4，这个测试要验证的双栈行为无从谈起。
+        if !ep_a.local_addr().unwrap().is_ipv6() {
+            eprintln!("这台机器没有启用 IPv6，跳过双栈测试");
+            return;
+        }
         for ip in [
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(Ipv6Addr::LOCALHOST),

@@ -90,7 +90,7 @@ pub fn install() -> Result<(), PlatformError> {
 
 /// 移除后台服务，并恢复 AWDL（弹出管理员授权窗口）。
 pub fn uninstall() -> Result<(), PlatformError> {
-    set_active(false);
+    let _ = set_active(false);
     let cmd = format!(
         "(launchctl bootout system/{LABEL} 2>/dev/null; true) && rm -f {plist} {script} && \
          (rmdir {dir} 2>/dev/null; true) && (ifconfig awdl0 up 2>/dev/null; true)",
@@ -102,12 +102,38 @@ pub fn uninstall() -> Result<(), PlatformError> {
 }
 
 /// 创建或删除标志文件，通知后台服务关闭 / 恢复 AWDL。
-pub fn set_active(active: bool) {
+///
+/// 创建失败时返回错误（多半是别的用户先占了这个名字，/tmp 谁都能写）：低延迟模式这次不会生效，
+/// 调用方应当让用户知道，而不是悄悄不起作用。
+pub fn set_active(active: bool) -> Result<(), PlatformError> {
+    let flag = std::path::Path::new(FLAG);
     if active {
-        let _ = std::fs::write(FLAG, b"");
+        create_flag(flag).map_err(|e| PlatformError::Os(format!("无法创建标志文件 {FLAG}（{e}）")))
     } else {
-        let _ = std::fs::remove_file(FLAG);
+        let _ = std::fs::remove_file(flag);
+        Ok(())
     }
+}
+
+/// 新建一个空的标志文件。/tmp 谁都能写：别的本地用户可以预先放一个同名的符号链接指向本用户的
+/// 文件，直接"写入"会顺着链接把那个文件清空。所以先删掉已有的（删的是链接本身），再用
+/// "必须新建、不跟随符号链接"的方式创建；删不掉（别人的文件）就失败，不碰它。
+fn create_flag(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    /// `O_NOFOLLOW`（macOS）。
+    const O_NOFOLLOW: i32 = 0x0100;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)
+        .map(|_| ())
 }
 
 /// 放进 AppleScript 字符串字面量时转义反斜杠和双引号。
@@ -140,6 +166,25 @@ fn run_as_admin(cmd: &str, prompt: &str) -> Result<(), PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 标志文件的位置上是一个指向别的文件的符号链接时，不能顺着它把那个文件清空。
+    #[test]
+    fn creating_the_flag_never_writes_through_a_symlink() {
+        let dir = std::env::temp_dir().join(format!("flowacross-flag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"important").unwrap();
+        let flag = dir.join("flag");
+        std::os::unix::fs::symlink(&victim, &flag).unwrap();
+        create_flag(&flag).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"important");
+        // 现在是一个普通的空文件，不再是链接；重复创建也没问题。
+        let meta = std::fs::symlink_metadata(&flag).unwrap();
+        assert!(meta.file_type().is_file() && meta.len() == 0);
+        create_flag(&flag).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn quoting() {

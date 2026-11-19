@@ -55,6 +55,14 @@ pub fn clipboard() -> Result<Box<dyn ClipboardAccess>, PlatformError> {
     })
 }
 
+/// 现在有没有系统的授权弹窗在等用户点（只有走 portal 的桌面会有）。
+pub fn pending_authorization() -> Option<crate::AuthPrompt> {
+    match linux_wl::backend() {
+        Backend::Portal => linux_portal::pending_authorization(),
+        Backend::X11 | Backend::Wlr => None,
+    }
+}
+
 pub fn limits() -> crate::Limits {
     linux_wl::limits()
 }

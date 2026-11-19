@@ -32,6 +32,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Power",
+  "Win32_System_RemoteDesktop",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
@@ -40,7 +41,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
-# Linux 只支持 X11：XInput2 捕获、XTest 注入、RandR 显示器、XFixes 剪贴板变化通知。
+# Linux 的 X11 实现：XInput2 捕获、XTest 注入、RandR 显示器、XFixes 剪贴板变化通知。
 # x11rb 是纯 Rust 的 X11 协议实现，不链接 libxcb / libX11。
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xinput", "xtest", "randr", "xfixes", "shape", "dpms"] }

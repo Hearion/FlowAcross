@@ -17,7 +17,7 @@ export function hueOf(devices: DeviceView[], id: string): number {
 export function statusText(d: DeviceView): string {
   if (d.status === "local") return "本机";
   if (d.paused) return "已暂停";
-  if (d.status === "connected") return d.remote_paused ? "对方已暂停" : "在线";
+  if (d.status === "connected") return d.remote_paused ? "对方已暂停" : d.locked ? "已锁屏" : "在线";
   if (d.status === "connecting") return "连接中";
   return d.manual ? "已断开" : "离线";
 }
@@ -231,6 +231,12 @@ export const SETTINGS_ICONS: Record<string, () => ReactNode> = {
       <rect x="2.5" y="5" width="8" height="11" rx="1.6" />
       <rect x="13.5" y="5" width="8" height="11" rx="1.6" />
       <path d="M8 20h8M10.5 10.5h3" />
+    </Line>
+  ),
+  hotkeys: () => (
+    <Line>
+      <rect x="2.5" y="6" width="19" height="12" rx="2.2" />
+      <path d="M6.5 10h.01M10 10h.01M13.5 10h.01M17 10h.01M7.5 14h9" />
     </Line>
   ),
   clipboard: () => (

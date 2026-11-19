@@ -10,8 +10,6 @@ pub struct ClipboardSync {
     local: DeviceId,
     pub enabled: bool,
     next_seq: u64,
-    /// 最近一次由远端写入本机剪贴板的内容。本机随后收到的"剪贴板变化"如果就是它，说明是我们自己写的，不再回传。
-    last_applied: Option<String>,
     /// 每个来源设备已处理的最大序号，丢弃乱序或重复的旧内容。
     seen: HashMap<DeviceId, u64>,
 }
@@ -22,16 +20,16 @@ impl ClipboardSync {
             local,
             enabled: true,
             next_seq: 0,
-            last_applied: None,
             seen: HashMap::new(),
         }
     }
 
     /// 本机剪贴板变化时调用，返回需要广播给其他设备的消息。
+    ///
+    /// 流界自己把远端内容写进剪贴板引起的那次"变化"不要报给这里：调用方靠系统的变化计数认出它
+    /// （写入后记下新的计数）。以前这里还按内容比对了一遍，但调用方每次写入后都会把记下的内容
+    /// 清掉，那段判断从来不起作用，还要多复制一份最长 4 MB 的文本。
     pub fn on_local_change(&mut self, text: &str) -> Option<Message> {
-        if self.last_applied.take().is_some_and(|t| t == text) {
-            return None;
-        }
         if !self.enabled || text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
             return None;
         }
@@ -49,23 +47,20 @@ impl ClipboardSync {
         self.seen.remove(device);
     }
 
-    /// 调用方已经用别的办法（比如剪贴板变化计数）认出了自己写入的那次变化，不会再为它调用
-    /// [`Self::on_local_change`]：忘掉记下的内容。否则它一直留着，用户之后自己复制同样的文字
-    /// 会被当成回声吞掉；写入失败时也要调用，那段文字根本没进剪贴板。
-    pub fn forget_applied(&mut self) {
-        self.last_applied = None;
-    }
-
     /// 收到远端剪贴板内容时调用，返回需要写入本机剪贴板的文本。
     pub fn on_remote(&mut self, origin: &DeviceId, seq: u64, text: &str) -> Option<String> {
-        if !self.enabled || origin == &self.local || text.len() > MAX_CLIPBOARD_TEXT {
+        // 空文本不写：写进去等于清空本机剪贴板，本机复制时也从不发空文本。
+        if !self.enabled
+            || origin == &self.local
+            || text.is_empty()
+            || text.len() > MAX_CLIPBOARD_TEXT
+        {
             return None;
         }
         if self.seen.get(origin).is_some_and(|&s| s >= seq) {
             return None;
         }
         self.seen.insert(origin.clone(), seq);
-        self.last_applied = Some(text.to_owned());
         Some(text.to_owned())
     }
 }
@@ -92,23 +87,20 @@ mod tests {
     }
 
     #[test]
-    fn remote_write_is_not_echoed_back() {
+    fn same_text_copied_locally_after_a_remote_write_still_syncs() {
         let mut c = ClipboardSync::new(dev("b"));
         assert_eq!(c.on_remote(&dev("a"), 1, "hello").as_deref(), Some("hello"));
-        // 写入本机剪贴板后，系统通知"剪贴板变了"——不回传
-        assert!(c.on_local_change("hello").is_none());
-        // 之后用户自己再复制同样内容，正常同步
+        // 写入本机剪贴板引起的那次变化由调用方按变化计数认出，不会报到这里；
+        // 报到这里的就是用户自己复制的，哪怕内容一样也照常同步。
         assert!(c.on_local_change("hello").is_some());
     }
 
     #[test]
-    fn forgetting_applied_lets_the_same_text_sync_later() {
+    fn empty_text_from_a_peer_is_not_applied() {
         let mut c = ClipboardSync::new(dev("b"));
-        assert!(c.on_remote(&dev("a"), 1, "hello").is_some());
-        // 调用方自己认出了这次写入（没有再报"剪贴板变了"）。
-        c.forget_applied();
-        // 之后用户自己复制同样的内容：照常同步，不会被当成回声。
-        assert!(c.on_local_change("hello").is_some());
+        assert!(c.on_remote(&dev("a"), 1, "").is_none());
+        // 没有被当成"已处理"的序号：同一个序号的正常内容还能进来。
+        assert!(c.on_remote(&dev("a"), 1, "x").is_some());
     }
 
     #[test]

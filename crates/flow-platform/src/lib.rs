@@ -2,8 +2,9 @@
 //!
 //! 这里定义 Engine 依赖的接口，并按 `cfg(target_os)` 选择 macOS / Windows / Linux 实现。
 //!
-//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本、文件和图片（macOS、Windows、Linux X11），
-//! 系统权限检测（macOS）。Linux 只支持 X11 会话，Wayland 会话里键鼠和剪贴板报"暂不支持"。
+//! 已实现：显示器枚举、键鼠捕获与注入、光标锁定、剪贴板文本、文件和图片、屏幕电源与锁屏状态
+//! （macOS、Windows、Linux），系统权限检测（macOS）。Linux 有三套实现：X11、wlroots 系的 Wayland
+//! （Sway、Hyprland）、GNOME / KDE 的 Wayland（portal），启动时按桌面会话选一套，见 `linux.rs`。
 
 // Windows 位图和 PNG 互转（纯字节处理）。只有 Windows 用到，但在所有平台编译，方便单元测试。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -195,6 +196,9 @@ pub struct Limits {
     /// 看不到本机平时的键鼠输入（只在光标碰到屏幕边、或正在控制远端时才有事件）。
     /// 引擎靠"本机有输入了"判断键鼠回到了这台电脑，看不到时就不做这种推断。
     pub local_input: bool,
+    /// 不把鼠标推过屏幕边、直接把键鼠切到别的电脑（托盘菜单、命令）：GNOME / KDE 的 Wayland 上
+    /// 只有光标撞上屏幕边的屏障时合成器才肯把键鼠交出来。
+    pub commanded_switch: bool,
 }
 
 /// 当前系统的限制，见 [`Limits`]。
@@ -203,6 +207,34 @@ pub fn limits() -> Limits {
     return linux::limits();
     #[cfg(not(target_os = "linux"))]
     return Limits::default();
+}
+
+/// 系统的授权弹窗是为哪件事弹的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    /// 捕获这台电脑的键鼠（把键鼠切到别的电脑要用）。
+    Capture,
+    /// 控制这台电脑的键鼠（别的电脑的键鼠过来操作它要用）。
+    Inject,
+}
+
+/// 一个正在等用户点的系统授权弹窗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthPrompt {
+    pub kind: AuthKind,
+    /// 还剩多少秒；到时间没人点，流界会把弹窗关掉，下次需要时再问。
+    pub seconds_left: u32,
+}
+
+/// 现在有没有系统的授权弹窗在等用户点。界面据此显示倒计时。
+///
+/// 只有 Linux 的 GNOME / KDE（Wayland，走 portal）会有：那里捕获和注入键鼠都要用户在系统弹窗里
+/// 同意，流界给每次申请限时一分钟。其他系统的授权在系统设置里做，这里一直是 `None`。
+pub fn pending_authorization() -> Option<AuthPrompt> {
+    #[cfg(target_os = "linux")]
+    return linux::pending_authorization();
+    #[cfg(not(target_os = "linux"))]
+    return None;
 }
 
 /// 低延迟模式：跨屏期间关闭 Mac 的 AWDL，消除 Wi‑Fi 周期性停顿造成的卡顿。只有 macOS 支持。
@@ -238,12 +270,15 @@ pub mod low_latency {
         return Err(PlatformError::Unsupported("低延迟模式"));
     }
 
-    /// 通知后台服务现在是否需要关闭 AWDL。
-    pub fn set_active(active: bool) {
+    /// 通知后台服务现在是否需要关闭 AWDL。通知不到时返回错误（这次不会生效）。
+    pub fn set_active(active: bool) -> Result<(), PlatformError> {
         #[cfg(target_os = "macos")]
-        crate::macos_awdl::set_active(active);
+        return crate::macos_awdl::set_active(active);
         #[cfg(not(target_os = "macos"))]
-        let _ = active;
+        {
+            let _ = active;
+            Ok(())
+        }
     }
 }
 
@@ -306,6 +341,23 @@ pub mod power {
         return crate::linux_power::keep_awake_problem();
         #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         return Some("这个系统不支持保持屏幕常亮。".into());
+    }
+
+    /// 这台电脑现在是不是停在锁屏界面；查不到时返回 `None`。引擎定时查询，变化时告诉其他电脑，
+    /// 它们据此提示"需要在那台电脑上解锁"。
+    ///
+    /// macOS 查当前会话的状态，Windows 查终端服务会话的锁定标志，Linux 查 logind 会话的
+    /// `LockedHint`（GNOME、KDE 会设置；Sway、Hyprland 上要看锁屏程序是否通过 logind 上锁，
+    /// 没设置时一直是"没锁"）。Linux 上每次查询要连一次系统总线，不要查得太频繁。
+    pub fn screen_locked() -> Option<bool> {
+        #[cfg(target_os = "macos")]
+        return crate::macos_power::screen_locked();
+        #[cfg(windows)]
+        return crate::windows::screen_locked();
+        #[cfg(target_os = "linux")]
+        return crate::linux_power::screen_locked();
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+        return None;
     }
 
     /// 屏幕现在是不是熄着。熄屏期间枚举到的显示器不可信（见
@@ -420,6 +472,13 @@ pub type CaptureHandler = Box<dyn FnMut(CapturedEvent) -> Verdict + Send + 'stat
 pub trait InputCapture: Send {
     fn start(&mut self, handler: CaptureHandler) -> Result<(), PlatformError>;
     fn stop(&mut self);
+    /// 启动之后捕获自己停了的原因；还在运行（或者是被 `stop` 停的）返回 `None`。
+    ///
+    /// 只有 Linux 的 portal 实现会报：`start` 等几秒就返回了，授权弹窗可能之后才被拒绝、到时间
+    /// 自动关闭，或者桌面后来把权限收回。引擎定时查，查到就把它卸掉并告诉用户。
+    fn failure(&self) -> Option<PlatformError> {
+        None
+    }
 }
 
 pub trait InputInjector: Send {
@@ -518,4 +577,8 @@ pub enum PlatformError {
     Unsupported(&'static str),
     #[error("系统调用失败：{0}")]
     Os(String),
+    /// 没有拿到用户的授权：在系统的授权弹窗里选了拒绝、到时间没选，或者系统后来把权限收回了。
+    /// 和别的失败不同，这种等"下次需要时"重新申请就行，不用隔一阵自动重试。
+    #[error("没有拿到授权：{0}")]
+    Denied(String),
 }
