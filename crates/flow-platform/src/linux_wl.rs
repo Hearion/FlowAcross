@@ -83,6 +83,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             local_input: true,
             // 可以把边缘窗口铺满屏幕接住光标，见 `linux_wlr_input.rs` 的 `apply_summon`。
             commanded_switch: false,
+            foreground_app: true,
         },
         // 另外，光标一撞上屏障合成器就开始捕获，等不了停留时间；GNOME 没有 layer-shell，画不了浮光。
         Backend::Portal => Limits {
@@ -92,6 +93,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
             edge_glow: !layer_shell,
             local_input: true,
             commanded_switch: true,
+            foreground_app: true,
         },
     }
 }
@@ -444,7 +446,7 @@ mod tests {
     fn wayland_sessions_report_what_they_cannot_do() {
         assert_eq!(limits_for(Backend::X11, false), Limits::default());
         let sway = limits_for(Backend::Wlr, true);
-        assert!(sway.hold_key && sway.local_hotkey && sway.local_input);
+        assert!(sway.hold_key && sway.local_hotkey && sway.local_input && sway.foreground_app);
         assert!(!sway.dwell && !sway.edge_glow);
         let kde = limits_for(Backend::Portal, true);
         assert!(kde.hold_key && kde.local_hotkey && kde.dwell && !kde.edge_glow);

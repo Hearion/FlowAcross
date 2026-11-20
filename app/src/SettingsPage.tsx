@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { PermissionList } from "./Dialogs";
 import { HotkeySettings } from "./HotkeySettings";
-import { ClipboardSetting, CrossScreenSettings, WinKeysSetting, useDeviceNameInput } from "./SettingsControls";
+import { AutoLockSetting, ClipboardSetting, CrossScreenSettings, WinKeysSetting, useDeviceNameInput } from "./SettingsControls";
 import type { Settings, StateView } from "./types";
 import { ChevronLeftIcon, Logo, SETTINGS_ICONS, Toggle } from "./ui";
 import { ProgressBar, installNote, type Updater } from "./Updater";
@@ -108,6 +108,11 @@ export function SettingsPage({ state, updater, section, onSection, onClose, onEr
             <Panel>
               <CrossScreenSettings settings={state.settings} update={update} unsupported={state.unsupported} onHotkeys={() => onSection("hotkeys")} />
             </Panel>
+            {!state.unsupported.auto_lock && (
+              <Panel>
+                <AutoLockSetting settings={state.settings} update={update} recent={state.recent_apps} os={state.local.os} />
+              </Panel>
+            )}
             {state.local.os === "MacOs" ? (
               <>
                 <Panel>

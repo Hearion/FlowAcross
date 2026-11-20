@@ -1,8 +1,8 @@
 {
   "description": "Declared licenses and notices from all locked Cargo dependencies (including build/dev and non-host targets) and production npm dependencies. Not a legal compatibility certification.",
   "lockfiles": {
-    "Cargo.lock": "83f1c7fd84a780110b31ad576c740916f59fe1576d235307f3f98e66fd96038f",
-    "app/package-lock.json": "2adfb53b370e514d88097af240faa44204880975a5e321c674a8012d06d2e5b0"
+    "Cargo.lock": "35fccfa86662e3c64d21c596279ef33d32487c9b19d215ef513491b73f54d7dd",
+    "app/package-lock.json": "021935e185af917e98e5a7099ffca47f0451f50ac13a156eefd1483d7be87dfd"
   },
   "dependencies": [
     {
@@ -710,6 +710,24 @@
         {
           "file": "LICENSE-ZLIB",
           "sha256": "943f36fd309fb5ea67a82f577433f4ed3bc877e5b00f9b874e2f8b7f72bf0bdc"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "byteorder-lite",
+      "version": "0.1.0",
+      "license": "Unlicense OR MIT",
+      "repository": "https://github.com/image-rs/byteorder-lite",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "notices": [
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "154c1af2b38e25e5c18613dfe352eed29b0863cb39e494007822cdeb39150ac5"
+        },
+        {
+          "file": "UNLICENSE",
+          "sha256": "ca2abdf695884c77ea4b4a5b64ca7b732d9d9dbade4eebc1c2e76c53e9e3bc83"
         }
       ]
     },
@@ -3117,6 +3135,24 @@
     },
     {
       "ecosystem": "cargo",
+      "name": "image",
+      "version": "0.25.10",
+      "license": "MIT OR Apache-2.0",
+      "repository": "https://github.com/image-rs/image",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE",
+          "sha256": "4bf96504d6e83ce5c6fc7167f1795d9ceaa68e70ab86bc5d08ab93184262bbbe"
+        },
+        {
+          "file": "LICENSE-MIT",
+          "sha256": "77949ead506e84e3ff5c31f784bdc17b6c4095d4102edae05dc5557ef6c61c8c"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
       "name": "indexmap",
       "version": "1.9.3",
       "license": "Apache-2.0 OR MIT",
@@ -3946,6 +3982,24 @@
         {
           "file": "LICENSE",
           "sha256": "c804065b0956d00a65ce119456ec48ee456f5446b904b07ee85225ba5a88ce41"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "moxcms",
+      "version": "0.8.1",
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "repository": "https://github.com/awxkee/moxcms.git",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE.md",
+          "sha256": "836a9c1227c6446925bee567ecfbcd4620780b4cc020c2c6019ba4b8d1295520"
+        },
+        {
+          "file": "LICENSE.md",
+          "sha256": "2aa92cada6431e75615e3fe6cb1a9082c98f777d48ae1c087c0da0e37f7b8bff"
         }
       ]
     },
@@ -5114,6 +5168,24 @@
         {
           "file": "LICENSE-MIT",
           "sha256": "30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "pxfm",
+      "version": "0.1.30",
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "repository": "https://github.com/awxkee/pxfm",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "notices": [
+        {
+          "file": "LICENSE-APACHE.md",
+          "sha256": "836a9c1227c6446925bee567ecfbcd4620780b4cc020c2c6019ba4b8d1295520"
+        },
+        {
+          "file": "LICENSE.md",
+          "sha256": "2aa92cada6431e75615e3fe6cb1a9082c98f777d48ae1c087c0da0e37f7b8bff"
         }
       ]
     },

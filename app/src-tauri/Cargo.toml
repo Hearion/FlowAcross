@@ -17,7 +17,7 @@ flow-net.workspace = true
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "fs", "io-util"] }
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2.7.0"
 tauri-plugin-single-instance = "2.5.4"

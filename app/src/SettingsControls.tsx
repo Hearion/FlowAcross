@@ -218,6 +218,81 @@ const PC_KEYS: { key: keyof WinToMacKeys; label: string }[] = [
 ];
 
 /** 被 PC 键盘控制时修饰键的对应。按键由被控制的 Mac 换算，所以只在 Mac 上显示。 */
+/** 应用名在各系统上指什么，写在名单下面。 */
+const APP_NAME_HINT: Record<string, string> = {
+  MacOs: "应用名就是它在程序坞和菜单栏里显示的名字，比如 Keynote、Parallels Desktop。",
+  Windows: "应用名是程序的文件名，不带 .exe，比如 steam、mstsc（远程桌面）。可以在任务管理器的「详细信息」里看到。",
+  Linux: "应用名是窗口的类名，比如 steam、firefox。",
+};
+
+/**
+ * 按应用或场景自动把键鼠锁定在本机：前台窗口全屏时，或名单里的应用在前台时。
+ * `recent`：最近在前台的应用，作为输入框的候选。查不到前台应用的桌面（Wayland）上不显示。
+ */
+export function AutoLockSetting({ settings: s, update, recent, os }: Props & { recent: string[]; os: string }) {
+  const [draft, setDraft] = useState("");
+  const apps = s.auto_lock_apps;
+  const has = (name: string) => apps.some((a) => a.toLowerCase() === name.toLowerCase());
+  const name = draft.trim();
+  const add = () => {
+    if (!name || has(name)) return;
+    update({ auto_lock_apps: [...apps, name] });
+    setDraft("");
+  };
+  return (
+    <>
+      <div className="setting inline">
+        <div className="setting-text">
+          <span>全屏时锁定在本机</span>
+          <small>全屏玩游戏、演示、看视频时，鼠标碰到屏幕边不会切到别的电脑</small>
+        </div>
+        <Toggle label="全屏时锁定在本机" checked={s.auto_lock_fullscreen} onChange={(v) => update({ auto_lock_fullscreen: v })} />
+      </div>
+      <div className="setting">
+        <div className="setting-text">
+          <span>这些应用在前台时锁定在本机</span>
+          <small>切到别的应用后自动恢复，不用手动解除</small>
+        </div>
+        {apps.length > 0 && (
+          <ul className="app-list">
+            {apps.map((a) => (
+              <li key={a}>
+                <span>{a}</span>
+                <button type="button" className="link" onClick={() => update({ auto_lock_apps: apps.filter((x) => x !== a) })}>
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="app-add">
+          <input
+            className="text-input"
+            list="recent-apps"
+            value={draft}
+            maxLength={64}
+            placeholder="应用名，可以从最近用过的应用里选"
+            aria-label="要添加的应用名"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && add()}
+          />
+          <datalist id="recent-apps">
+            {recent
+              .filter((r) => !has(r))
+              .map((r) => (
+                <option key={r} value={r} />
+              ))}
+          </datalist>
+          <button type="button" className="btn small" disabled={!name || has(name)} onClick={add}>
+            添加
+          </button>
+        </div>
+        <small className="app-hint">{APP_NAME_HINT[os] ?? APP_NAME_HINT.Linux}流界自己的窗口在前台时不会锁定；手动的「锁定在本机」不受影响。</small>
+      </div>
+    </>
+  );
+}
+
 export function WinKeysSetting({ settings: s, update }: Props) {
   const preset = s.win_keys;
   const custom = preset === "custom";

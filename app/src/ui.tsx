@@ -22,6 +22,11 @@ export function statusText(d: DeviceView): string {
   return d.manual ? "已断开" : "离线";
 }
 
+/** 延迟的写法：不到 1 毫秒写成「<1 ms」。 */
+export function latencyText(ms: number): string {
+  return ms < 1 ? "<1 ms" : `${ms} ms`;
+}
+
 const size = (w: number, h: number) => `${Math.round(w)}×${Math.round(h)}`;
 
 /**

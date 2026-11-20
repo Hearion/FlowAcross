@@ -2337,7 +2337,13 @@ kbd {
 }
 
 /* 文字里的链接按钮（「修改快捷键」） */
+/* 布局图上两块屏幕相贴处的光带也叫 `.link`（绝对定位、不接受点击），这里要改回普通的行内按钮 */
 button.link {
+  position: static;
+  z-index: auto;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: auto;
   padding: 0;
   border: 0;
   background: none;
@@ -2484,4 +2490,73 @@ button.link:hover {
 /* 授权倒计时里的秒数：等宽数字，数字变化时文字不抖。 */
 .countdown {
   font-variant-numeric: tabular-nums;
+}
+
+/* 设备的网络延迟：跟在「系统，几块屏幕」后面；一般和偏高时换颜色 */
+.device-sub .latency {
+  margin-left: 6px;
+}
+
+.device-sub .latency::before {
+  margin-right: 6px;
+  color: var(--fg-3);
+  content: "·";
+}
+
+.latency {
+  font-variant-numeric: tabular-nums;
+}
+
+.latency.fair {
+  color: var(--warn);
+}
+
+.latency.poor {
+  color: var(--danger);
+}
+
+/* 自动锁定的应用名单 */
+.app-list {
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  list-style: none;
+}
+
+.app-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.app-list li + li {
+  border-top: 1px solid var(--line);
+}
+
+.app-list li > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-add {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.app-add .text-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--fg-3);
+  font-size: 12px;
 }

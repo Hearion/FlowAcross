@@ -21,6 +21,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod linux_clipboard;
 #[cfg(target_os = "linux")]
+mod linux_foreground;
+#[cfg(target_os = "linux")]
 mod linux_glow;
 #[cfg(target_os = "linux")]
 mod linux_input;
@@ -43,6 +45,8 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod macos_awdl;
 #[cfg(target_os = "macos")]
+mod macos_foreground;
+#[cfg(target_os = "macos")]
 mod macos_glow;
 #[cfg(target_os = "macos")]
 mod macos_input;
@@ -53,6 +57,8 @@ mod macos_power;
 mod root_install;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_foreground;
 #[cfg(windows)]
 mod windows_glow;
 #[cfg(windows)]
@@ -199,6 +205,9 @@ pub struct Limits {
     /// 不把鼠标推过屏幕边、直接把键鼠切到别的电脑（托盘菜单、命令）：GNOME / KDE 的 Wayland 上
     /// 只有光标撞上屏幕边的屏障时合成器才肯把键鼠交出来。
     pub commanded_switch: bool,
+    /// 查不到前台是哪个应用、是不是全屏（[`foreground`]）：Wayland 不让普通程序看别的窗口，
+    /// 「全屏时锁定在本机」和按应用锁定用不了。
+    pub foreground_app: bool,
 }
 
 /// 当前系统的限制，见 [`Limits`]。
@@ -207,6 +216,21 @@ pub fn limits() -> Limits {
     return linux::limits();
     #[cfg(not(target_os = "linux"))]
     return Limits::default();
+}
+
+/// 现在在前台的应用，以及它的窗口是不是全屏（`flow_core::autolock` 用来按应用自动锁定在本机）。
+/// 查不到时返回 `None`：没有前台窗口，或这个桌面查不了（Linux 的 Wayland，见 [`Limits::foreground_app`]）。
+/// 前台是流界自己的窗口时应用名为空。macOS 上要问一次对方应用（最多等四分之一秒），Linux 上要连
+/// 一次 X 服务，放到阻塞线程里调用，不要查得太频繁。
+pub fn foreground() -> Option<flow_core::autolock::Foreground> {
+    #[cfg(target_os = "macos")]
+    return macos_foreground::foreground();
+    #[cfg(windows)]
+    return windows_foreground::foreground();
+    #[cfg(target_os = "linux")]
+    return linux_foreground::foreground();
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    return None;
 }
 
 /// 系统的授权弹窗是为哪件事弹的。

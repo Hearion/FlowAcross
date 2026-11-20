@@ -20,8 +20,8 @@ export function createMock(): Api {
       ],
     },
     devices: [
-      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false, can_wake: false, locked: false, can_switch: false, can_send_keys: false, problem: null },
-      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, problem: null },
+      { id: "local", name: "本机（浏览器预览）", os: "MacOs", status: "local", manual: false, active: true, has_input: true, paused: false, remote_paused: false, can_wake: false, locked: false, can_switch: false, can_send_keys: false, latency_ms: null, latency_level: null, problem: null },
+      { id: "pc", name: "书房台式机", os: "Windows", status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, latency_ms: 3, latency_level: "good", problem: null },
     ],
     nearby: [{ id: "mini", name: "Mac mini", os: "MacOs", connecting: false, problem: null }],
     pairings: [],
@@ -33,8 +33,12 @@ export function createMock(): Api {
         mappings: [{ trigger: { mods: 6, key: 0x16 }, send: { mods: 0, key: 0x16 }, device: "pc" }],
       },
       sync_layout: true,
+      auto_lock_fullscreen: false,
+      auto_lock_apps: [],
     },
     locked: false,
+    auto_lock: null,
+    recent_apps: ["Safari", "Keynote", "Steam", "Xcode"],
     permissions: [
       { kind: "accessibility", state: "granted" },
       { kind: "input_monitoring", state: "denied" },
@@ -42,7 +46,7 @@ export function createMock(): Api {
     permission_hint: null,
     controlled_by: null,
     low_latency: { supported: true, installed: false, active: false },
-    unsupported: { hold_key: false, local_hotkey: false, dwell: false, edge_glow: false },
+    unsupported: { hold_key: false, local_hotkey: false, dwell: false, edge_glow: false, auto_lock: false },
     keep_awake_problem: null,
     about: { version: pkg.version, protocol: 1, data_dir: "~/Library/Application Support/app.flowacross.desktop", fingerprint: "3F2A 91C0 7B44 E1D9 0A6C 55F2 8E13 B7A0" },
     transfers: [],
@@ -80,6 +84,8 @@ export function createMock(): Api {
             can_wake: false,
             can_switch: false,
             can_send_keys: false,
+            latency_ms: null,
+            latency_level: null,
             problem: {
               summary: "能在网络里看到「书房台式机」，但连接被拦住了，多半是防火墙或 VPN / 代理软件。",
               steps: [
@@ -95,6 +101,13 @@ export function createMock(): Api {
       ...n,
       problem: { summary: "在网络里找不到「Mac mini」。", steps: ["确认「Mac mini」开着机、没有睡眠，而且流界正在运行（托盘 / 菜单栏里有流界的图标）。", "确认两台电脑连的是同一个 Wi‑Fi 或同一个局域网。"] },
     }));
+  }
+  // ?slow：延迟高的连接；?autolock：名单里的应用在前台，键鼠被自动锁定在本机。
+  if (params.has("slow")) state.devices = state.devices.map((d) => (d.id === "pc" ? { ...d, latency_ms: 84, latency_level: "poor" } : d));
+  if (params.has("autolock")) {
+    state.settings = { ...state.settings, auto_lock_fullscreen: true, auto_lock_apps: ["Steam", "Parallels Desktop"] };
+    state.auto_lock = { kind: "app", app: "Steam" };
+    state.devices = state.devices.map((d) => (d.id === "pc" ? { ...d, can_switch: false } : d));
   }
   if (params.has("locked")) state.devices = state.devices.map((d) => (d.id === "pc" ? { ...d, locked: true } : d));
   if (params.has("solo")) {
@@ -172,7 +185,7 @@ export function createMock(): Api {
         set({
           pairings: [],
           nearby: state.nearby.filter((d) => d.id !== device),
-          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, problem: null }],
+          devices: [...state.devices, { id: p.id, name: p.name, os: p.os, status: "connected", manual: false, active: false, has_input: false, paused: false, remote_paused: false, can_wake: true, locked: false, can_switch: true, can_send_keys: true, latency_ms: 2, latency_level: "good", problem: null }],
           layout: {
             displays: [
               ...state.layout.displays,

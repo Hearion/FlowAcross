@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="12 12 96 96">
+<mask id="weave" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120"><rect width="120" height="120" fill="#fff"/><path d="M54 70 C56 66.7 64 53.3 66 50" fill="none" stroke="#000" stroke-width="18"/></mask>
+<path d="M60 60 C54 50 48 40 37 40 C26 40 18 49 18 60 C18 71 26 80 37 80 C48 80 54 70 60 60 C66 50 72 40 83 40 C94 40 102 49 102 60 C102 71 94 80 83 80 C72 80 66 70 60 60 Z" fill="none" stroke="#000000" stroke-width="10" stroke-linejoin="round" mask="url(#weave)"/>
+<path d="M37 80 C48 80 54 70 60 60 C66 50 72 40 83 40" fill="none" stroke="#000000" stroke-width="10"/>
+</svg>

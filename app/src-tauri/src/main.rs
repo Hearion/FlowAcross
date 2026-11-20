@@ -316,6 +316,14 @@ fn main() {
                         }
                     }
                 });
+            // macOS 菜单栏用单色模板图标（只有黑色和透明），系统按菜单栏的深浅自动反色，
+            // 和其他菜单栏图标风格一致；Windows 和 Linux 的托盘照常用彩色的应用图标。
+            #[cfg(target_os = "macos")]
+            {
+                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+                tray = tray.icon(icon).icon_as_template(true);
+            }
+            #[cfg(not(target_os = "macos"))]
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
@@ -407,6 +415,8 @@ mod tests {
             locked: false,
             can_switch: false,
             can_send_keys: false,
+            latency_ms: None,
+            latency_level: None,
             problem: None,
         }
     }

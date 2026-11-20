@@ -8,7 +8,7 @@ import { SettingsPage, type SettingsSection } from "./SettingsPage";
 import { FileTransfers } from "./Transfers";
 import type { AuthKind, DeviceView, Settings, StateView } from "./types";
 import { UpdateBanner, useUpdater } from "./Updater";
-import { CursorIcon, DeviceIcon, GearIcon, InfoIcon, LockIcon, Logo, PauseIcon, PlayIcon, PlusIcon, WarnIcon, hueOf, isMac, resolution, statusText } from "./ui";
+import { CursorIcon, DeviceIcon, GearIcon, InfoIcon, LockIcon, Logo, PauseIcon, PlayIcon, PlusIcon, WarnIcon, hueOf, isMac, latencyText, resolution, statusText } from "./ui";
 
 function statusChip(d: DeviceView) {
   if (d.active) return <span className="chip accent">控制中</span>;
@@ -113,10 +113,19 @@ export default function App() {
           <span className="brand-name">流界</span>
         </div>
 
-        <div className={`status ${s.sharing_paused ? "paused" : state.locked ? "locked" : ""}`}>
-          <span className="status-live">
+        <div className={`status ${s.sharing_paused ? "paused" : state.locked || state.auto_lock ? "locked" : ""}`}>
+          <span
+            className="status-live"
+            title={
+              !s.sharing_paused && !state.locked && state.auto_lock
+                ? state.auto_lock.kind === "fullscreen"
+                  ? `「${state.auto_lock.app}」正全屏显示，键鼠自动锁定在本机，退出全屏后恢复。在 设置 › 跨屏与键鼠 里可以关掉。`
+                  : `「${state.auto_lock.app}」在前台，键鼠自动锁定在本机，切到别的应用后恢复。在 设置 › 跨屏与键鼠 里可以改名单。`
+                : undefined
+            }
+          >
             <span className="status-dot" />
-            {s.sharing_paused ? "已暂停" : state.locked ? "已锁定" : "共享中"}
+            {s.sharing_paused ? "已暂停" : state.locked ? "已锁定" : state.auto_lock ? `已自动锁定：${state.auto_lock.app}` : "共享中"}
           </span>
           <span className="status-sep" />
           <span className="status-where">
@@ -260,6 +269,11 @@ export default function App() {
                         <span className="device-name">{d.name}</span>
                         <span className="device-sub">
                           {OS_TEXT[d.os]}，{screens} 块屏幕
+                          {d.latency_ms !== null && (
+                            <span className={`latency ${d.latency_level ?? ""}`} title="到这台电脑的网络延迟（往返时间）">
+                              {latencyText(d.latency_ms)}
+                            </span>
+                          )}
                         </span>
                       </span>
                       {statusChip(d)}
@@ -281,6 +295,26 @@ export default function App() {
                     </li>
                   ))}
                 </ul>
+                {sel.status === "connected" && sel.latency_ms !== null && (
+                  <ul className="display-list">
+                    <li>
+                      <span>网络延迟</span>
+                      <span className={`latency ${sel.latency_level ?? ""}`}>
+                        {latencyText(sel.latency_ms)}
+                        {sel.latency_level === "good" ? "，流畅" : sel.latency_level === "fair" ? "，一般" : "，偏高"}
+                      </span>
+                    </li>
+                  </ul>
+                )}
+                {sel.status === "connected" && sel.latency_level === "fair" && (
+                  <p className="detail-note">延迟一般，光标可能略微跟手慢。两台电脑用网线或 5 GHz Wi‑Fi 连到同一台路由器会更流畅。</p>
+                )}
+                {sel.status === "connected" && sel.latency_level === "poor" && (
+                  <p className="detail-note">
+                    延迟偏高，光标和打字会明显滞后。可以依次试试：两台电脑改用网线，或连到同一台路由器的 5 GHz Wi‑Fi；关掉 VPN / 代理软件；暂停正在占满网络的下载或视频
+                    {state.low_latency.supported ? "；在 设置 › 跨屏与键鼠 里打开「低延迟模式」" : ""}。
+                  </p>
+                )}
                 {sel.problem && sel.status !== "connected" && <ProblemNote problem={sel.problem} />}
                 {sel.status === "offline" && (
                   <p className="detail-note">
@@ -313,7 +347,13 @@ export default function App() {
                       <button
                         className="btn small primary"
                         disabled={!sel.can_switch}
-                        title={sel.can_switch ? "不用把鼠标推过屏幕边，直接把键鼠切过去" : "现在切不过去：已暂停、已锁定在本机，或对方暂停了共享"}
+                        title={
+                          sel.can_switch
+                            ? "不用把鼠标推过屏幕边，直接把键鼠切过去"
+                            : state.auto_lock
+                              ? `现在切不过去：「${state.auto_lock.app}」${state.auto_lock.kind === "fullscreen" ? "正全屏显示" : "在前台"}，键鼠已自动锁定在本机`
+                              : "现在切不过去：已暂停、已锁定在本机，或对方暂停了共享"
+                        }
                         onClick={() => api.switchToDevice(sel.id).catch((e) => toast(String(e)))}
                       >
                         把键鼠切到这里

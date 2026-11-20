@@ -14,7 +14,9 @@
 //! - [`throttle`]：鼠标位置发送节流。
 //! - [`hotkeys`]：自定义快捷键与快捷键映射。
 //! - [`diagnose`]：连接失败的原因和排查步骤、睡眠唤醒的判断。
+//! - [`autolock`]：按前台应用自动锁定在本机的判定、连接延迟的分级。
 
+pub mod autolock;
 pub mod clipboard;
 pub mod cursor;
 pub mod diagnose;

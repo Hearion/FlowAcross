@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use flow_core::Rect;
+use flow_core::autolock::{self, AutoLock, Foreground, LatencyLevel};
 use flow_core::clipboard::ClipboardSync;
 use flow_core::diagnose::{
     self, Cause, ConnectFacts, Diagnosis, Fault, Gone, LocalNet, ResumeDetector, offline_note,
@@ -162,6 +163,11 @@ pub struct StateView {
     pub pairings: Vec<PairingView>,
     pub settings: Settings,
     pub locked: bool,
+    /// 键鼠被自动锁定在本机的原因（哪个应用在前台 / 全屏）；没有自动锁定时为 `None`。
+    /// 和手动的 `locked` 互不影响，任何一个成立都切不出去。
+    pub auto_lock: Option<AutoLock>,
+    /// 最近在前台的应用（最新的在前），设置页往自动锁定的名单里加应用时挑选。
+    pub recent_apps: Vec<String>,
     pub permissions: Vec<PermissionView>,
     /// 权限相关的额外说明（例如开发模式下权限归属于终端）。
     pub permission_hint: Option<String>,
@@ -219,6 +225,8 @@ pub struct UnsupportedView {
     pub local_hotkey: bool,
     pub dwell: bool,
     pub edge_glow: bool,
+    /// 按前台应用 / 全屏自动锁定：查不到前台是哪个应用。
+    pub auto_lock: bool,
 }
 
 impl From<flow_platform::Limits> for UnsupportedView {
@@ -228,6 +236,7 @@ impl From<flow_platform::Limits> for UnsupportedView {
             local_hotkey: l.local_hotkey,
             dwell: l.dwell,
             edge_glow: l.edge_glow,
+            auto_lock: l.foreground_app,
         }
     }
 }
@@ -291,6 +300,10 @@ pub struct DeviceView {
     pub can_switch: bool,
     /// 快捷键映射可以把按键发给它：连着，而且对方的版本认得这条消息。
     pub can_send_keys: bool,
+    /// 到这台设备的网络延迟（往返时间，毫秒，不到 1 毫秒时是 0）；没连着、本机这一项为 `None`。
+    pub latency_ms: Option<u32>,
+    /// 延迟算好、一般还是差（见 `flow_core::autolock::latency_level`）。
+    pub latency_level: Option<LatencyLevel>,
     /// 没连上的原因和处理办法；连着、或没有可说的时为 `None`。
     pub problem: Option<ProblemView>,
 }
@@ -581,6 +594,14 @@ struct State {
     /// 睡前就没连着的设备：醒来后照样再试一轮（可能是带着笔记本回到了有它的网络），
     /// 但这一轮试不通时不弹「已暂停自动重试」——用户并没有丢失什么连接。
     quiet_retry: HashSet<DeviceId>,
+    /// 定时查到的本机前台应用；没查过、查不到时为 `None`。
+    foreground: Option<Foreground>,
+    /// 键鼠现在被自动锁定在本机的原因（见 [`State::refresh_auto_lock`]）。
+    auto_lock: Option<AutoLock>,
+    /// 最近在前台的应用，最新的在前。
+    recent_apps: Vec<String>,
+    /// 上次推给界面的各设备延迟（毫秒）。延迟一直在抖，变化明显时才重新推。
+    latency_shown: HashMap<DeviceId, u32>,
 }
 
 struct Session {
@@ -787,7 +808,38 @@ fn capture_error_text(e: &PlatformError) -> String {
     }
 }
 
+/// 流界自己的应用名：自己的窗口在前台时不触发自动锁定。平台层查到前台是本进程时应用名给的是空，
+/// 这里再按名字挡一次（同一台电脑上开着的另一个流界实例）。
+const OWN_APP: &str = "FlowAcross";
+
+/// 一条连接现在的延迟：QUIC 自己估算的往返时间，四舍五入到毫秒。连接每 2 秒发一次保活，
+/// 空闲时这个值也一直在更新，不用另外发包去量。
+fn session_latency(s: &Session) -> u32 {
+    let micros = s.conn.rtt().as_micros();
+    u32::try_from((micros + 500) / 1000).unwrap_or(u32::MAX)
+}
+
 impl State {
+    /// 按当前设置和上次查到的前台应用重新判定要不要自动锁定。返回有没有变化。
+    fn refresh_auto_lock(&mut self) -> bool {
+        let s = &self.config.settings;
+        let next = autolock::auto_lock(
+            s.auto_lock_fullscreen,
+            &s.auto_lock_apps,
+            self.foreground.as_ref(),
+            OWN_APP,
+        );
+        let changed = next != self.auto_lock;
+        self.auto_lock = next;
+        changed
+    }
+
+    /// 自动锁定的设置有没有打开（没打开时不用为它去查前台应用）。
+    fn auto_lock_wanted(&self) -> bool {
+        let s = &self.config.settings;
+        s.auto_lock_fullscreen || !s.auto_lock_apps.is_empty()
+    }
+
     /// 一台没连上的设备现在该显示什么原因。本机刚睡醒时先说"正在重连"；对方是自己退出或
     /// 突然没回应的，用这个当原因（突然没回应时附上最近一次连接失败的排查步骤）；
     /// 其余用最近一次连接失败的诊断。
@@ -931,6 +983,8 @@ impl Engine {
         let mut config = config;
         // 配置文件可能被手动改过：不合法、重复的快捷键在这里就整理掉。
         config.settings.hotkeys = std::mem::take(&mut config.settings.hotkeys).sanitized();
+        config.settings.auto_lock_apps =
+            autolock::sanitize_apps(std::mem::take(&mut config.settings.auto_lock_apps));
         let win_keys = config.settings.win_to_mac_keys();
         let endpoint = flow_net::bind_endpoint(&identity, opts.port).map_err(|e| e.to_string())?;
         let port = endpoint.local_addr().map_err(|e| e.to_string())?.port();
@@ -1387,7 +1441,11 @@ impl Engine {
             layout,
             local_offset: st.config.local_offset,
             outputs,
-            policy: switch_policy(&st.config.settings, st.locked, flow_platform::limits()),
+            policy: switch_policy(
+                &st.config.settings,
+                st.locked || st.auto_lock.is_some(),
+                flow_platform::limits(),
+            ),
             mapping: st.config.settings.mapping,
             wheel_percent: st.config.settings.wheel_percent(),
             enabled: !st.config.settings.sharing_paused,
@@ -1499,6 +1557,8 @@ impl Engine {
             // 回到本机：只有本机正在控制别的设备时才有意义。
             can_switch: active.is_some() && !st.config.settings.sharing_paused,
             can_send_keys: false,
+            latency_ms: None,
+            latency_level: None,
             problem: None,
         }];
         // 本机正被别的电脑控制时，键鼠是它的：要切走得请它来切，它的版本得认得这个请求。
@@ -1506,42 +1566,49 @@ impl Engine {
             .as_ref()
             .map(|by| st.sessions.get(by).is_some_and(|s| s.remote_actions));
         let resuming = st.resuming();
-        devices.extend(st.config.peers.iter().map(|p| DeviceView {
-            id: p.id.clone(),
-            name: p.name.clone(),
-            os: p.os,
-            status: if st.sessions.contains_key(&p.id) {
-                DeviceStatus::Connected
-            } else if st.connecting.contains(&p.id)
+        devices.extend(st.config.peers.iter().map(|p| {
+            DeviceView {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                os: p.os,
+                status: if st.sessions.contains_key(&p.id) {
+                    DeviceStatus::Connected
+                } else if st.connecting.contains(&p.id)
                 || st.pairings.contains_key(&p.id)
                 // 本机刚睡醒：两次重试之间也显示「连接中」，不要一会儿离线一会儿连接。
                 || (resuming
                     && st.gone.get(&p.id) == Some(&Gone::LocalResume)
                     && !st.manual.contains(&p.id))
-            {
-                DeviceStatus::Connecting
-            } else {
-                DeviceStatus::Offline
-            },
-            manual: st.manual.contains(&p.id) && !st.sessions.contains_key(&p.id),
-            active: active.as_ref() == Some(&p.id),
-            has_input: active.as_ref() == Some(&p.id) || input_at.as_ref() == Some(&p.id),
-            paused: p.paused,
-            remote_paused: st.remote_blocked.contains(&p.id),
-            can_wake: st.sessions.get(&p.id).is_some_and(|s| s.wake),
-            locked: st.sessions.contains_key(&p.id) && st.remote_locked.contains(&p.id),
-            can_switch: !st.config.settings.sharing_paused
-                && st.sessions.contains_key(&p.id)
-                && match via_controller {
-                    // 请控制方切：切回它自己，或切到本机也连着的另一台。
-                    Some(supported) => supported,
-                    None => {
-                        active.as_ref() != Some(&p.id)
-                            && self.switch_blocker(&st, &p.id, active.is_some()).is_none()
-                    }
+                {
+                    DeviceStatus::Connecting
+                } else {
+                    DeviceStatus::Offline
                 },
-            can_send_keys: st.sessions.get(&p.id).is_some_and(|s| s.remote_actions),
-            problem: st.problem(&p.id, &p.name),
+                manual: st.manual.contains(&p.id) && !st.sessions.contains_key(&p.id),
+                active: active.as_ref() == Some(&p.id),
+                has_input: active.as_ref() == Some(&p.id) || input_at.as_ref() == Some(&p.id),
+                paused: p.paused,
+                remote_paused: st.remote_blocked.contains(&p.id),
+                can_wake: st.sessions.get(&p.id).is_some_and(|s| s.wake),
+                locked: st.sessions.contains_key(&p.id) && st.remote_locked.contains(&p.id),
+                can_switch: !st.config.settings.sharing_paused
+                    && st.sessions.contains_key(&p.id)
+                    && match via_controller {
+                        // 请控制方切：切回它自己，或切到本机也连着的另一台。
+                        Some(supported) => supported,
+                        None => {
+                            active.as_ref() != Some(&p.id)
+                                && self.switch_blocker(&st, &p.id, active.is_some()).is_none()
+                        }
+                    },
+                can_send_keys: st.sessions.get(&p.id).is_some_and(|s| s.remote_actions),
+                latency_ms: st.sessions.get(&p.id).map(session_latency),
+                latency_level: st
+                    .sessions
+                    .get(&p.id)
+                    .map(|s| autolock::latency_level(session_latency(s))),
+                problem: st.problem(&p.id, &p.name),
+            }
         }));
         let mut nearby: Vec<NearbyView> = st
             .nearby
@@ -1604,6 +1671,8 @@ impl Engine {
                 .collect(),
             settings: st.config.settings.clone(),
             locked: st.locked,
+            auto_lock: st.auto_lock.clone(),
+            recent_apps: st.recent_apps.clone(),
             permissions,
             permission_hint: permission_hint(),
             controlled_by,
@@ -1738,8 +1807,13 @@ impl Engine {
             low_latency,
             // 界面传来的快捷键不一定合法（重复、不带修饰键）：整理后再用。
             hotkeys: settings.hotkeys.clone().sanitized(),
+            auto_lock_apps: autolock::sanitize_apps(settings.auto_lock_apps.clone()),
             ..settings
         };
+        // 关掉自动锁定、或把正在前台的应用移出名单：马上解除，不等下一次查前台应用。
+        if st.refresh_auto_lock() {
+            info!(reason = ?st.auto_lock, "自动锁定状态随设置变化");
+        }
         if st.config.settings.sync_layout && !was_syncing {
             // 刚打开同步：把本机的布局发出去，和别的电脑比一比谁的新。
             st.send_layout(self.local_id(), None, None);
@@ -1781,6 +1855,53 @@ impl Engine {
     pub fn set_locked(&self, locked: bool) {
         self.lock().locked = locked;
         self.emit();
+    }
+
+    /// 定时查到的本机前台应用（`None`：查不到）。记进「最近在前台的应用」，并重新判定自动锁定。
+    ///
+    /// 键鼠正在别的电脑上时不改变自动锁定的状态：这时锁上会把正在用的键鼠拽回本机。
+    /// 等键鼠回到本机后的下一次查询再生效。
+    fn on_foreground(&self, foreground: Option<Foreground>) {
+        let mut st = self.lock();
+        let recent_changed = foreground
+            .as_ref()
+            .is_some_and(|f| autolock::remember_app(&mut st.recent_apps, &f.app, OWN_APP));
+        st.foreground = foreground;
+        // 锁顺序 state → controller。
+        let on_remote = self.controller().active_device().is_some();
+        let lock_changed = !on_remote && st.refresh_auto_lock();
+        if lock_changed {
+            info!(reason = ?st.auto_lock, "自动锁定状态变化");
+        }
+        drop(st);
+        if lock_changed {
+            self.emit();
+        } else if recent_changed {
+            self.emit_view();
+        }
+    }
+
+    /// 各设备的延迟和上次推给界面的相比有明显变化时，重新推一次界面。
+    fn refresh_latency(&self) {
+        let changed = {
+            let mut st = self.lock();
+            let now: HashMap<DeviceId, u32> = st
+                .sessions
+                .iter()
+                .map(|(id, s)| (id.clone(), session_latency(s)))
+                .collect();
+            let changed = now.len() != st.latency_shown.len()
+                || now.iter().any(|(id, ms)| {
+                    autolock::latency_changed(st.latency_shown.get(id).copied(), Some(*ms))
+                });
+            if changed {
+                st.latency_shown = now;
+            }
+            changed
+        };
+        if changed {
+            self.emit_view();
+        }
     }
 
     /// 设置页正在录制快捷键：期间不响应任何快捷键，按下的键原样交给界面。
@@ -1893,6 +2014,19 @@ impl Engine {
         }
         if st.locked {
             return Some("键鼠已锁定在本机，先解除锁定再切换。".into());
+        }
+        match &st.auto_lock {
+            Some(AutoLock::App(app)) => {
+                return Some(format!(
+                    "「{app}」在前台，键鼠已自动锁定在本机。切到别的应用，或在 设置 › 跨屏与键鼠 里把它移出名单。"
+                ));
+            }
+            Some(AutoLock::Fullscreen(app)) => {
+                return Some(format!(
+                    "「{app}」正全屏显示，键鼠已自动锁定在本机。退出全屏，或在 设置 › 跨屏与键鼠 里关掉「全屏时锁定在本机」。"
+                ));
+            }
+            None => {}
         }
         let Some(peer) = st.config.peer(id) else {
             return Some("找不到这台设备。".into());
@@ -2203,6 +2337,21 @@ impl Engine {
             }
             if tick % 15 == 0 {
                 self.recheck_keep_awake().await;
+            }
+            self.refresh_latency();
+            // 前台应用：自动锁定打开着，或有设备连着（给设置页攒「最近在前台的应用」）时才查。
+            let watch = {
+                let st = self.lock();
+                self.inner.input
+                    && !flow_platform::limits().foreground_app
+                    && (st.auto_lock_wanted() || !st.sessions.is_empty())
+            };
+            if watch {
+                // macOS 上要问一次前台应用、Linux 上要连一次 X 服务，放到阻塞线程里。
+                let foreground = tokio::task::spawn_blocking(flow_platform::foreground)
+                    .await
+                    .unwrap_or(None);
+                self.on_foreground(foreground);
             }
             self.ensure_capture();
             self.stop_idle_capture();
@@ -5204,6 +5353,100 @@ mod tests {
         assert!(saved.devices.is_empty() && saved.mappings.is_empty());
         // 左右切换的快捷键不受影响。
         assert!(saved.switch_left.is_some() && saved.switch_right.is_some());
+    }
+
+    /// 按前台应用自动锁定：名单里的应用或全屏窗口在前台时切不出去，原因写在提示里；
+    /// 键鼠已经在别的电脑上时不会被拽回来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn foreground_apps_lock_the_input_to_this_computer() {
+        let (a, b) = paired("a-auto", "b-auto").await;
+        let idb = b.engine.local_id().clone();
+        a.engine.lock().local_displays = vec![test_display(1440.0)];
+        give_display(&a.engine, &idb);
+        let fg = |app: &str, fullscreen: bool| {
+            Some(Foreground {
+                app: app.into(),
+                fullscreen,
+            })
+        };
+        let mut s = a.engine.settings();
+        // 名单会被整理：去掉空的和重复的。
+        s.auto_lock_apps = vec![" Steam ".into(), "steam".into(), "".into()];
+        a.engine.update_settings(s);
+        assert_eq!(a.engine.settings().auto_lock_apps, vec!["Steam"]);
+
+        // 不在名单里的应用：不锁；记进最近的应用。
+        a.engine.on_foreground(fg("Safari", true));
+        assert_eq!(a.engine.view().auto_lock, None);
+        assert_eq!(a.engine.view().recent_apps, vec!["Safari"]);
+        // 名单里的应用到了前台（不分大小写）：切不出去，提示里说明原因。
+        a.engine.on_foreground(fg("steam", false));
+        assert_eq!(
+            a.engine.view().auto_lock,
+            Some(AutoLock::App("steam".into()))
+        );
+        assert!(!device(&a.engine, &idb).can_switch);
+        let err = a.engine.switch_to(&idb).unwrap_err();
+        assert!(err.contains("steam") && err.contains("自动锁定"), "{err}");
+        // 手动锁定没有被打开。
+        assert!(!a.engine.locked());
+        // 把它移出名单：马上解除，不等下一次查询。
+        let mut s = a.engine.settings();
+        s.auto_lock_apps.clear();
+        a.engine.update_settings(s);
+        assert_eq!(a.engine.view().auto_lock, None);
+
+        // 全屏锁定要打开开关才生效。
+        a.engine.on_foreground(fg("Keynote", true));
+        assert_eq!(a.engine.view().auto_lock, None);
+        let mut s = a.engine.settings();
+        s.auto_lock_fullscreen = true;
+        a.engine.update_settings(s);
+        assert_eq!(
+            a.engine.view().auto_lock,
+            Some(AutoLock::Fullscreen("Keynote".into()))
+        );
+        let err = a.engine.switch_to(&idb).unwrap_err();
+        assert!(err.contains("全屏"), "{err}");
+        // 退出全屏：可以切了。流界自己的窗口全屏也不算。
+        a.engine.on_foreground(fg("Keynote", false));
+        assert_eq!(a.engine.view().auto_lock, None);
+        a.engine.on_foreground(fg("FlowAcross", true));
+        assert_eq!(a.engine.view().auto_lock, None);
+        a.engine.switch_to(&idb).unwrap();
+        assert!(device(&a.engine, &idb).active);
+
+        // 键鼠已经在 B 上：本机前台变成全屏也不锁，不把键鼠拽回来。
+        a.engine.on_foreground(fg("Keynote", true));
+        assert_eq!(a.engine.view().auto_lock, None);
+        assert!(device(&a.engine, &idb).active);
+        // 回到本机后的下一次查询才锁上。
+        a.engine.switch_to(a.engine.local_id()).unwrap();
+        a.engine.on_foreground(fg("Keynote", true));
+        assert!(a.engine.view().auto_lock.is_some());
+        // 查不到前台应用了：解除。
+        a.engine.on_foreground(None);
+        assert_eq!(a.engine.view().auto_lock, None);
+    }
+
+    /// 连着的设备带着延迟和分级；本机这一项、离线的设备没有。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn connected_devices_report_latency() {
+        let (a, b) = paired("a-rtt", "b-rtt").await;
+        let (ida, idb) = (a.engine.local_id().clone(), b.engine.local_id().clone());
+        let d = device(&a.engine, &idb);
+        // 本机回环：延迟很小。
+        assert!(
+            d.latency_ms.is_some_and(|ms| ms < 1000),
+            "{:?}",
+            d.latency_ms
+        );
+        assert_eq!(d.latency_level, d.latency_ms.map(autolock::latency_level));
+        let local = device(&a.engine, &ida);
+        assert_eq!((local.latency_ms, local.latency_level), (None, None));
+        // 第一次有读数时推一次界面，之后没有明显变化就不再推。
+        a.engine.refresh_latency();
+        assert!(a.engine.lock().latency_shown.contains_key(&idb));
     }
 
     fn test_display(width: f64) -> DisplayInfo {

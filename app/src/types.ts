@@ -54,8 +54,20 @@ export interface DeviceView {
   can_switch: boolean;
   /** 快捷键映射可以把按键发给它：连着，而且对方的版本支持（0.2.4 起）。 */
   can_send_keys: boolean;
+  /** 到这台设备的网络延迟（往返时间，毫秒；不到 1 毫秒时是 0）。没连着、本机这一项为 null。 */
+  latency_ms: number | null;
+  latency_level: LatencyLevel | null;
   /** 没连上的原因和处理办法；连着、或没有可说的时为 null。 */
   problem: ProblemView | null;
+}
+
+/** 延迟算好、一般还是差（flow-core autolock::latency_level）。 */
+export type LatencyLevel = "good" | "fair" | "poor";
+
+/** 键鼠被自动锁定在本机的原因：名单里的应用在前台，或前台窗口全屏。`app` 是那个应用的名字。 */
+export interface AutoLock {
+  kind: "app" | "fullscreen";
+  app: string;
 }
 
 /** 设备连不上 / 离线的原因和按顺序排查的步骤。 */
@@ -121,6 +133,10 @@ export interface Settings {
   hotkeys: Hotkeys;
   /** 设备布局在各台电脑之间同步：在任意一台上拖动屏幕，其他电脑跟着变。 */
   sync_layout: boolean;
+  /** 前台窗口全屏时自动把键鼠锁定在本机。 */
+  auto_lock_fullscreen: boolean;
+  /** 这些应用在前台时自动把键鼠锁定在本机（应用名，不分大小写）。 */
+  auto_lock_apps: string[];
 }
 
 /** 一组按键（flow-core hotkeys::KeyCombo）：`mods` 是修饰键位掩码（见 keys.ts 的 MOD），`key` 是 HID 键码。 */
@@ -166,6 +182,8 @@ export interface UnsupportedView {
   dwell: boolean;
   /** 边缘浮光。 */
   edge_glow: boolean;
+  /** 按前台应用 / 全屏自动锁定在本机（查不到前台是哪个应用）。 */
+  auto_lock: boolean;
 }
 
 export interface LowLatencyView {
@@ -243,6 +261,10 @@ export interface StateView {
   pairings: PairingView[];
   settings: Settings;
   locked: boolean;
+  /** 键鼠被自动锁定在本机的原因；没有自动锁定时为 null。和手动的 `locked` 互不影响。 */
+  auto_lock: AutoLock | null;
+  /** 最近在前台的应用（最新的在前），往自动锁定的名单里加应用时挑选。 */
+  recent_apps: string[];
   permissions: PermissionView[];
   /** 权限相关的额外说明（例如开发模式下权限归属于终端）。 */
   permission_hint: string | null;

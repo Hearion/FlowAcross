@@ -75,6 +75,10 @@ pub struct Settings {
     pub hotkeys: Hotkeys,
     /// 设备布局在各台电脑之间同步：在任意一台上拖动屏幕，其他电脑的布局跟着变。
     pub sync_layout: bool,
+    /// 前台窗口全屏时（游戏、演示、看视频）自动把键鼠锁定在本机，退出全屏后恢复。
+    pub auto_lock_fullscreen: bool,
+    /// 这些应用在前台时自动把键鼠锁定在本机（按应用名，不分大小写，见 `flow_core::autolock`）。
+    pub auto_lock_apps: Vec<String>,
 }
 
 /// 滚轮速度的可调范围（百分比）。
@@ -117,6 +121,8 @@ impl Default for Settings {
             keep_awake: false,
             hotkeys: Hotkeys::default(),
             sync_layout: true,
+            auto_lock_fullscreen: false,
+            auto_lock_apps: Vec::new(),
         }
     }
 }
@@ -298,6 +304,8 @@ mod tests {
         fs::write(dir.join(FILE), br#"{"onboarded":true}"#).unwrap();
         let old = Config::load(&dir).unwrap();
         assert!(old.onboarded && old.settings.clipboard && old.settings.auto_check_updates);
+        // 自动锁定是后加的：旧配置里没有，默认关着。
+        assert!(!old.settings.auto_lock_fullscreen && old.settings.auto_lock_apps.is_empty());
         // 旧配置没有键位设置：保持以前的 Ctrl → ⌘。
         assert_eq!(old.settings.win_to_mac_keys(), WinToMacKeys::WINDOWS);
         fs::remove_dir_all(&dir).unwrap();
