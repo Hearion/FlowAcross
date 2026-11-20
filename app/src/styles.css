@@ -2332,8 +2332,11 @@ kbd {
 
 .nearby-row {
   display: flex;
+  flex: 1;
   align-items: center;
   gap: 12px;
+  /* 撑满整行：名称占满剩余宽度，「配对」按钮靠右，不紧跟在名称后面 */
+  min-width: 0;
 }
 
 /* 文字里的链接按钮（「修改快捷键」） */

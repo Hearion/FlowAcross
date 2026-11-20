@@ -79,6 +79,9 @@ pub struct Settings {
     pub auto_lock_fullscreen: bool,
     /// 这些应用在前台时自动把键鼠锁定在本机（按应用名，不分大小写，见 `flow_core::autolock`）。
     pub auto_lock_apps: Vec<String>,
+    /// 菜单栏的流界图标按到当前那台电脑的延迟变色（只有 macOS 有）；没连着、暂停共享时是默认颜色。
+    /// 设置页和菜单栏的小菜单里都能开关。
+    pub menu_bar_latency: bool,
 }
 
 /// 滚轮速度的可调范围（百分比）。
@@ -123,6 +126,7 @@ impl Default for Settings {
             sync_layout: true,
             auto_lock_fullscreen: false,
             auto_lock_apps: Vec::new(),
+            menu_bar_latency: false,
         }
     }
 }
@@ -306,6 +310,7 @@ mod tests {
         assert!(old.onboarded && old.settings.clipboard && old.settings.auto_check_updates);
         // 自动锁定是后加的：旧配置里没有，默认关着。
         assert!(!old.settings.auto_lock_fullscreen && old.settings.auto_lock_apps.is_empty());
+        assert!(!old.settings.menu_bar_latency);
         // 旧配置没有键位设置：保持以前的 Ctrl → ⌘。
         assert_eq!(old.settings.win_to_mac_keys(), WinToMacKeys::WINDOWS);
         fs::remove_dir_all(&dir).unwrap();

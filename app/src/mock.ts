@@ -35,6 +35,7 @@ export function createMock(): Api {
       sync_layout: true,
       auto_lock_fullscreen: false,
       auto_lock_apps: [],
+      menu_bar_latency: false,
     },
     locked: false,
     auto_lock: null,

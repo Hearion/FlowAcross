@@ -137,6 +137,8 @@ export interface Settings {
   auto_lock_fullscreen: boolean;
   /** 这些应用在前台时自动把键鼠锁定在本机（应用名，不分大小写）。 */
   auto_lock_apps: string[];
+  /** Mac 菜单栏的流界图标按到当前那台电脑的延迟变色。 */
+  menu_bar_latency: boolean;
 }
 
 /** 一组按键（flow-core hotkeys::KeyCombo）：`mods` 是修饰键位掩码（见 keys.ts 的 MOD），`key` 是 HID 键码。 */

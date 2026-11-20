@@ -81,6 +81,15 @@ export function SettingsPage({ state, updater, section, onSection, onClose, onEr
                 </div>
                 <Toggle label="同步设备布局" checked={state.settings.sync_layout} onChange={(v) => update({ sync_layout: v })} />
               </div>
+              {state.local.os === "MacOs" && (
+                <div className="setting inline">
+                  <div className="setting-text">
+                    <span>在菜单栏显示网络状态</span>
+                    <small>菜单栏的流界图标按延迟变色：绿色流畅，橙色一般，红色偏高；没连着或暂停共享时是平常的颜色。鼠标停在图标上可以看到具体延迟。菜单栏的流界菜单里也能开关</small>
+                  </div>
+                  <Toggle label="在菜单栏显示网络状态" checked={state.settings.menu_bar_latency} onChange={(v) => update({ menu_bar_latency: v })} />
+                </div>
+              )}
             </Panel>
             {state.local.os === "MacOs" && (
               <p className="settings-note">

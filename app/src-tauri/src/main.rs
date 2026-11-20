@@ -16,6 +16,9 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
+use flow_core::autolock::{LatencyLevel, latency_level};
+use flow_core::layout::DeviceId;
+
 use crate::engine::{
     DeviceStatus, DeviceView, Engine, EngineEvent, EngineOptions, MainThread, Notify,
 };
@@ -38,6 +41,9 @@ fn tray_labels(paused: bool, locked: bool) -> (&'static str, &'static str) {
         },
     )
 }
+
+/// 托盘菜单里带勾选的几项：（暂停共享、锁定在本机、在菜单栏显示网络状态）。
+type TrayFlags = (bool, bool, bool);
 
 /// 托盘菜单「把键鼠切到」里各设备的菜单项编号前缀，后面跟设备 ID。
 const SWITCH_PREFIX: &str = "switch:";
@@ -83,6 +89,109 @@ fn switch_entries(devices: &[DeviceView]) -> Vec<SwitchEntry> {
             }
         })
         .collect()
+}
+
+/// 菜单栏上流界图标按网络状况变的颜色（macOS，设置「在菜单栏显示网络状态」打开时）：
+/// 返回（鼠标停在图标上时的提示文字，颜色档）。`None` 是默认颜色：设置关着、暂停了共享、
+/// 没有连着的电脑，或者不知道该看哪一台。
+///
+/// 显示哪一台：本机正在控制的那台；没有的话是正在控制本机的那台；都没有、而只连着一台时显示它。
+/// 连着好几台、键鼠又在本机时不知道该显示哪一台，就不显示。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menu_bar_title(
+    enabled: bool,
+    paused: bool,
+    devices: &[DeviceView],
+    controlled_by: Option<&DeviceId>,
+) -> Option<(String, LatencyLevel)> {
+    if !enabled || paused {
+        return None;
+    }
+    let measured = || {
+        devices
+            .iter()
+            .filter(|d| d.status == DeviceStatus::Connected && d.latency_ms.is_some())
+    };
+    let only = || {
+        let mut it = measured();
+        match (it.next(), it.next()) {
+            (Some(d), None) => Some(d),
+            _ => None,
+        }
+    };
+    let d = measured()
+        .find(|d| d.active)
+        .or_else(|| controlled_by.and_then(|id| measured().find(|d| &d.id == id)))
+        .or_else(only)?;
+    let ms = d.latency_ms?;
+    let level = d.latency_level.unwrap_or_else(|| latency_level(ms));
+    let ms_text = if ms < 1 {
+        "<1 ms".to_owned()
+    } else {
+        format!("{ms} ms")
+    };
+    let quality = match level {
+        LatencyLevel::Good => "流畅",
+        LatencyLevel::Fair => "一般",
+        LatencyLevel::Poor => "偏高",
+    };
+    Some((
+        format!(
+            "{}\n到「{}」的延迟 {ms_text}，{quality}",
+            flow_platform::menu_bar::DEFAULT_TOOLTIP,
+            d.name
+        ),
+        level,
+    ))
+}
+
+/// macOS 菜单栏用的单色模板图标。
+#[cfg(target_os = "macos")]
+const TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray-template.png");
+
+/// 菜单栏图标颜色的状态（macOS）：状态在会话线程里推送，图标只能在主线程上改。
+#[cfg(target_os = "macos")]
+struct MenuBarTitle {
+    /// 流界的 `NSStatusItem` 的地址；托盘建好之前是 0。
+    item: usize,
+    /// 应该显示的状态；`None` 是默认颜色。
+    want: Option<(String, LatencyLevel)>,
+    /// 已经显示的状态。
+    shown: Option<(String, LatencyLevel)>,
+}
+
+#[cfg(target_os = "macos")]
+impl Default for MenuBarTitle {
+    /// 托盘建好时图标就是默认颜色：设置关着、没连着时一直不碰它。
+    fn default() -> Self {
+        Self {
+            item: 0,
+            want: None,
+            shown: None,
+        }
+    }
+}
+
+/// 在主线程上把菜单栏图标改成 `want`（已经是的话什么都不做）。只排队、不等它执行。
+#[cfg(target_os = "macos")]
+fn apply_menu_bar_title(handle: &AppHandle, title: &Arc<Mutex<MenuBarTitle>>) {
+    let title = title.clone();
+    let _ = handle.run_on_main_thread(move || {
+        let mut t = title.lock().unwrap_or_else(|e| e.into_inner());
+        if t.item == 0 || t.shown == t.want {
+            return;
+        }
+        let want = t.want.clone();
+        // SAFETY: 在主线程上；`item` 是托盘建好后取到的 NSStatusItem，托盘一直存在到退出。
+        unsafe {
+            flow_platform::menu_bar::set_status(
+                t.item,
+                want.as_ref().map(|(text, level)| (text.as_str(), *level)),
+                TRAY_TEMPLATE_PNG,
+            )
+        };
+        t.shown = want;
+    });
 }
 
 /// 日志同时写到终端和 `<数据目录>/logs/flowacross.log.<日期>`，调试两台电脑联调时把日志文件发过来即可。
@@ -176,6 +285,16 @@ fn main() {
                 CheckMenuItem::with_id(app, "pause", "暂停共享", true, false, None::<&str>)?;
             let lock =
                 CheckMenuItem::with_id(app, "lock", "锁定在本机", true, false, None::<&str>)?;
+            // 只有 macOS 的菜单栏能在图标旁边显示文字。
+            #[cfg(target_os = "macos")]
+            let latency = CheckMenuItem::with_id(
+                app,
+                "menu_latency",
+                "在菜单栏显示网络状态",
+                true,
+                false,
+                None::<&str>,
+            )?;
             let logs = MenuItem::with_id(app, "logs", "打开日志文件夹", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出流界", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
@@ -185,18 +304,31 @@ fn main() {
                 app,
                 &[&open, &sep, &switch, &pause, &lock, &sep, &logs, &quit],
             )?;
+            #[cfg(target_os = "macos")]
+            menu.insert(&latency, 5)?;
+            #[cfg(target_os = "macos")]
+            let (latency_item, menu_title) = (
+                latency.clone(),
+                Arc::new(Mutex::new(MenuBarTitle::default())),
+            );
+            #[cfg(target_os = "macos")]
+            let title_for_tray = menu_title.clone();
 
             let handle = app.handle().clone();
             let (pause_item, lock_item) = (pause.clone(), lock.clone());
             let switch_menu = switch.clone();
             // 上一次填进子菜单的内容：状态每秒可能推好几次（传文件的进度），没变就不重建菜单。
             let switch_shown: Mutex<Option<Vec<SwitchEntry>>> = Mutex::new(None);
-            // 上一次设到托盘上的（序号、暂停、锁定）。改菜单项要等主线程执行完才返回，而状态在
+            // 上一次设到托盘上的（序号、（暂停、锁定、菜单栏显示延迟））。改菜单项要等主线程执行完才返回，而状态在
             // 会话收消息的循环里推送：每次都改的话，主线程一忙，键鼠消息就跟着排队。
-            let tray_shown: Mutex<(u64, Option<(bool, bool)>)> = Mutex::new((0, None));
+            let tray_shown: Mutex<(u64, Option<TrayFlags>)> = Mutex::new((0, None));
             let notify: Notify = Arc::new(move |ev| match ev {
                 EngineEvent::State(view) => {
-                    let flags = (view.settings.sharing_paused, view.locked);
+                    let flags = (
+                        view.settings.sharing_paused,
+                        view.locked,
+                        view.settings.menu_bar_latency,
+                    );
                     let update_flags = {
                         let mut shown = tray_shown.lock().unwrap_or_else(|e| e.into_inner());
                         // 并发推送时先算出来的可能后到：比已经显示的旧就整份不要。
@@ -208,6 +340,21 @@ fn main() {
                         shown.1 = Some(flags);
                         changed
                     };
+                    #[cfg(target_os = "macos")]
+                    {
+                        let want = menu_bar_title(
+                            view.settings.menu_bar_latency,
+                            view.settings.sharing_paused,
+                            &view.devices,
+                            view.controlled_by.as_ref(),
+                        );
+                        let mut t = menu_title.lock().unwrap_or_else(|e| e.into_inner());
+                        if t.want != want {
+                            t.want = want;
+                            drop(t);
+                            apply_menu_bar_title(&handle, &menu_title);
+                        }
+                    }
                     let entries = switch_entries(&view.devices);
                     let mut shown = switch_shown.lock().unwrap_or_else(|e| e.into_inner());
                     if shown.as_ref() != Some(&entries) {
@@ -236,6 +383,8 @@ fn main() {
                     if update_flags {
                         let _ = pause_item.set_checked(flags.0);
                         let _ = lock_item.set_checked(flags.1);
+                        #[cfg(target_os = "macos")]
+                        let _ = latency_item.set_checked(flags.2);
                         // Linux 的托盘菜单常常不显示勾选状态（用户反馈：点了「暂停共享」再打开还是「暂停共享」），
                         // 改用文字表示当前状态。macOS 和 Windows 的勾选是正常的，保持原样。
                         #[cfg(target_os = "linux")]
@@ -287,7 +436,7 @@ fn main() {
             }
 
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("流界 FlowAcross")
+                .tooltip(flow_platform::menu_bar::DEFAULT_TOOLTIP)
                 .menu(&menu)
                 .on_menu_event(move |app, event| {
                     let engine = app.state::<Engine>();
@@ -299,6 +448,12 @@ fn main() {
                             engine.update_settings(s);
                         }
                         "lock" => engine.set_locked(!engine.locked()),
+                        // 和设置页里的开关是同一项设置，改完界面和菜单的勾选一起更新。
+                        "menu_latency" => {
+                            let mut s = engine.settings();
+                            s.menu_bar_latency = !s.menu_bar_latency;
+                            engine.update_settings(s);
+                        }
                         "logs" => commands::reveal(&log_dir),
                         "quit" => {
                             engine.shutdown();
@@ -320,14 +475,36 @@ fn main() {
             // 和其他菜单栏图标风格一致；Windows 和 Linux 的托盘照常用彩色的应用图标。
             #[cfg(target_os = "macos")]
             {
-                let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+                let icon = tauri::image::Image::from_bytes(TRAY_TEMPLATE_PNG)?;
                 tray = tray.icon(icon).icon_as_template(true);
             }
             #[cfg(not(target_os = "macos"))]
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
-            tray.build(app)?;
+            let tray = tray.build(app)?;
+            // 菜单栏的文字要改在 NSStatusItem 上。取它要等主线程执行，而这里就在主线程上，
+            // 所以放到别的线程去等；取到之后把已经算好的文字补上。
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let item = tray.with_inner_tray_icon(|t| {
+                        t.ns_status_item().map(|i| {
+                            let p = &*i as *const _ as usize;
+                            // 托盘一直存在到退出：留着这份引用，地址始终有效。
+                            std::mem::forget(i);
+                            p
+                        })
+                    });
+                    if let Ok(Some(item)) = item {
+                        title_for_tray.lock().unwrap_or_else(|e| e.into_inner()).item = item;
+                        apply_menu_bar_title(&handle, &title_for_tray);
+                    }
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            drop(tray);
             // 窗口在配置里默认隐藏：开机自启时只在托盘 / 菜单栏运行，其余情况启动后显示。
             if startup::start_hidden(app.handle()) {
                 tracing::info!("开机自启，窗口保持隐藏");
@@ -397,7 +574,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flow_core::layout::DeviceId;
     use flow_core::protocol::Os;
 
     fn dev(id: &str, name: &str, status: DeviceStatus) -> DeviceView {
@@ -453,6 +629,74 @@ mod tests {
                 ("switch:old", "旧电脑（没有连着）", false),
             ]
         );
+    }
+
+    #[test]
+    fn menu_bar_icon_color_follows_the_computer_in_use() {
+        let with = |id: &str, ms: u32, active: bool| DeviceView {
+            latency_ms: Some(ms),
+            latency_level: Some(latency_level(ms)),
+            active,
+            ..dev(id, id, DeviceStatus::Connected)
+        };
+        let tip = |name: &str, ms: &str, q: &str| {
+            format!("流界 FlowAcross\n到「{name}」的延迟 {ms}，{q}")
+        };
+        let local = dev("me", "me", DeviceStatus::Local);
+        let pc = with("pc", 3, false);
+        let nb = with("nb", 45, false);
+        // 关着：不显示。
+        assert_eq!(
+            menu_bar_title(false, false, &[local.clone(), pc.clone()], None),
+            None
+        );
+        // 只连着一台：显示它。
+        assert_eq!(
+            menu_bar_title(true, false, &[local.clone(), pc.clone()], None),
+            Some((tip("pc", "3 ms", "流畅"), LatencyLevel::Good))
+        );
+        // 连着两台、键鼠在本机：不知道显示哪台。
+        assert_eq!(
+            menu_bar_title(true, false, &[local.clone(), pc.clone(), nb.clone()], None),
+            None
+        );
+        // 正在控制其中一台：显示它。
+        let nb_active = with("nb", 45, true);
+        assert_eq!(
+            menu_bar_title(true, false, &[local.clone(), pc.clone(), nb_active], None),
+            Some((tip("nb", "45 ms", "一般"), LatencyLevel::Fair))
+        );
+        // 本机正被其中一台控制：显示控制方。
+        assert_eq!(
+            menu_bar_title(
+                true,
+                false,
+                &[local.clone(), pc.clone(), nb],
+                Some(&DeviceId("pc".into()))
+            ),
+            Some((tip("pc", "3 ms", "流畅"), LatencyLevel::Good))
+        );
+        // 不到 1 毫秒；偏高。
+        assert_eq!(
+            menu_bar_title(true, false, &[local.clone(), with("pc", 0, false)], None),
+            Some((tip("pc", "<1 ms", "流畅"), LatencyLevel::Good))
+        );
+        assert_eq!(
+            menu_bar_title(true, false, &[local.clone(), with("pc", 120, false)], None)
+                .map(|t| t.1),
+            Some(LatencyLevel::Poor)
+        );
+        // 暂停共享：默认颜色。
+        assert_eq!(
+            menu_bar_title(true, true, &[local.clone(), pc.clone()], None),
+            None
+        );
+        // 没连着、还没量到延迟的不算。
+        let offline = DeviceView {
+            latency_ms: Some(5),
+            ..dev("old", "old", DeviceStatus::Offline)
+        };
+        assert_eq!(menu_bar_title(true, false, &[local, offline], None), None);
     }
 
     #[test]

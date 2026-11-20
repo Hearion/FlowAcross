@@ -261,6 +261,138 @@ pub fn pending_authorization() -> Option<AuthPrompt> {
     return None;
 }
 
+/// 菜单栏（macOS 的状态栏）上流界图标旁边的文字。只有 macOS 支持。
+pub mod menu_bar {
+    use flow_core::autolock::LatencyLevel;
+
+    /// 当前系统是否支持。
+    pub fn supported() -> bool {
+        cfg!(target_os = "macos")
+    }
+
+    /// 菜单栏图标默认的提示文字（鼠标停在图标上时显示）。
+    pub const DEFAULT_TOOLTIP: &str = "流界 FlowAcross";
+
+    /// 各档的颜色（和 macOS 深色外观下的系统绿、橙、红一致，在深浅两种菜单栏上都看得清）。
+    pub fn level_rgb(level: LatencyLevel) -> [u8; 3] {
+        match level {
+            LatencyLevel::Good => [48, 209, 88],
+            LatencyLevel::Fair => [255, 159, 10],
+            LatencyLevel::Poor => [255, 69, 58],
+        }
+    }
+
+    /// 把一张单色图标（模板图片：只看透明度）整个涂成 `rgb`，透明度不变。读不出来时返回 `None`。
+    pub fn tinted_png(png_data: &[u8], rgb: [u8; 3]) -> Option<Vec<u8>> {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(png_data));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder.read_info().ok()?;
+        let mut buf = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut buf).ok()?;
+        let channels = match info.color_type {
+            png::ColorType::GrayscaleAlpha => 2,
+            png::ColorType::Rgba => 4,
+            // 没有透明通道的图标涂色之后就是一整块方形，不是想要的。
+            _ => return None,
+        };
+        let pixels = info.width as usize * info.height as usize;
+        let mut out = Vec::with_capacity(pixels * 4);
+        for px in buf[..pixels * channels].chunks_exact(channels) {
+            out.extend_from_slice(&rgb);
+            out.push(px[channels - 1]);
+        }
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, info.width, info.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().ok()?.write_image_data(&out).ok()?;
+        Some(encoded)
+    }
+
+    /// 按网络状况换 `status_item`（一个 `NSStatusItem` 的地址）的图标：`status` 有值时把
+    /// `template_png` 涂成该档的颜色（[`level_rgb`]）显示，鼠标停在图标上时提示 `tooltip`；
+    /// `None` 换回 `template_png` 本身作为模板图片，由系统按菜单栏深浅画成黑或白，提示恢复成
+    /// [`DEFAULT_TOOLTIP`]。
+    ///
+    /// # Safety
+    ///
+    /// 必须在主线程上调用；`status_item` 必须指向一个还活着的 `NSStatusItem`。
+    pub unsafe fn set_status(
+        status_item: usize,
+        status: Option<(&str, LatencyLevel)>,
+        template_png: &[u8],
+    ) {
+        #[cfg(target_os = "macos")]
+        // SAFETY: 由调用方保证。
+        unsafe {
+            crate::macos::set_status_icon(status_item, status, template_png)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let _ = (status_item, status, template_png);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn encode(width: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut e = png::Encoder::new(&mut out, width, 1);
+            e.set_color(color);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(data).unwrap();
+            out
+        }
+
+        fn decode(data: &[u8]) -> Vec<u8> {
+            let mut r = png::Decoder::new(std::io::Cursor::new(data))
+                .read_info()
+                .unwrap();
+            let mut buf = vec![0; r.output_buffer_size().unwrap()];
+            let n = r.next_frame(&mut buf).unwrap().buffer_size();
+            buf.truncate(n);
+            buf
+        }
+
+        #[test]
+        fn tinting_keeps_the_shape_and_changes_the_color() {
+            let green = level_rgb(LatencyLevel::Good);
+            // 黑色不透明、半透明、全透明三个像素。
+            let src = encode(
+                3,
+                png::ColorType::Rgba,
+                &[0, 0, 0, 255, 0, 0, 0, 128, 0, 0, 0, 0],
+            );
+            let out = decode(&tinted_png(&src, green).unwrap());
+            assert_eq!(
+                out,
+                [48, 209, 88, 255, 48, 209, 88, 128, 48, 209, 88, 0].to_vec()
+            );
+            // 灰度加透明度的图标也行。
+            let src = encode(2, png::ColorType::GrayscaleAlpha, &[0, 200, 0, 0]);
+            let out = decode(&tinted_png(&src, [1, 2, 3]).unwrap());
+            assert_eq!(out, [1, 2, 3, 200, 1, 2, 3, 0].to_vec());
+            // 没有透明通道、或者不是 PNG：不涂。
+            let src = encode(1, png::ColorType::Rgb, &[0, 0, 0]);
+            assert!(tinted_png(&src, green).is_none());
+            assert!(tinted_png(b"not a png", green).is_none());
+        }
+
+        #[test]
+        fn the_real_menu_bar_icon_can_be_tinted() {
+            let icon = include_bytes!("../../../app/src-tauri/icons/tray-template.png");
+            for level in [LatencyLevel::Good, LatencyLevel::Fair, LatencyLevel::Poor] {
+                let out = decode(&tinted_png(icon, level_rgb(level)).unwrap());
+                let rgb = level_rgb(level);
+                // 不透明的像素都是这个颜色，而且确实有不透明的像素。
+                let opaque: Vec<&[u8]> = out.chunks_exact(4).filter(|p| p[3] > 0).collect();
+                assert!(!opaque.is_empty());
+                assert!(opaque.iter().all(|p| p[..3] == rgb));
+            }
+        }
+    }
+}
+
 /// 低延迟模式：跨屏期间关闭 Mac 的 AWDL，消除 Wi‑Fi 周期性停顿造成的卡顿。只有 macOS 支持。
 pub mod low_latency {
     use crate::PlatformError;

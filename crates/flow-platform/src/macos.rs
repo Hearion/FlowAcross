@@ -22,6 +22,112 @@ use crate::{DisplayProvider, Permission, PermissionState, Permissions, PlatformE
 /// 名称只能通过 AppKit 的 NSScreen 在主线程读取，后台线程枚举显示器时使用缓存。
 static NAMES: Mutex<Option<HashMap<u32, String>>> = Mutex::new(None);
 
+/// 见 [`crate::menu_bar::set_status`]。
+///
+/// # Safety
+///
+/// 必须在主线程上调用；`status_item` 必须指向一个还活着的 `NSStatusItem`。
+pub(crate) unsafe fn set_status_icon(
+    status_item: usize,
+    status: Option<(&str, flow_core::autolock::LatencyLevel)>,
+    template_png: &[u8],
+) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSSize;
+
+    if status_item == 0 {
+        return;
+    }
+    // 有颜色时换成涂好色的图（不是模板，系统照原样画）；没有时换回模板图，系统按菜单栏深浅画黑或白。
+    // 试过给按钮设 `contentTintColor`：菜单栏按钮不认，清空时还会把模板图标画成固定的黑色（真机发现）。
+    let (png_data, template, tooltip) = match status {
+        Some((tooltip, level)) => {
+            match crate::menu_bar::tinted_png(template_png, crate::menu_bar::level_rgb(level)) {
+                Some(png_data) => (png_data, false, tooltip),
+                None => return,
+            }
+        }
+        None => (
+            template_png.to_vec(),
+            true,
+            crate::menu_bar::DEFAULT_TOOLTIP,
+        ),
+    };
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: 由调用方保证 `status_item` 是主线程上一个活着的 NSStatusItem；下面的消息
+        // 都是 AppKit / Foundation 公开的方法，参数类型和签名一致，NSImage 用完释放。
+        unsafe {
+            let item = status_item as *mut AnyObject;
+            let button: *mut AnyObject = msg_send![item, button];
+            if button.is_null() {
+                return;
+            }
+            let data: *mut AnyObject = msg_send![
+                class!(NSData),
+                dataWithBytes: png_data.as_ptr().cast::<std::ffi::c_void>(),
+                length: png_data.len()
+            ];
+            if data.is_null() {
+                return;
+            }
+            let alloc: *mut AnyObject = msg_send![class!(NSImage), alloc];
+            let image: *mut AnyObject = msg_send![alloc, initWithData: data];
+            if image.is_null() {
+                return;
+            }
+            // 和托盘库一样：菜单栏图标高 18 点，宽度按比例。
+            let size: NSSize = msg_send![image, size];
+            let height = 18.0;
+            let width = if size.height > 0.0 {
+                size.width * height / size.height
+            } else {
+                height
+            };
+            let _: () = msg_send![image, setSize: NSSize::new(width, height)];
+            let _: () = msg_send![image, setTemplate: template];
+            let _: () = msg_send![button, setImage: image];
+            let _: () = msg_send![image, release];
+            let tip = NSString::from_str(tooltip);
+            let _: () = msg_send![button, setToolTip: &*tip];
+            fit_click_area(button);
+        }
+    });
+
+    /// 托盘库在按钮上盖了一层透明视图来接收点击（弹出菜单靠它），只在通过它自己改图标、标题时
+    /// 才把这层的大小同步成按钮的大小。这里绕过它改了标题，按钮变宽了，这层却还是原来的大小和位置，
+    /// 点图标就弹不出菜单（真机发现）。照它的做法把这层（类名 `TaoTrayTarget`，tray-icon 0.25）
+    /// 设成按钮的大小；按钮自己的其他子视图不动。
+    ///
+    /// # Safety
+    ///
+    /// 在主线程上，`button` 是一个活着的 NSStatusBarButton。
+    unsafe fn fit_click_area(button: *mut objc2::runtime::AnyObject) {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        use objc2_foundation::NSRect;
+        // SAFETY: 由调用方保证；`subviews` 返回按钮持有的数组，只在这里读。
+        unsafe {
+            let frame: NSRect = msg_send![button, frame];
+            let subviews: *mut AnyObject = msg_send![button, subviews];
+            if subviews.is_null() {
+                return;
+            }
+            let count: usize = msg_send![subviews, count];
+            for i in 0..count {
+                let view: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+                if view.is_null() {
+                    continue;
+                }
+                let class_name: *mut NSString = msg_send![view, className];
+                if !class_name.is_null() && (*class_name).to_string() == "TaoTrayTarget" {
+                    let _: () = msg_send![view, setFrame: frame];
+                }
+            }
+        }
+    }
+}
+
 /// 登记一个贯穿整个进程的"用户发起、延迟敏感"活动，系统就不会对流界启用 App Nap
 /// （后台降速、合并定时器会让注入的键鼠卡顿）。Info.plist 里也声明了 LSAppNapIsDisabled。
 pub fn keep_responsive() {
