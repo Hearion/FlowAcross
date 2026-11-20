@@ -1,8 +1,8 @@
 {
   "description": "Declared licenses and notices from all locked Cargo dependencies (including build/dev and non-host targets) and production npm dependencies. Not a legal compatibility certification.",
   "lockfiles": {
-    "Cargo.lock": "82680479d4a547dc7fdcb81531f38f8ba3a241a5e8dc6b09a1102fcba09c6cdc",
-    "app/package-lock.json": "8fcd06ce121f328ca6de5285035f2c814bd6852e7b982ca582f25590470f4ad5"
+    "Cargo.lock": "084eac9dfff35a9f89f477196f39c3344439f052633fbf47aefae62b546ce421",
+    "app/package-lock.json": "791cb006e4b3eab11ac795ab4b29d7997382394e67d7195754516429b3388313"
   },
   "dependencies": [
     {

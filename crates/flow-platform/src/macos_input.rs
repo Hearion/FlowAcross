@@ -608,6 +608,96 @@ impl Drop for MacInjector {
     }
 }
 
+/// 静音、音量 +、音量 −、播放控制键在 macOS 上的"特殊键"编号（`NX_KEYTYPE_*`）；别的键返回 `None`。
+///
+/// 音量的三个键虽然有虚拟键码（`kVK_Mute` 等），但系统不认用它们合成的普通键盘事件：音量不变、
+/// 也没有音量浮窗（用户反馈：PC 键盘上的音量旋钮切到 Mac 后不起作用）。真实键盘上它们走的是
+/// 系统定义事件（`NSEventTypeSystemDefined`，子类型 8），注入时照这个格式发。播放控制键没有虚拟键码，
+/// 只能这样发。Mac 没有"停止"键，按播放 / 暂停处理。
+fn media_key_type(code: KeyCode) -> Option<i32> {
+    match code {
+        KeyCode(0x7F) => Some(7),                              // NX_KEYTYPE_MUTE
+        KeyCode(0x80) => Some(0),                              // NX_KEYTYPE_SOUND_UP
+        KeyCode(0x81) => Some(1),                              // NX_KEYTYPE_SOUND_DOWN
+        KeyCode::PLAY_PAUSE | KeyCode::MEDIA_STOP => Some(16), // NX_KEYTYPE_PLAY
+        KeyCode::NEXT_TRACK => Some(17),                       // NX_KEYTYPE_NEXT
+        KeyCode::PREVIOUS_TRACK => Some(18),                   // NX_KEYTYPE_PREVIOUS
+        _ => None,
+    }
+}
+
+/// `-[NSEvent CGEvent]` 返回的 `CGEventRef` 指向的类型。只为了让 objc2 核对方法签名时类型编码对得上。
+#[repr(C)]
+struct CGEventOpaque([u8; 0]);
+
+// SAFETY: 和 Objective-C 里 `struct __CGEvent *` 的类型编码一致，只通过指针使用。
+unsafe impl objc2::RefEncode for CGEventOpaque {
+    const ENCODING_REF: objc2::Encoding =
+        objc2::Encoding::Pointer(&objc2::Encoding::Struct("__CGEvent", &[]));
+}
+
+/// 系统定义事件（`NSEventTypeSystemDefined`）。
+const NS_SYSTEM_DEFINED: usize = 14;
+/// 系统定义事件里表示"特殊键"的子类型（`NX_SUBTYPE_AUX_CONTROL_BUTTONS`）。
+const SUBTYPE_AUX_CONTROL_BUTTONS: i16 = 8;
+
+/// 特殊键事件的 (modifierFlags, data1)：`data1` 高 16 位是键的编号，接着 8 位是按下（0xA）/ 抬起（0xB），
+/// 最低位是长按连发；`modifierFlags` 的 8–15 位和按下 / 抬起那一段相同。
+fn media_key_fields(kind: i32, down: bool, repeat: bool) -> (usize, isize) {
+    let state: isize = if down { 0xA } else { 0xB };
+    let data1 = ((kind as isize) << 16) | (state << 8) | isize::from(down && repeat);
+    ((state as usize) << 8, data1)
+}
+
+/// 创建一个特殊键事件交给 `f`（事件归自动释放池所有，只在 `f` 里有效）。创建不出来时返回 `None`。
+fn with_media_key_event<R>(
+    kind: i32,
+    down: bool,
+    repeat: bool,
+    f: impl FnOnce(CGEventRef) -> R,
+) -> Option<R> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSPoint;
+
+    let (flags, data1) = media_key_fields(kind, down, repeat);
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: 参数类型和 `+[NSEvent otherEventWithType:location:modifierFlags:timestamp:
+        // windowNumber:context:subtype:data1:data2:]` 的签名一致；`CGEvent` 返回的指针由 NSEvent 持有，
+        // 只在这个自动释放池里用。
+        unsafe {
+            let event: Option<Retained<AnyObject>> = msg_send![
+                class!(NSEvent),
+                otherEventWithType: NS_SYSTEM_DEFINED,
+                location: NSPoint::new(0.0, 0.0),
+                modifierFlags: flags,
+                timestamp: 0.0f64,
+                windowNumber: 0isize,
+                context: std::ptr::null::<AnyObject>(),
+                subtype: SUBTYPE_AUX_CONTROL_BUTTONS,
+                data1: data1,
+                data2: -1isize,
+            ];
+            let event = event?;
+            let cg: *mut CGEventOpaque = msg_send![&*event, CGEvent];
+            (!cg.is_null()).then(|| f(cg.cast()))
+        }
+    })
+}
+
+/// 注入静音 / 音量键。不带远端的修饰键：系统只看键的编号（⌥⇧ 微调音量这类组合不支持）。
+fn post_media_key(kind: i32, down: bool, repeat: bool) -> Result<(), PlatformError> {
+    with_media_key_event(kind, down, repeat, |event| {
+        // SAFETY: event 在回调期间有效；CGEventPost 会复制事件。
+        unsafe {
+            CGEventSetIntegerValueField(event, FIELD_USER_DATA, INJECTED_MARK as i64);
+            CGEventPost(HID_TAP, event);
+        }
+    })
+    .ok_or_else(|| PlatformError::Os("创建系统媒体键事件失败".into()))
+}
+
 fn button_number(b: MouseButton) -> u32 {
     match b {
         MouseButton::Left => 0,
@@ -740,6 +830,9 @@ impl InputInjector for MacInjector {
     }
 
     fn key(&mut self, code: KeyCode, down: bool, repeat: bool) -> Result<(), PlatformError> {
+        if let Some(kind) = media_key_type(code) {
+            return post_media_key(kind, down, repeat);
+        }
         let Some(vk) = keymap::to_mac(code) else {
             return Ok(());
         };
@@ -959,6 +1052,31 @@ mod tests {
 
     use super::*;
     use crate::ClipboardAccess;
+
+    #[test]
+    fn volume_keys_are_injected_as_system_defined_events() {
+        // 只有静音、音量和播放控制键走特殊键事件。
+        assert_eq!(media_key_type(KeyCode(0x7F)), Some(7));
+        assert_eq!(media_key_type(KeyCode(0x80)), Some(0));
+        assert_eq!(media_key_type(KeyCode(0x81)), Some(1));
+        assert_eq!(media_key_type(KeyCode::PLAY_PAUSE), Some(16));
+        assert_eq!(media_key_type(KeyCode::NEXT_TRACK), Some(17));
+        assert_eq!(media_key_type(KeyCode::PREVIOUS_TRACK), Some(18));
+        assert_eq!(media_key_type(KeyCode::A), None);
+        assert_eq!(media_key_type(KeyCode::LEFT_SHIFT), None);
+        // 音量 − 按下、长按连发、抬起；静音抬起。
+        assert_eq!(media_key_fields(1, true, false), (0xA00, 0x1_0A00));
+        assert_eq!(media_key_fields(1, true, true), (0xA00, 0x1_0A01));
+        assert_eq!(media_key_fields(1, false, true), (0xB00, 0x1_0B00));
+        assert_eq!(media_key_fields(7, false, false), (0xB00, 0x7_0B00));
+        // 真的能创建出系统定义事件（只创建、不发送，不会动这台电脑的音量）。
+        unsafe extern "C" {
+            fn CGEventGetType(event: CGEventRef) -> u32;
+        }
+        // SAFETY: 回调里的事件有效。
+        let kind = with_media_key_event(0, true, false, |ev| unsafe { CGEventGetType(ev) });
+        assert_eq!(kind, Some(NS_SYSTEM_DEFINED as u32));
+    }
 
     #[test]
     fn position_flags_follow_key_position() {

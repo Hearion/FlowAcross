@@ -129,6 +129,13 @@ const TABLE: &[(u16, u16, u16)] = &[
     (0x7F, 0x4A, 0xE020), // 静音
     (0x80, 0x48, 0xE030), // 音量 +
     (0x81, 0x49, 0xE02E), // 音量 -
+    // 播放控制。HID 键盘页里没有这几个键（它们在 Consumer 页），借用键盘页的 0xE8–0xEB，
+    // 和 Linux 内核 `hid_keyboard` 表里的约定一致（见 `flow_core::keys::KeyCode::PLAY_PAUSE`）。
+    // Mac 上没有虚拟键码，注入走系统定义事件（`macos_input.rs` 的 `media_key_type`）。
+    (0xE8, NONE, 0xE022), // 播放 / 暂停
+    (0xE9, NONE, 0xE024), // 停止
+    (0xEA, NONE, 0xE010), // 上一首
+    (0xEB, NONE, 0xE019), // 下一首
     // 日文键盘
     (0x87, 0x5E, 0x73), // ろ
     (0x88, 0x68, 0x70), // かな
@@ -221,6 +228,10 @@ const LINUX_SPECIAL: &[(u16, u16)] = &[
     (0x8A, 92),  // 変換
     (0x8B, 94),  // 無変換
     (0x91, 123), // 英数
+    (0xE8, 164), // 播放 / 暂停
+    (0xE9, 166), // 停止
+    (0xEA, 165), // 上一首
+    (0xEB, 163), // 下一首
     (0xE3, 125), // 左 Super
     (0xE4, 97),  // 右 Ctrl
     (0xE6, 100), // 右 Alt
@@ -325,6 +336,26 @@ mod tests {
         assert_eq!(from_linux(75), Some(KeyCode(0x5C)));
         assert_eq!(from_linux(0), None);
         assert_eq!(from_linux(240), None);
+    }
+
+    #[test]
+    fn playback_keys() {
+        // 播放 / 暂停、停止、上一首、下一首：Linux 的 KEY_PLAYPAUSE 等，Windows 的 E0 扩展扫描码。
+        for (code, evdev, scan) in [
+            (KeyCode::PLAY_PAUSE, 164, 0x22),
+            (KeyCode::MEDIA_STOP, 166, 0x24),
+            (KeyCode::PREVIOUS_TRACK, 165, 0x10),
+            (KeyCode::NEXT_TRACK, 163, 0x19),
+        ] {
+            assert_eq!(from_linux(evdev), Some(code));
+            assert_eq!(to_linux(code), Some(evdev));
+            assert_eq!(from_win(scan, true), Some(code));
+            assert_eq!(to_win(code), Some((scan, true)));
+            // Mac 上不走虚拟键码。
+            assert_eq!(to_mac(code), None);
+            // 不是修饰键。
+            assert_eq!(code.modifier(), None);
+        }
     }
 
     #[test]

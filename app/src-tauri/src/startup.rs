@@ -20,6 +20,11 @@ pub const AUTOSTART_ARG: &str = "--autostart";
 /// 也方便脚本和宏按键调用。
 pub const SWITCH_ARG: &str = "--switch";
 
+/// 让正在运行的流界执行一条快捷键映射：`flowacross --mapping <序号>`（也接受 `--mapping=<序号>`），
+/// 序号是 设置 › 快捷键 里映射的次序，从 1 开始。Wayland 上键鼠在本机时流界看不到键盘，
+/// 映射的触发键按了没反应（用户反馈），在桌面自己的快捷键设置里绑这条命令来代替。
+pub const MAPPING_ARG: &str = "--mapping";
+
 /// 本次启动是否由开机启动项触发。
 pub fn launched_by_autostart() -> bool {
     std::env::args_os().skip(1).any(|a| a == AUTOSTART_ARG)
@@ -27,16 +32,26 @@ pub fn launched_by_autostart() -> bool {
 
 /// 命令行里 `--switch` 的目标；没有这个参数、或后面没跟目标时返回 `None`。
 pub fn switch_target(args: &[String]) -> Option<&str> {
+    arg_value(args, SWITCH_ARG)
+}
+
+/// 命令行里 `--mapping` 的序号（原样返回，由 `Engine::mapping_command` 解析）。
+pub fn mapping_target(args: &[String]) -> Option<&str> {
+    arg_value(args, MAPPING_ARG)
+}
+
+/// `name <值>` 或 `name=<值>` 里的值；没有这个参数、或值为空时返回 `None`。
+fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        if arg == SWITCH_ARG {
+        if arg == name {
             return it.next().map(String::as_str).filter(|t| !t.is_empty());
         }
-        if let Some(target) = arg
-            .strip_prefix(SWITCH_ARG)
+        if let Some(value) = arg
+            .strip_prefix(name)
             .and_then(|rest| rest.strip_prefix('='))
         {
-            return Some(target).filter(|t| !t.is_empty());
+            return Some(value).filter(|t| !t.is_empty());
         }
     }
     None
@@ -61,9 +76,13 @@ pub fn show_window_on_next_start(app: &AppHandle) {
 /// 启动时是否应该隐藏窗口：开机自启且没有"下次显示窗口"的标记。标记读一次就删掉。
 pub fn start_hidden(app: &AppHandle) -> bool {
     let forced_show = show_marker(app).is_some_and(|p| std::fs::remove_file(p).is_ok());
-    // 流界没在运行时执行 `flowacross --switch …`：照常启动，但不弹出窗口（多半是按快捷键触发的）。
+    // 流界没在运行时执行 `flowacross --switch …` / `--mapping …`：照常启动，但不弹出窗口
+    // （多半是按快捷键触发的）。
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let background = launched_by_autostart() || args.iter().any(|a| a.starts_with(SWITCH_ARG));
+    let background = launched_by_autostart()
+        || args
+            .iter()
+            .any(|a| a.starts_with(SWITCH_ARG) || a.starts_with(MAPPING_ARG));
     background && !forced_show
 }
 
@@ -123,7 +142,7 @@ fn fix_hint() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::switch_target;
+    use super::{mapping_target, switch_target};
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -145,5 +164,16 @@ mod tests {
         assert_eq!(switch_target(&args(&["flowacross", "--autostart"])), None);
         // 别的以它开头的参数不算。
         assert_eq!(switch_target(&args(&["--switcher", "x"])), None);
+    }
+
+    #[test]
+    fn mapping_target_is_read_from_either_form() {
+        assert_eq!(
+            mapping_target(&args(&["flowacross", "--mapping", "2"])),
+            Some("2")
+        );
+        assert_eq!(mapping_target(&args(&["--mapping=1"])), Some("1"));
+        assert_eq!(mapping_target(&args(&["flowacross", "--mapping"])), None);
+        assert_eq!(mapping_target(&args(&["--switch", "right"])), None);
     }
 }

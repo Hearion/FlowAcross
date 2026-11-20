@@ -30,6 +30,14 @@ impl KeyCode {
     pub const RIGHT_ALT: KeyCode = KeyCode(0xE6);
     pub const RIGHT_META: KeyCode = KeyCode(0xE7);
 
+    /// 播放控制键。USB HID 把它们放在 Consumer 页，键盘页里没有；这里借用键盘页修饰键后面的
+    /// 0xE8–0xEB（Linux 内核的 `hid_keyboard` 表也这样用）。0.2.4 及更早的版本键码表里查不到，
+    /// 收到后直接忽略，不影响连接。
+    pub const PLAY_PAUSE: KeyCode = KeyCode(0xE8);
+    pub const MEDIA_STOP: KeyCode = KeyCode(0xE9);
+    pub const PREVIOUS_TRACK: KeyCode = KeyCode(0xEA);
+    pub const NEXT_TRACK: KeyCode = KeyCode(0xEB);
+
     /// 如果是修饰键，返回对应的修饰键位。
     pub fn modifier(self) -> Option<Modifiers> {
         match self {

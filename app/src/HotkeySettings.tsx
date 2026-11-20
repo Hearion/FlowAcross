@@ -207,6 +207,12 @@ export function HotkeySettings({ state, update }: { state: StateView; update: (h
       <p className="settings-desc">
         在这台电脑上按下一组键，让另一台电脑收到另一组键，键鼠不用切过去。比如按 {isMac ? "⌃ ⌥ S" : "Ctrl + Alt + S"}，让另一台电脑收到 S；对方屏幕熄着时，发一个键过去也能把它点亮。
       </p>
+      {state.unsupported.local_hotkey && (
+        <p className="settings-note warn">
+          这台电脑用的是 Wayland，键鼠在本机时流界看不到键盘，在这里按映射的触发键没有反应。可以在桌面自己的快捷键设置里绑一条命令来执行映射：
+          <code>flowacross --mapping 1</code>（数字是下面第几条映射，从 1 开始；删掉前面的映射后序号会变）。
+        </p>
+      )}
       <div className="panel settings-panel">
         {h.mappings.length === 0 && !draft && <div className="setting muted">还没有映射。</div>}
         {h.mappings.map((m, i) => (

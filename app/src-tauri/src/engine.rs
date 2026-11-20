@@ -1867,6 +1867,41 @@ impl Engine {
         self.switch_to(&id)
     }
 
+    /// 命令行 `flowacross --mapping <序号>`（由已经在运行的流界执行）：执行 设置 › 快捷键 里的
+    /// 第几条快捷键映射（从 1 开始），和按下它的触发键一样。给看不到全局键盘的桌面（Wayland）
+    /// 在桌面自己的快捷键设置里绑定用。失败时返回给用户看的原因。
+    pub fn mapping_command(&self, target: &str) -> Result<(), String> {
+        let target = target.trim();
+        let (mapping, name) = {
+            let st = self.lock();
+            let mappings = &st.config.settings.hotkeys.mappings;
+            let mapping = target
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| mappings.get(n.checked_sub(1)?))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "没有第「{target}」条快捷键映射。现在有 {} 条，序号从 1 开始，见 设置 › 快捷键。",
+                        mappings.len()
+                    )
+                })?;
+            let name = st
+                .config
+                .peer(&mapping.device)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            (mapping, name)
+        };
+        if self.controller().send_keys(&mapping.device, mapping.send) {
+            Ok(())
+        } else {
+            Err(format!(
+                "按键没有发给「{name}」：它没连着、暂停了共享，或者它的流界版本低于 0.2.4。"
+            ))
+        }
+    }
+
     /// 本机是键鼠所在的电脑时，为什么现在不能把键鼠切到 `id`（一台已配对的设备）；能切时返回
     /// `None`。界面上按钮和托盘菜单能不能点（`DeviceView::can_switch`）和真去切时的检查共用它，
     /// 不会出现"能点、一点就报错"。`on_remote`：本机的键鼠现在已经在别的电脑上。
@@ -5166,7 +5201,15 @@ mod tests {
         let saved = a.engine.settings().hotkeys;
         assert_eq!((saved.devices.len(), saved.mappings.len()), (1, 1));
         assert!(device(&a.engine, &idb).can_send_keys);
+        // `flowacross --mapping <序号>`：序号从 1 开始，执行的是整理之后留下的那一条。
+        a.engine.mapping_command("1").unwrap();
+        a.engine.mapping_command(" 1 ").unwrap();
+        for bad in ["0", "2", "abc", "-1"] {
+            let err = a.engine.mapping_command(bad).unwrap_err();
+            assert!(err.contains("现在有 1 条"), "{err}");
+        }
         a.engine.remove_device(&idb);
+        assert!(a.engine.mapping_command("1").is_err());
         let saved = a.engine.settings().hotkeys;
         assert!(saved.devices.is_empty() && saved.mappings.is_empty());
         // 左右切换的快捷键不受影响。
