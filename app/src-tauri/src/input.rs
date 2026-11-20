@@ -572,7 +572,7 @@ impl Controller {
 
     /// 快捷键映射：让 `device` 按一下 `keys`，键鼠不用切过去。对方没连着、被暂停、
     /// 或版本太旧不认得这条消息时返回 `false`。锁定在本机不影响（它只限制键鼠切出去）。
-    pub fn send_keys(&mut self, device: &DeviceId, keys: KeyCombo) -> bool {
+    fn send_keys(&mut self, device: &DeviceId, keys: KeyCombo) -> bool {
         if !self.cfg.enabled || !self.cfg.remote_keys.contains(device) {
             return false;
         }

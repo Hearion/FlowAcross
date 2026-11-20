@@ -144,19 +144,6 @@ fn main() {
                 }
                 return;
             }
-            // `flowacross --mapping <序号>`：执行一条快捷键映射，同样不打扰窗口。
-            if let Some(target) = startup::mapping_target(&args) {
-                tracing::info!(%target, "收到快捷键映射命令");
-                let result = app
-                    .try_state::<Engine>()
-                    .ok_or_else(|| "流界还在启动，稍后再试。".to_string())
-                    .and_then(|engine| engine.mapping_command(target));
-                if let Err(reason) = result {
-                    tracing::warn!(%target, %reason, "快捷键映射命令没有执行");
-                    let _ = app.emit("notice", reason);
-                }
-                return;
-            }
             tracing::info!("再次打开流界，显示已有窗口");
             show_main_window(app);
         }));

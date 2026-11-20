@@ -21,6 +21,7 @@ use flow_core::files::{
     peer_supports_images,
 };
 use flow_core::geometry::Point;
+use flow_core::hotkeys::Hotkeys;
 use flow_core::keys::{InputEvent, KeyCode, Modifiers, PressedState, WinToMacKeys};
 use flow_core::layout::{DeviceId, Display, DisplayId, Layout, SharedLayout};
 use flow_core::pairing::{Nonce, PairingCode, commitment, device_id, sas_code, verify_commitment};
@@ -513,6 +514,17 @@ fn map_key(from: Os, local: Os, win_keys: WinToMacKeys, code: KeyCode) -> KeyCod
     } else {
         code
     }
+}
+
+/// 控制器实际使用的快捷键。看不到全局键盘的桌面（Linux 的 Wayland）不支持快捷键映射：键鼠在本机时
+/// 按触发键没有反应，只有键鼠已经切到别的电脑后才触发，和"不用切过去"的用途相反（用户反馈），
+/// 设置页也不显示这一节，所以配置里留着的映射（比如从 X11 会话带过来的）一律不用。
+fn usable_hotkeys(hotkeys: &Hotkeys, limits: flow_platform::Limits) -> Hotkeys {
+    let mut hotkeys = hotkeys.clone();
+    if limits.local_hotkey {
+        hotkeys.mappings.clear();
+    }
+    hotkeys
 }
 
 /// `limits`：当前系统做不到的切换方式。做不到的设置一律忽略，否则打开后永远切不过去
@@ -1385,7 +1397,7 @@ impl Engine {
                 .filter(|(_, s)| s.acks)
                 .map(|(id, _)| id.clone())
                 .collect(),
-            hotkeys: st.config.settings.hotkeys.clone(),
+            hotkeys: usable_hotkeys(&st.config.settings.hotkeys, flow_platform::limits()),
             remote_keys: st
                 .sessions
                 .iter()
@@ -1865,41 +1877,6 @@ impl Engine {
             }
         };
         self.switch_to(&id)
-    }
-
-    /// 命令行 `flowacross --mapping <序号>`（由已经在运行的流界执行）：执行 设置 › 快捷键 里的
-    /// 第几条快捷键映射（从 1 开始），和按下它的触发键一样。给看不到全局键盘的桌面（Wayland）
-    /// 在桌面自己的快捷键设置里绑定用。失败时返回给用户看的原因。
-    pub fn mapping_command(&self, target: &str) -> Result<(), String> {
-        let target = target.trim();
-        let (mapping, name) = {
-            let st = self.lock();
-            let mappings = &st.config.settings.hotkeys.mappings;
-            let mapping = target
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| mappings.get(n.checked_sub(1)?))
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "没有第「{target}」条快捷键映射。现在有 {} 条，序号从 1 开始，见 设置 › 快捷键。",
-                        mappings.len()
-                    )
-                })?;
-            let name = st
-                .config
-                .peer(&mapping.device)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            (mapping, name)
-        };
-        if self.controller().send_keys(&mapping.device, mapping.send) {
-            Ok(())
-        } else {
-            Err(format!(
-                "按键没有发给「{name}」：它没连着、暂停了共享，或者它的流界版本低于 0.2.4。"
-            ))
-        }
     }
 
     /// 本机是键鼠所在的电脑时，为什么现在不能把键鼠切到 `id`（一台已配对的设备）；能切时返回
@@ -4631,6 +4608,27 @@ mod tests {
     }
 
     #[test]
+    fn mappings_are_dropped_where_the_keyboard_is_not_visible() {
+        use flow_core::hotkeys::{KeyCombo, KeyMapping};
+        let mut h = Hotkeys::default();
+        h.mappings.push(KeyMapping {
+            trigger: KeyCombo::new(Modifiers::CTRL | Modifiers::ALT, KeyCode(0x16)),
+            send: KeyCombo::new(Modifiers::NONE, KeyCode(0x16)),
+            device: DeviceId("p".into()),
+        });
+        assert_eq!(usable_hotkeys(&h, flow_platform::Limits::default()), h);
+        let wayland = flow_platform::Limits {
+            local_hotkey: true,
+            ..Default::default()
+        };
+        let used = usable_hotkeys(&h, wayland);
+        assert!(used.mappings.is_empty());
+        // 切换用的快捷键照常保留（键鼠切过去之后用它切回来）。
+        assert_eq!(used.switch_left, h.switch_left);
+        assert_eq!(used.switch_right, h.switch_right);
+    }
+
+    #[test]
     fn map_key_uses_win_keys_only_when_mac_is_controlled() {
         let pos = WinToMacKeys::MAC_POSITION;
         // PC 键盘控制 Mac：按设置换算。
@@ -5201,15 +5199,7 @@ mod tests {
         let saved = a.engine.settings().hotkeys;
         assert_eq!((saved.devices.len(), saved.mappings.len()), (1, 1));
         assert!(device(&a.engine, &idb).can_send_keys);
-        // `flowacross --mapping <序号>`：序号从 1 开始，执行的是整理之后留下的那一条。
-        a.engine.mapping_command("1").unwrap();
-        a.engine.mapping_command(" 1 ").unwrap();
-        for bad in ["0", "2", "abc", "-1"] {
-            let err = a.engine.mapping_command(bad).unwrap_err();
-            assert!(err.contains("现在有 1 条"), "{err}");
-        }
         a.engine.remove_device(&idb);
-        assert!(a.engine.mapping_command("1").is_err());
         let saved = a.engine.settings().hotkeys;
         assert!(saved.devices.is_empty() && saved.mappings.is_empty());
         // 左右切换的快捷键不受影响。

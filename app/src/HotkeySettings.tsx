@@ -204,59 +204,61 @@ export function HotkeySettings({ state, update }: { state: StateView; update: (h
       </p>
 
       <h2 className="settings-subtitle">快捷键映射</h2>
-      <p className="settings-desc">
-        在这台电脑上按下一组键，让另一台电脑收到另一组键，键鼠不用切过去。比如按 {isMac ? "⌃ ⌥ S" : "Ctrl + Alt + S"}，让另一台电脑收到 S；对方屏幕熄着时，发一个键过去也能把它点亮。
-      </p>
-      {state.unsupported.local_hotkey && (
+      {state.unsupported.local_hotkey ? (
         <p className="settings-note warn">
-          这台电脑用的是 Wayland，键鼠在本机时流界看不到键盘，在这里按映射的触发键没有反应。可以在桌面自己的快捷键设置里绑一条命令来执行映射：
-          <code>flowacross --mapping 1</code>（数字是下面第几条映射，从 1 开始；删掉前面的映射后序号会变）。
+          这台电脑用的是 Wayland，不支持快捷键映射：键鼠在本机时流界看不到键盘，按了没有反应。别的电脑设置的映射照常可以发到这台电脑。
         </p>
+      ) : (
+        <>
+          <p className="settings-desc">
+            在这台电脑上按下一组键，让另一台电脑收到另一组键，键鼠不用切过去。比如按 {isMac ? "⌃ ⌥ S" : "Ctrl + Alt + S"}，让另一台电脑收到 S；对方屏幕熄着时，发一个键过去也能把它点亮。
+          </p>
+          <div className="panel settings-panel">
+            {h.mappings.length === 0 && !draft && <div className="setting muted">还没有映射。</div>}
+            {h.mappings.map((m, i) => (
+              <MappingRow
+                key={i}
+                peers={peers}
+                target={state.devices.find((d) => d.id === m.device)}
+                trigger={m.trigger}
+                send={m.send}
+                device={m.device}
+                sendMac={macOf(m.device)}
+                conflict={conflictFor(`mapping:${i}`)}
+                onTrigger={(c) => (c ? setMapping(i, { trigger: c }) : update({ ...h, mappings: h.mappings.filter((_, j) => j !== i) }))}
+                onSend={(c) => c && setMapping(i, { send: c })}
+                onDevice={(device) => setMapping(i, { device })}
+                onRemove={() => update({ ...h, mappings: h.mappings.filter((_, j) => j !== i) })}
+              />
+            ))}
+            {draft && (
+              <MappingRow
+                peers={peers}
+                target={state.devices.find((d) => d.id === draftDevice)}
+                trigger={draft.trigger}
+                send={draft.send}
+                device={draftDevice}
+                sendMac={macOf(draftDevice)}
+                conflict={conflictFor("draft")}
+                onTrigger={(c) => commitDraft({ ...draft, device: draftDevice, trigger: c })}
+                onSend={(c) => commitDraft({ ...draft, device: draftDevice, send: c })}
+                onDevice={(device) => commitDraft({ ...draft, device })}
+                onRemove={() => setDraft(null)}
+              />
+            )}
+          </div>
+          <div className="settings-actions">
+            <button className="btn small" disabled={peers.length === 0 || !!draft} onClick={() => setDraft({ trigger: null, send: null, device: peers[0]?.id ?? "" })}>
+              <PlusIcon />
+              添加映射
+            </button>
+            {peers.length === 0 && <small className="muted">先配对一台电脑，才有地方可发。</small>}
+          </div>
+          <p className="settings-note">
+            发过去的是按键的位置，对方照自己的键盘布局和输入法处理；Mac 和 Windows 之间按「跨屏与键鼠」里的设置换算修饰键（默认 ⌘ 和 Ctrl 互换）。对方的流界需要 0.2.4 或更新版本；对方没连着、被暂停或版本太旧时，这组键不会被拦下，照常交给当前的电脑。
+          </p>
+        </>
       )}
-      <div className="panel settings-panel">
-        {h.mappings.length === 0 && !draft && <div className="setting muted">还没有映射。</div>}
-        {h.mappings.map((m, i) => (
-          <MappingRow
-            key={i}
-            peers={peers}
-            target={state.devices.find((d) => d.id === m.device)}
-            trigger={m.trigger}
-            send={m.send}
-            device={m.device}
-            sendMac={macOf(m.device)}
-            conflict={conflictFor(`mapping:${i}`)}
-            onTrigger={(c) => (c ? setMapping(i, { trigger: c }) : update({ ...h, mappings: h.mappings.filter((_, j) => j !== i) }))}
-            onSend={(c) => c && setMapping(i, { send: c })}
-            onDevice={(device) => setMapping(i, { device })}
-            onRemove={() => update({ ...h, mappings: h.mappings.filter((_, j) => j !== i) })}
-          />
-        ))}
-        {draft && (
-          <MappingRow
-            peers={peers}
-            target={state.devices.find((d) => d.id === draftDevice)}
-            trigger={draft.trigger}
-            send={draft.send}
-            device={draftDevice}
-            sendMac={macOf(draftDevice)}
-            conflict={conflictFor("draft")}
-            onTrigger={(c) => commitDraft({ ...draft, device: draftDevice, trigger: c })}
-            onSend={(c) => commitDraft({ ...draft, device: draftDevice, send: c })}
-            onDevice={(device) => commitDraft({ ...draft, device })}
-            onRemove={() => setDraft(null)}
-          />
-        )}
-      </div>
-      <div className="settings-actions">
-        <button className="btn small" disabled={peers.length === 0 || !!draft} onClick={() => setDraft({ trigger: null, send: null, device: peers[0]?.id ?? "" })}>
-          <PlusIcon />
-          添加映射
-        </button>
-        {peers.length === 0 && <small className="muted">先配对一台电脑，才有地方可发。</small>}
-      </div>
-      <p className="settings-note">
-        发过去的是按键的位置，对方照自己的键盘布局和输入法处理；Mac 和 Windows 之间按「跨屏与键鼠」里的设置换算修饰键（默认 ⌘ 和 Ctrl 互换）。对方的流界需要 0.2.4 或更新版本；对方没连着、被暂停或版本太旧时，这组键不会被拦下，照常交给当前的电脑。
-      </p>
     </>
   );
 }

@@ -102,7 +102,7 @@
   - 上面的"做不到"是指现有实现，其中几项换个做法可以实现（都还没做，做好后恢复显示对应的设置）：
     - [ ] 按住修饰键才切换：光标碰到屏幕边时让边缘窗口临时拿一下键盘焦点，合成器会同时报告修饰键状态，没按着就还回去（副作用：前台程序短暂失去焦点）；portal 上撞到屏障后同样能拿到修饰键状态
     - [x] 本机快捷键切换：`flowacross --switch left|right|home|<设备名>`，在合成器里自己绑快捷键即可（例如 Hyprland：`bind = CTRL ALT, right, exec, flowacross --switch right`），各系统都能用（见架构文档第 5 节）。Sway、Hyprland 上为此补了"不碰屏幕边也能接管键鼠"的路径，在无头 sway 1.7 / 1.10 上测过（CI 每次都跑）；**没有在 Hyprland 和真实键鼠上验证**。GNOME / KDE 的 Wayland 上键鼠在本机时这条命令切不出去（合成器只在光标撞到屏幕边时才交出键鼠）
-    - [x] 本机触发快捷键映射（GitHub 反馈 #4，CachyOS 控制 Mac，映射的触发键按了没反应）：`flowacross --mapping <序号>` 执行设置里的第几条映射，在合成器里自己绑快捷键（例如 Hyprland：`bind = ALT SHIFT, S, exec, flowacross --mapping 1`），快捷键设置的映射一节在 Wayland 上给出这条说明。命令的解析和执行有单元测试；**没有在 Wayland 真机上验证**，反馈里也没说明桌面是不是 Wayland（按之前 CachyOS + Hyprland 的反馈推断）
+    - [x] Wayland 上不支持快捷键映射（GitHub 反馈 #4，CachyOS 控制 Mac，映射的触发键按了没反应）：键鼠在本机时看不到键盘，做不到"不用切过去"。v0.2.5-beta.1 加过命令 `flowacross --mapping <序号>` 让用户在合成器里自己绑，嫌麻烦，随后去掉；改为 Wayland 上设置页不显示这一节并说明不支持，配置里留着的映射也不生效。X11 不受影响。反馈里没说明桌面是不是 Wayland（按之前 CachyOS + Hyprland 的反馈推断）。接入下面的全局快捷键 portal 后可以在 KDE / GNOME 上恢复
     - [ ] 接入全局快捷键 portal（Hyprland、KDE 等支持），让设置页里的快捷键在 Wayland 上直接生效，不用去合成器里绑
     - [ ] GNOME / KDE 的贴边停留：撞上屏障后先不放开，在停留时间内看用户是否继续往外推
     - GNOME 的边缘浮光确实难做：没有在屏幕边上放置顶层窗口的协议，只能做成 Shell 扩展

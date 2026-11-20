@@ -18,7 +18,7 @@
 - [SignPath 申请资料](docs/signpath-application.md)：英文申请内容与提交检查项
 - [Download / 下载](docs/downloads.md)：安装包入口、源码、许可和签名状态
 
-流界运行时，可以用命令把键鼠切到别的电脑（给桌面的快捷键、脚本、宏按键用）：`flowacross --switch right`，目标还可以是 `left`、`home`（回到这台电脑）或设备名称。`flowacross --mapping 1` 执行 设置 › 快捷键 里的第 1 条快捷键映射（Wayland 上键鼠在本机时流界看不到键盘，用它在桌面的快捷键设置里代替触发键）。
+流界运行时，可以用命令把键鼠切到别的电脑（给桌面的快捷键、脚本、宏按键用）：`flowacross --switch right`，目标还可以是 `left`、`home`（回到这台电脑）或设备名称。
 
 ## License
 
