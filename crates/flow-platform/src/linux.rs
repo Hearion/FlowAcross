@@ -16,8 +16,9 @@ use x11rb::rust_connection::RustConnection;
 
 use crate::linux_wl::{self, Backend};
 use crate::{
-    ClipboardAccess, DisplayProvider, InputCapture, InputInjector, PlatformError, linux_clipboard,
-    linux_glow, linux_input, linux_portal, linux_wl_clipboard, linux_wl_glow, linux_wlr_input,
+    ClipboardAccess, DisplayProvider, InputCapture, InputInjector, LocalShortcut,
+    LocalShortcutHandler, PlatformError, linux_clipboard, linux_glow, linux_hypr_shortcuts,
+    linux_input, linux_portal, linux_wl_clipboard, linux_wl_glow, linux_wlr_input,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,22 @@ pub fn pending_authorization() -> Option<crate::AuthPrompt> {
 
 pub fn limits() -> crate::Limits {
     linux_wl::limits()
+}
+
+/// 只有 Hyprland 能直接把全局快捷键交给流界（见 `linux_hypr_shortcuts.rs`）。
+pub fn set_local_shortcuts(shortcuts: Vec<LocalShortcut>) -> Result<(), PlatformError> {
+    if !linux_wl::hyprland_shortcuts() {
+        return Err(PlatformError::Unsupported("快捷键映射"));
+    }
+    linux_hypr_shortcuts::set(shortcuts)
+}
+
+pub fn set_local_shortcut_handler(handler: LocalShortcutHandler) {
+    linux_hypr_shortcuts::set_handler(handler);
+}
+
+pub fn clear_local_shortcuts() {
+    linux_hypr_shortcuts::clear();
 }
 
 pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {

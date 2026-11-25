@@ -204,15 +204,20 @@ export function HotkeySettings({ state, update }: { state: StateView; update: (h
       </p>
 
       <h2 className="settings-subtitle">快捷键映射</h2>
-      {state.unsupported.local_hotkey ? (
+      {state.unsupported.local_mapping ? (
         <p className="settings-note warn">
-          这台电脑用的是 Wayland，不支持快捷键映射：键鼠在本机时流界看不到键盘，按了没有反应。别的电脑设置的映射照常可以发到这台电脑。
+          这台电脑的桌面不支持快捷键映射：键鼠在本机时流界看不到键盘，按了没有反应。别的电脑设置的映射照常可以发到这台电脑。
         </p>
       ) : (
         <>
           <p className="settings-desc">
             在这台电脑上按下一组键，让另一台电脑收到另一组键，键鼠不用切过去。比如按 {isMac ? "⌃ ⌥ S" : "Ctrl + Alt + S"}，让另一台电脑收到 S；对方屏幕熄着时，发一个键过去也能把它点亮。
           </p>
+          {state.unsupported.local_hotkey && (
+            <p className="settings-note">
+              Hyprland 上看不到全局键盘，映射的触发键会注册成 Hyprland 自己的全局快捷键（快捷键列表里显示为「流界：快捷键映射 N」），重载配置后会自动重新绑定。目标电脑没连着时不会注册，触发键照常交给原来的去处。
+            </p>
+          )}
           <div className="panel settings-panel">
             {h.mappings.length === 0 && !draft && <div className="setting muted">还没有映射。</div>}
             {h.mappings.map((m, i) => (

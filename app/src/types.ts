@@ -180,6 +180,8 @@ export interface UnsupportedView {
   hold_key: boolean;
   /** 在这台电脑上按快捷键切到别的电脑（切过去之后用它切回来不受影响）。 */
   local_hotkey: boolean;
+  /** 在这台电脑上按快捷键映射的触发键（Hyprland 能把它们注册成桌面的全局快捷键）。 */
+  local_mapping: boolean;
   /** 「贴边停留」。 */
   dwell: boolean;
   /** 边缘浮光。 */

@@ -98,7 +98,7 @@
 - **快捷键与快捷键映射**（`flow-core::hotkeys`，设置里的 `Settings::hotkeys`）：快捷键是"手边这台电脑"的——只有物理键盘所在的电脑看得到按键，所以各台电脑各设各的，由控制器（`input::Controller`）在捕获回调里匹配。一组键 = 修饰键位掩码 + 一个 HID 主键，修饰键按"恰好相等"匹配（Ctrl+Alt+S 和 Ctrl+Alt+Shift+S 是两个快捷键）；触发键必须带 Ctrl、Alt 或 ⌘ / Win 之一，功能键（F1–F20、Print Screen、Scroll Lock、Pause）可以单独用（F21–F24 各系统的键码表里没有，不收）。保存前由 `Hotkeys::sanitized` 去掉不合法和重复的；设备被移除时指向它的一并删掉。三类动作：
   - 切到左 / 右相邻的电脑：默认 Ctrl+Alt+←/→，可以改、可以关。
   - 切到指定的电脑（包括回到本机）：`Controller::switch_to_device`，进入目标面积最大的那块屏幕的中央。
-  - **快捷键映射**（用户需求，类似 Synergy 的 hotkey）：按下一组键，让指定的电脑收到另一组键，键鼠不用切过去。控制方发 `Message::KeyStroke { keys }`（0.2.4 新增，修饰键在前），被控制方不需要先收到 `Enter`：依次按下、反序抬起，修饰键照常按第 5 节的规则换算。如果正在控制它的设备手上还按着修饰键（触发映射用的 Ctrl、Alt 多半已经发过去了），被控制方先把它们抬起、按完再按回去（`hotkeys::tap_sequence`），否则对方收到的是 Ctrl+Alt+S 而不是 S。发来的按键也算"有人在用"，屏幕熄着会点亮。对方暂停了共享时不理会；锁定在本机不影响发送（没有把键鼠切出去）。看不到全局键盘的桌面（Linux 的 Wayland）不支持在本机设置映射：键鼠在本机时触发键按了没反应，设置页不显示这一节，配置里留着的映射控制器也不用（`engine::usable_hotkeys`）；别的电脑发来的映射按键照常注入。
+  - **快捷键映射**（用户需求，类似 Synergy 的 hotkey）：按下一组键，让指定的电脑收到另一组键，键鼠不用切过去。控制方发 `Message::KeyStroke { keys }`（0.2.4 新增，修饰键在前），被控制方不需要先收到 `Enter`：依次按下、反序抬起，修饰键照常按第 5 节的规则换算。如果正在控制它的设备手上还按着修饰键（触发映射用的 Ctrl、Alt 多半已经发过去了），被控制方先把它们抬起、按完再按回去（`hotkeys::tap_sequence`），否则对方收到的是 Ctrl+Alt+S 而不是 S。发来的按键也算"有人在用"，屏幕熄着会点亮。对方暂停了共享时不理会；锁定在本机不影响发送（没有把键鼠切出去）。看不到全局键盘的桌面要在本机用映射，得让桌面替流界看着触发键：Hyprland 上把每条映射注册成合成器的全局快捷键（`hyprland-global-shortcuts-v1`，见第 12 节），按下时合成器通过 `flow_platform::LocalShortcut` 交给流界，引擎再走和捕获回调里一样的 `Controller::run_shortcut`。注册表由 `Engine::sync_input` 在每次设备、连接、设置变化后整体替换，只包含现在真的发得出去的映射（目标电脑连着、认 `Message::KeyStroke`、共享没暂停）：发不出去的不占触发键，按键照常交给原来的去处。Sway、GNOME / KDE 的 Wayland 没有能用的接口，不支持在本机设置映射：键鼠在本机时触发键按了没反应，设置页不显示这一节，配置里留着的映射控制器也不用（`engine::usable_hotkeys`）。别的电脑发来的映射按键照常注入。
   - 动作做不成时（没有那台电脑、没连着、被暂停、对方版本太旧）不算快捷键，按键照常交给原来的去处，和以前"右边没有电脑时 Ctrl+Alt+→ 照常放行"一致。触发键的连发和抬起都拦截。
   - 设置页录制快捷键时，按键是从网页的键盘事件（`KeyboardEvent.code`，物理键位）换算成 HID 的（`app/src/keys.ts`）；录制期间界面通知引擎暂停响应快捷键（`set_hotkeys_suspended`），否则刚按下的组合键会直接把键鼠切走。
   - Wayland 上键鼠在本机时看不到键盘（`Limits::local_hotkey`），这些快捷键只有在键鼠已经切到别的电脑之后才起作用。
@@ -267,12 +267,12 @@ Linux 上有三套实现，启动时按桌面会话选一套（`linux_wl.rs` 的
 | 会话 | 实现 | 文件 |
 |---|---|---|
 | X11 | XInput2 / XTest / RandR / X 选区（纯 Rust 的 x11rb，不链接 libxcb / libX11） | `linux.rs`、`linux_input.rs`、`linux_clipboard.rs`、`linux_glow.rs` |
-| Wayland，合成器有 wlroots 的虚拟输入和 layer-shell 协议（Sway、Hyprland 等） | 虚拟指针 / 虚拟键盘、layer-shell、data-control（纯 Rust 的 wayland-client；xkbcommon 链接系统库） | `linux_wl.rs`、`linux_wlr_input.rs`、`linux_wl_clipboard.rs`、`linux_wl_glow.rs` |
+| Wayland，合成器有 wlroots 的虚拟输入和 layer-shell 协议（Sway、Hyprland 等） | 虚拟指针 / 虚拟键盘、layer-shell、data-control（纯 Rust 的 wayland-client；xkbcommon 链接系统库）；Hyprland 另有全局快捷键协议 | `linux_wl.rs`、`linux_wlr_input.rs`、`linux_wl_clipboard.rs`、`linux_wl_glow.rs`、`linux_hypr_shortcuts.rs` |
 | Wayland，其他合成器（GNOME、KDE） | xdg-desktop-portal（ashpd）+ libei 协议（纯 Rust 的 reis） | `linux_portal.rs`，剪贴板和浮光尽量复用上一行的 |
 
 做不到的切换方式由 `flow_platform::limits()` 报告（按会话类型和有没有 layer-shell 判断）：引擎生成切换策略时忽略对应的设置（否则打开「按住修饰键才切换」就永远切不过去），并通过状态里的 `unsupported` 告诉界面，设置页和侧栏不显示这些选项。这是按现有实现判断的"做不到"，其中几项换个做法可以实现，见路线图。
 
-Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不到别的窗口的输入，也不知道光标在哪，所以两套 Wayland 实现和其他系统有几处共同的不同（下面各节细说）：只在通往别的电脑的屏幕边上感知"光标推到了边上"（引擎用 `flow_platform::set_switch_edges` 告知是哪些边，由 `flow_core::Layout::switch_edges` 算出）；没切到远端时看不到键盘，「按住修饰键才切换」和本机上的 Ctrl+Alt+←/→ 不起作用——Sway、Hyprland 上可以把合成器自己的快捷键绑到 `flowacross --switch left` / `right` 来代替（见第 5 节）。
+Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不到别的窗口的输入，也不知道光标在哪，所以两套 Wayland 实现和其他系统有几处共同的不同（下面各节细说）：只在通往别的电脑的屏幕边上感知"光标推到了边上"（引擎用 `flow_platform::set_switch_edges` 告知是哪些边，由 `flow_core::Layout::switch_edges` 算出）；没切到远端时看不到键盘，「按住修饰键才切换」和本机上的 Ctrl+Alt+←/→ 不起作用——Sway、Hyprland 上可以把合成器自己的快捷键绑到 `flowacross --switch left` / `right` 来代替（见第 5 节）。快捷键映射的触发键在 Hyprland 上由合成器转交（`hyprland-global-shortcuts-v1`），Sway 和 GNOME / KDE 上仍然只能由别的电脑发过来。
 
 ### X11
 
@@ -303,6 +303,7 @@ Wayland 没有全局键鼠捕获和注入的统一接口，普通程序既看不
   - 按键事件没有连发，由流界按合成器给的重复速度自己产生（修饰键和 Caps Lock 不连发）。
   - 键盘一还给本机就收不到按键的抬起了，所以放开时替还按着的键补发抬起（portal 那套同样处理）。不补的话控制器会一直以为它们按着：触发切换的方向键会被一直"吞掉"，下次按快捷键要按两下才生效。
   - 合成器不锁定指针且有多块显示器时，看不见的光标可能移到另一块屏幕上，那时收不到鼠标事件，移回来才恢复。
+- **全局快捷键**（`linux_hypr_shortcuts.rs`，只有 Hyprland）：快捷键映射的触发键由合成器转交。普通 Wayland 程序看不到全局键盘，Hyprland 为此提供了 `hyprland-global-shortcuts-v1`（协议 XML 取自 Hyprland，放在 `protocols/`，编译时用 wayland-scanner 生成绑定）：流界在单独的线程里连着合成器，把每组快捷键注册成 `register_shortcut(id, appid, 说明, 触发键)` 对象，按下时合成器回调 id（`flow_platform::set_local_shortcut_handler` 装的回调）。协议只管通知，触发键还要在合成器里绑上 `global, app.flowacross.desktop:<id>`：运行时用 `hyprctl` 改，按物理键位（`code:<xkb 键码>`，evdev 加 8）绑，和流界其他地方一样与键盘布局无关。Hyprland 0.57 起配置换成了 Lua，绑定用 `hyprctl eval 'hl.bind(…)'`；更早的版本用 `hyprctl keyword bind`，启动时用 `hyprctl eval 'return 1'` 区分。重载配置会清掉运行时绑定，流界盯着合成器的 `.socket2.sock`，收到 `configreloaded` 就重新绑；退出时把协议对象和绑定都撤掉，别让它们占着按键。注册和绑定都在后台进行，不阻塞界面；内容没变时不重复调 `hyprctl`。xdg-desktop-portal-hyprland 虽然宣告了 GlobalShortcuts，但不会真的建绑定，所以走合成器自己的协议。
 - **剪贴板**（`linux_wl_clipboard.rs`）：`zwlr_data_control`，后台也能读写。结构和 X11 的一样：进程内唯一的后台服务负责应答。读：让数据源把某个格式写进套接字的一端，从另一端读到结束（文本和文件清单最多等 0.5 秒，图片 5 秒）；写：建数据源、声明格式、设为选区，收到请求时在单独的线程里写。自己写入时变化计数直接加一，合成器随后回报的那一次不再重复计数。格式名和 X11 相同。
 - **边缘浮光**（`linux_wl_glow.rs`）：layer-shell 窗口，输入区域为空，按逻辑点的分辨率逐帧把 `glow::render` 的像素写进共享内存缓冲区。
 - **测试**：`scripts/test-wayland.sh` 起一个无头的 sway（`WLR_BACKENDS=headless`、pixman 渲染），在里面串行跑标了 `#[ignore]` 的集成测试：注入的移动撞到屏幕边 → 上报向外推 → 锁定 → 位移、按键、按钮、滚轮、长按连发 → 放开后光标回位；只在指定的边上有反应；剪贴板和 wl-clipboard 双向互通（含 4 MB 图片）；浮光用 grim 截屏比对像素。CI 的 Ubuntu 任务每次都跑。无头合成器里没有真实键鼠，用虚拟指针和虚拟键盘模拟，并让捕获接受"自己注入的移动"。
