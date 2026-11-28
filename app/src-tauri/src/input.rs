@@ -28,6 +28,14 @@ pub type CursorControl = Box<dyn Fn(bool, Option<(f64, f64)>) + Send>;
 const HEARTBEAT: Duration = Duration::from_millis(500);
 /// 对方支持心跳回执时，这么久没收到回执就认为网络断了，键鼠回到本机（约 3 个心跳周期）。
 const ACK_TIMEOUT: Duration = Duration::from_millis(1500);
+/// 别的设备的键鼠正在操作本机时，最近这么久内有它的输入进来，本机就不从屏幕边切出去。
+///
+/// 同一时刻只能有一个控制方，谁的键鼠在动谁就是源。对方的光标刚进来时正贴着通往它的那条边，
+/// 这时本机只要冒出一点朝那条边的位移（鼠标传感器的抖动、别的软件合成的移动）就会被当成
+/// "本机的人把键鼠推回去了"，反过来接管对方；对方的人还在推，马上又切回来——两台电脑在 0.1 秒里
+/// 互相接管好几次，一只鼠标同时带着两边的光标跑（用户反馈，日志里能看到连续的"本机被接管"）。
+/// 对方停手这么久之后，本机的人照常可以把键鼠推过去。
+const TAKEOVER_GUARD: Duration = Duration::from_millis(300);
 
 /// 控制器通知引擎的事件。
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +120,9 @@ pub struct Controller {
     /// 在那台远端按下的键全部"释放"并忘掉，而手其实还按着——不松开 Ctrl+Alt 接着按第二个
     /// 快捷键时就对不上了，主键还会被当成普通键打到新的那台电脑上。
     mods_down: HashSet<KeyCode>,
+    /// 最近一次有别的设备的键鼠输入注入到本机的时间（见 [`TAKEOVER_GUARD`]）；对方离开后清掉。
+    remote_input_at: Option<Instant>,
+    takeover_guard: Duration,
 }
 
 /// 查询本机大写锁定是否打开；查不到时返回 `None`。
@@ -189,7 +200,26 @@ impl Controller {
             wheel_rest: (0, 0),
             hotkeys_suspended: false,
             mods_down: HashSet::new(),
+            remote_input_at: None,
+            takeover_guard: TAKEOVER_GUARD,
         }
+    }
+
+    /// 别的设备的键鼠刚刚操作了本机（进入、移动、点击、滚动、按键；心跳这类通知不算）。
+    /// 之后一小段时间内本机不从屏幕边切出去，见 [`TAKEOVER_GUARD`]。
+    pub fn note_remote_input(&mut self) {
+        self.remote_input_at = Some(Instant::now());
+    }
+
+    /// 控制本机的设备离开了：本机的键鼠马上可以照常切出去。
+    pub fn remote_input_ended(&mut self) {
+        self.remote_input_at = None;
+    }
+
+    /// 别的设备的键鼠正在操作本机（刚刚还有输入进来）。
+    fn remote_input_active(&self) -> bool {
+        self.remote_input_at
+            .is_some_and(|t| t.elapsed() < self.takeover_guard)
     }
 
     /// 让控制器在开始控制远端时查一下本机的大写锁定状态并告诉对方。
@@ -414,6 +444,11 @@ impl Controller {
         let p = d.rect.clamp(p);
         self.last_local = Some(p);
         if !self.cfg.enabled || self.cfg.outputs.is_empty() {
+            return;
+        }
+        // 别的设备的键鼠正在操作本机：这时本机冒出来的位移不算"推出边缘"，否则两边会互相接管。
+        if self.remote_input_active() {
+            self.switcher.reset();
             return;
         }
         // 绝大多数移动离屏幕边缘很远，不可能贴边：直接返回，不必为每个鼠标事件克隆显示器 ID。
@@ -670,6 +705,11 @@ impl Controller {
                 seq: self.heartbeat_seq,
             });
             a.last_beat = Instant::now();
+        }
+        // 贴边停留的计时开始之后，别的设备的键鼠进来了：这次停留作废。
+        if self.active.is_none() && self.remote_input_active() {
+            self.switcher.reset();
+            return;
         }
         let held = self.held();
         let now = self.now_ms();
@@ -1307,6 +1347,47 @@ mod tests {
         // 再推过边缘可以重新控制 PC。
         assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 5.0, 0.0)), Verdict::Suppress);
         assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+    }
+
+    #[test]
+    fn local_edge_pushes_do_not_take_over_while_a_remote_is_driving() {
+        let mut r = rig(SwitchPolicy::default());
+        // PC 的键鼠正在操作本机（光标刚从右边进来，正贴着右边缘）：本机冒出一点朝右的位移，
+        // 不能反过来接管 PC。
+        r.ctl.note_remote_input();
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 1.0, 0.0)), Verdict::Pass);
+        assert_eq!(r.ctl.active_device(), None);
+        assert!(drain(&mut r.pc_rx).is_empty());
+        assert!(r.cursor.lock().unwrap().is_empty());
+        // 快捷键是明确的操作，不受影响；这里只验证屏幕边。PC 离开后马上可以推过去。
+        r.ctl.remote_input_ended();
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 1.0, 0.0)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+        r.ctl.force_local();
+        drain(&mut r.pc_rx);
+
+        // PC 没离开但停手了（过了保护时间）：本机的人拿起鼠标推过去，照常接管。
+        r.ctl.takeover_guard = Duration::from_millis(20);
+        r.ctl.note_remote_input();
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 1.0, 0.0)), Verdict::Pass);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 1.0, 0.0)), Verdict::Suppress);
+        assert_eq!(r.ctl.active_device(), Some(&dev("p")));
+    }
+
+    #[test]
+    fn remote_input_cancels_a_pending_dwell() {
+        let mut r = rig(SwitchPolicy {
+            dwell_ms: 30,
+            ..Default::default()
+        });
+        // 贴着右边往外推，开始计时；这时 PC 的键鼠进来了，到时间也不切。
+        assert_eq!(r.ctl.handle(mv(1439.0, 400.0, 1.0, 0.0)), Verdict::Pass);
+        r.ctl.note_remote_input();
+        std::thread::sleep(Duration::from_millis(50));
+        r.ctl.tick();
+        assert_eq!(r.ctl.active_device(), None);
+        assert!(drain(&mut r.pc_rx).is_empty());
     }
 
     #[test]
