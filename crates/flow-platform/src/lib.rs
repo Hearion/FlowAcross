@@ -25,6 +25,8 @@ mod linux_foreground;
 #[cfg(target_os = "linux")]
 mod linux_glow;
 #[cfg(target_os = "linux")]
+mod linux_hypr_shortcuts;
+#[cfg(target_os = "linux")]
 mod linux_input;
 #[cfg(target_os = "linux")]
 mod linux_portal;
@@ -130,6 +132,60 @@ pub fn set_cursor_captured(captured: bool, restore_at: Option<(f64, f64)>) {
     let _ = (captured, restore_at);
 }
 
+/// 由桌面直接注册的全局快捷键（目前只有 Hyprland）：按下时由合成器通知流界，
+/// 不用先在流界进程里看到键盘。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalShortcut {
+    /// 按下时原样交还给回调的标识（引擎用它找对应的设置）。
+    pub id: String,
+    /// 触发键。
+    pub combo: flow_core::hotkeys::KeyCombo,
+    /// 在合成器自己的快捷键列表里显示的说明，例如「流界：快捷键映射 1」。
+    pub description: String,
+}
+
+/// 引擎接收 [`LocalShortcut`] 的回调：参数是 [`LocalShortcut::id`]，在平台线程上调用，
+/// 必须尽快返回（不能做网络 IO，只能投递到通道或直接改内存状态）。
+pub type LocalShortcutHandler = Box<dyn FnMut(&str) + Send + 'static>;
+
+/// 安装 [`LocalShortcut`] 的回调。要在 [`set_local_shortcuts`] 之前调用；重复调用替换旧的。
+pub fn set_local_shortcut_handler(handler: LocalShortcutHandler) {
+    #[cfg(target_os = "linux")]
+    linux::set_local_shortcut_handler(handler);
+    #[cfg(not(target_os = "linux"))]
+    let _ = handler;
+}
+
+/// 把这些快捷键注册到桌面（Hyprland），按下时调用 [`set_local_shortcut_handler`] 装的回调。
+/// 每次调用整体替换上一组。当前桌面做不到时返回 [`PlatformError::Unsupported`]；
+/// 注册在后台进行，不阻塞调用方。传空列表等于撤销全部注册。
+pub fn set_local_shortcuts(shortcuts: Vec<LocalShortcut>) -> Result<(), PlatformError> {
+    #[cfg(target_os = "linux")]
+    return linux::set_local_shortcuts(shortcuts);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = shortcuts;
+        Err(PlatformError::Unsupported("快捷键映射"))
+    }
+}
+
+/// 撤销全部 [`LocalShortcut`] 注册（退出时调用，等桌面里的绑定删掉再返回）。
+pub fn clear_local_shortcuts() {
+    #[cfg(target_os = "linux")]
+    linux::clear_local_shortcuts();
+}
+
+/// 当前桌面能不能替流界接下映射的触发键（Hyprland 的全局快捷键协议，见 [`LocalShortcut`]）。
+///
+/// 和 [`limits`] 的 `local_mapping` 对应：这里为 `true` 时它一定是 `false`；它也是 `false` 的
+/// 其他系统本来就看得见全局键盘，用不着桌面代劳，这里同样返回 `false`。
+pub fn desktop_shortcuts() -> bool {
+    #[cfg(target_os = "linux")]
+    return linux_wl::hyprland_shortcuts();
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 /// 告诉平台层哪些屏幕边通往别的电脑：(本机显示器, 边)。布局或已连接的设备变化时由引擎调用。
 ///
 /// 只有 Linux 的 Wayland 用得到：那里看不到全局的鼠标移动，只能在屏幕边上放一条很窄的窗口来感知
@@ -195,6 +251,9 @@ pub struct Limits {
     pub hold_key: bool,
     /// 在本机按 Ctrl+Alt+←/→ 切到别的电脑（切过去之后用它切回来不受影响）。
     pub local_hotkey: bool,
+    /// 在本机按快捷键映射的触发键：看不到全局键盘，又没有可以代劳的桌面（Hyprland 有
+    /// `hyprland-global-shortcuts-v1`，由它把按键交给流界，见 [`LocalShortcut`]）。
+    pub local_mapping: bool,
     /// 「停留一会儿才切换」：光标一碰到屏幕边系统就开始捕获，等不了。
     pub dwell: bool,
     /// 边缘浮光。

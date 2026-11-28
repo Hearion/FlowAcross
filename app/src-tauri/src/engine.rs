@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use flow_core::Rect;
@@ -223,6 +223,8 @@ fn auth_kind(kind: flow_platform::AuthKind) -> &'static str {
 pub struct UnsupportedView {
     pub hold_key: bool,
     pub local_hotkey: bool,
+    /// 在本机按快捷键映射的触发键（只有 Wayland 上做不到；Hyprland 能把它们注册成自己的快捷键）。
+    pub local_mapping: bool,
     pub dwell: bool,
     pub edge_glow: bool,
     /// 按前台应用 / 全屏自动锁定：查不到前台是哪个应用。
@@ -234,6 +236,7 @@ impl From<flow_platform::Limits> for UnsupportedView {
         Self {
             hold_key: l.hold_key,
             local_hotkey: l.local_hotkey,
+            local_mapping: l.local_mapping,
             dwell: l.dwell,
             edge_glow: l.edge_glow,
             auto_lock: l.foreground_app,
@@ -409,6 +412,15 @@ struct Inner {
     /// 推给界面的状态的序号，在 `state` 锁里递增：两个任务同时推送时，界面丢掉先算出来却后到的那份。
     view_seq: AtomicU64,
     capture_warned: AtomicBool,
+    /// 已经提示过"没能把快捷键映射注册到桌面"（Hyprland）。
+    shortcut_warned: AtomicBool,
+    /// `sync_input` 给每份交给桌面的映射注册表编的序号，在 `state` 锁里递增。
+    shortcut_seq: AtomicU64,
+    /// 已经交给桌面的那份注册表的序号。交出去是在 `state` 锁外做的（第一次要连合成器、
+    /// 调 `hyprctl`），两个线程同时同步时靠它丢掉先算出来却后到的那份。
+    shortcut_applied: Mutex<u64>,
+    /// 桌面交来映射的触发键、却没发出去时的提示（对方可能刚断开），限制频率。
+    shortcut_failures: Mutex<RateLimit>,
     /// `shutdown()` 之后为 true：后台循环退出，不再重连、不再重新安装键鼠捕获。
     stopped: AtomicBool,
     /// 系统接口失败后，下次重试的时间（避免频繁调用系统接口）。
@@ -529,15 +541,85 @@ fn map_key(from: Os, local: Os, win_keys: WinToMacKeys, code: KeyCode) -> KeyCod
     }
 }
 
-/// 控制器实际使用的快捷键。看不到全局键盘的桌面（Linux 的 Wayland）不支持快捷键映射：键鼠在本机时
-/// 按触发键没有反应，只有键鼠已经切到别的电脑后才触发，和"不用切过去"的用途相反（用户反馈），
-/// 设置页也不显示这一节，所以配置里留着的映射（比如从 X11 会话带过来的）一律不用。
+/// 控制器实际使用的快捷键。看不到全局键盘、又没有桌面能代劳的 Wayland 会话不支持快捷键映射：
+/// 键鼠在本机时按触发键没有反应，只有键鼠已经切到别的电脑后才触发，和"不用切过去"的用途相反
+/// （用户反馈），设置页也不显示这一节，所以配置里留着的映射（比如从 X11 会话带过来的）一律不用。
+/// Hyprland 上映射的触发键由合成器交给流界（`LocalShortcut`），照常保留。
 fn usable_hotkeys(hotkeys: &Hotkeys, limits: flow_platform::Limits) -> Hotkeys {
     let mut hotkeys = hotkeys.clone();
-    if limits.local_hotkey {
+    if limits.local_mapping {
         hotkeys.mappings.clear();
     }
     hotkeys
+}
+
+/// 交给桌面注册的映射触发键（Hyprland）：只包括现在真发得出去的映射——目标连着，而且认得
+/// `Message::KeyStroke`。共享暂停时一条都不注册。发不出去的触发键照常交给原来的去处。
+fn local_shortcuts(
+    hotkeys: &Hotkeys,
+    sendable: &HashSet<DeviceId>,
+    paused: bool,
+) -> Vec<flow_platform::LocalShortcut> {
+    if paused {
+        return Vec::new();
+    }
+    hotkeys
+        .mappings
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.trigger.is_trigger() && sendable.contains(&m.device))
+        .map(|(i, m)| flow_platform::LocalShortcut {
+            id: format!("mapping:{i}"),
+            combo: m.trigger,
+            description: format!("流界：快捷键映射 {}", i + 1),
+        })
+        .collect()
+}
+
+/// 桌面把某个映射的触发键交给流界了（Hyprland 的全局快捷键，`id` 是 `mapping:<序号>`）。
+/// 在协议线程里调用，不能等太久：只拿一下锁就发按键，发不出去时提示用户（限频）。
+fn local_shortcut(inner: &Weak<Inner>, id: &str) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    if inner.stopped.load(Ordering::Relaxed) {
+        return;
+    }
+    let engine = Engine { inner };
+    let Some(index) = id
+        .strip_prefix("mapping:")
+        .and_then(|n| n.parse::<usize>().ok())
+    else {
+        return;
+    };
+    let name = {
+        let st = engine.lock();
+        let Some(mapping) = st.config.settings.hotkeys.mappings.get(index) else {
+            return;
+        };
+        st.config
+            .peer(&mapping.device)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    };
+    if engine.controller().run_shortcut(id) {
+        return;
+    }
+    if engine
+        .inner
+        .shortcut_failures
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allow(engine.now_ms())
+    {
+        let target = match name.is_empty() {
+            true => "目标电脑".to_owned(),
+            false => format!("「{name}」"),
+        };
+        engine.notice(format!(
+            "快捷键映射没能发给{target}：可能刚刚断开，或者共享已暂停。"
+        ));
+    }
 }
 
 /// `limits`：当前系统做不到的切换方式。做不到的设置一律忽略，否则打开后永远切不过去
@@ -1034,6 +1116,10 @@ impl Engine {
                 capture_on: AtomicBool::new(false),
                 view_seq: AtomicU64::new(0),
                 capture_warned: AtomicBool::new(false),
+                shortcut_warned: AtomicBool::new(false),
+                shortcut_seq: AtomicU64::new(0),
+                shortcut_applied: Mutex::new(0),
+                shortcut_failures: Mutex::new(RateLimit::new(2, 60_000)),
                 stopped: AtomicBool::new(false),
                 capture_retry_at: Mutex::new(None),
                 controlled: Mutex::new(None),
@@ -1067,6 +1153,14 @@ impl Engine {
         };
         if let Some(dir) = &engine.inner.receive_dir {
             transfer::clean_staging(dir);
+        }
+        // 桌面能替流界接下映射的触发键时（Hyprland），快捷键由 `sync_input` 注册过去，
+        // 合成器在用户按下时回调到这里。回调在协议线程里跑，只做转发。
+        if engine.inner.input && flow_platform::desktop_shortcuts() {
+            let inner = Arc::downgrade(&engine.inner);
+            flow_platform::set_local_shortcut_handler(Box::new(move |id| {
+                local_shortcut(&inner, id)
+            }));
         }
 
         if opts.discovery {
@@ -1119,6 +1213,8 @@ impl Engine {
             // 退出前恢复 AWDL。
             let _ = flow_platform::low_latency::set_active(false);
         }
+        // 撤掉注册在桌面里的映射触发键（Hyprland），别让它们退出后还占着按键。
+        flow_platform::clear_local_shortcuts();
         self.inner.endpoint.close(0u32.into(), b"shutdown");
     }
 
@@ -1417,6 +1513,7 @@ impl Engine {
     /// 把当前可控制的设备、布局和防误触设置同步给跨屏控制器。
     fn sync_input(&self) {
         let st = self.lock();
+        let limits = flow_platform::limits();
         self.inner
             .idle
             .store(st.sessions.is_empty(), Ordering::Relaxed);
@@ -1437,6 +1534,21 @@ impl Engine {
         if self.inner.input {
             flow_platform::set_switch_edges(&layout.switch_edges(&local));
         }
+        let hotkeys = usable_hotkeys(&st.config.settings.hotkeys, limits);
+        let remote_keys: HashSet<DeviceId> = st
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.remote_actions)
+            .map(|(id, _)| id.clone())
+            .collect();
+        // 桌面能接下触发键时（Hyprland），只注册现在真的发得出去的映射：发不出去的不占按键，
+        // 触发键照常交给原来的去处（和其他系统上"动作没做成就不算快捷键"一致）。
+        let sendable: HashSet<DeviceId> = remote_keys
+            .iter()
+            .filter(|id| outputs.contains_key(*id))
+            .cloned()
+            .collect();
+        let shortcuts = local_shortcuts(&hotkeys, &sendable, st.config.settings.sharing_paused);
         let cfg = ControllerConfig {
             layout,
             local_offset: st.config.local_offset,
@@ -1444,7 +1556,7 @@ impl Engine {
             policy: switch_policy(
                 &st.config.settings,
                 st.locked || st.auto_lock.is_some(),
-                flow_platform::limits(),
+                limits,
             ),
             mapping: st.config.settings.mapping,
             wheel_percent: st.config.settings.wheel_percent(),
@@ -1455,15 +1567,35 @@ impl Engine {
                 .filter(|(_, s)| s.acks)
                 .map(|(id, _)| id.clone())
                 .collect(),
-            hotkeys: usable_hotkeys(&st.config.settings.hotkeys, flow_platform::limits()),
-            remote_keys: st
-                .sessions
-                .iter()
-                .filter(|(_, s)| s.remote_actions)
-                .map(|(id, _)| id.clone())
-                .collect(),
+            hotkeys,
+            remote_keys,
         };
+        // 控制器的配置在 `state` 锁里换：两个线程同时同步时，后算出来的那份一定后生效。
         self.controller().configure(cfg);
+        let seq = self.inner.shortcut_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(st);
+        // 在本机按映射的触发键要靠桌面转交（曲线救国：Wayland 看不到全局键盘）。
+        // 第一次要连合成器、调 `hyprctl`，不能占着 `state` 锁；顺序改由序号保证。
+        if self.inner.input && flow_platform::desktop_shortcuts() {
+            let mut applied = self
+                .inner
+                .shortcut_applied
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if seq <= *applied {
+                return;
+            }
+            *applied = seq;
+            if let Err(e) = flow_platform::set_local_shortcuts(shortcuts) {
+                if !self.inner.shortcut_warned.swap(true, Ordering::Relaxed) {
+                    warn!(error = %e, "没法把快捷键映射注册到桌面");
+                    self.notice(format!(
+                        "没能把快捷键映射注册到桌面（{}）。设置里的映射暂时不能在本机触发。",
+                        platform_reason(&e)
+                    ));
+                }
+            }
+        }
     }
 
     fn notice(&self, msg: impl Into<String>) {
@@ -4768,6 +4900,7 @@ mod tests {
         assert_eq!(usable_hotkeys(&h, flow_platform::Limits::default()), h);
         let wayland = flow_platform::Limits {
             local_hotkey: true,
+            local_mapping: true,
             ..Default::default()
         };
         let used = usable_hotkeys(&h, wayland);
@@ -4775,6 +4908,45 @@ mod tests {
         // 切换用的快捷键照常保留（键鼠切过去之后用它切回来）。
         assert_eq!(used.switch_left, h.switch_left);
         assert_eq!(used.switch_right, h.switch_right);
+        // Hyprland：看不到本机键盘（local_hotkey），但映射的触发键由合成器交给流界。
+        let hypr = flow_platform::Limits {
+            local_hotkey: true,
+            ..Default::default()
+        };
+        assert_eq!(usable_hotkeys(&h, hypr), h);
+    }
+
+    #[test]
+    fn only_sendable_mappings_are_registered_with_the_desktop() {
+        use flow_core::hotkeys::{KeyCombo, KeyMapping};
+        let ctrl_alt = Modifiers::CTRL | Modifiers::ALT;
+        let a = DeviceId("a".into());
+        let b = DeviceId("b".into());
+        let h = Hotkeys {
+            mappings: vec![
+                // 目标连着、认得按键消息：注册。
+                KeyMapping {
+                    trigger: KeyCombo::new(ctrl_alt, KeyCode(0x16)),
+                    send: KeyCombo::new(Modifiers::NONE, KeyCode(0x16)),
+                    device: a.clone(),
+                },
+                // 目标没连着：不注册。
+                KeyMapping {
+                    trigger: KeyCombo::new(ctrl_alt, KeyCode(0x17)),
+                    send: KeyCombo::new(Modifiers::NONE, KeyCode(0x17)),
+                    device: b,
+                },
+            ],
+            ..Default::default()
+        };
+        let sendable: HashSet<DeviceId> = [a].into_iter().collect();
+        let registered = local_shortcuts(&h, &sendable, false);
+        assert_eq!(registered.len(), 1);
+        // 序号还是设置里的序号（按下时按 id 找回对应的一条）。
+        assert_eq!(registered[0].id, "mapping:0");
+        assert_eq!(registered[0].combo, h.mappings[0].trigger);
+        // 共享暂停时一条也不注册，触发键留给本来的去处。
+        assert!(local_shortcuts(&h, &sendable, true).is_empty());
     }
 
     #[test]

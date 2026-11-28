@@ -49,6 +49,10 @@ x11rb = { version = "0.13", features = ["xinput", "xtest", "randr", "xfixes", "s
 # wayland-client 默认用纯 Rust 的协议实现，不链接 libwayland。
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+# Hyprland 的全局快捷键协议不在 wayland-protocols 里：XML 放在 `protocols/`，编译时生成绑定。
+# 生成的代码直接引用 wayland-backend 的类型，要作为直接依赖。
+wayland-scanner = "0.31"
+wayland-backend = "0.3"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # 虚拟键盘要自己提供键盘映射、自己算修饰键状态（链接系统的 libxkbcommon，打包时依赖 libxkbcommon-dev）。

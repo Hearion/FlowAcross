@@ -570,6 +570,21 @@ impl Controller {
         }
     }
 
+    /// 桌面直接交给流界的快捷键（Hyprland 的全局快捷键，见 `flow_platform::LocalShortcut`）：
+    /// `id` 是 `mapping:<序号>`，执行设置里对应的快捷键映射。和按下触发键走同一条路。
+    pub fn run_shortcut(&mut self, id: &str) -> bool {
+        let index = id
+            .strip_prefix("mapping:")
+            .and_then(|n| n.parse::<usize>().ok());
+        let Some(mapping) = index
+            .and_then(|i| self.cfg.hotkeys.mappings.get(i))
+            .cloned()
+        else {
+            return false;
+        };
+        self.send_keys(&mapping.device, mapping.send)
+    }
+
     /// 快捷键映射：让 `device` 按一下 `keys`，键鼠不用切过去。对方没连着、被暂停、
     /// 或版本太旧不认得这条消息时返回 `false`。锁定在本机不影响（它只限制键鼠切出去）。
     fn send_keys(&mut self, device: &DeviceId, keys: KeyCombo) -> bool {

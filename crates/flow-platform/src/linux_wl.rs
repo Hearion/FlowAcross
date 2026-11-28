@@ -53,33 +53,60 @@ fn pick_backend(wayland: bool, globals: Option<&[String]>) -> Backend {
     }
 }
 
-/// 当前会话的类型，以及合成器有没有 layer-shell（浮光要用）。进程启动后不会变，只判断一次。
-fn session() -> (Backend, bool) {
-    static SESSION: OnceLock<(Backend, bool)> = OnceLock::new();
-    *SESSION.get_or_init(|| {
+/// 当前会话的类型、合成器有没有 layer-shell（浮光要用）、以及是不是 Hyprland 并且能直接
+/// 注册全局快捷键。进程启动后不会变，只判断一次。
+struct Session {
+    backend: Backend,
+    layer_shell: bool,
+    /// 合成器提供 `hyprland-global-shortcuts-v1`，并且有 `hyprctl` 可用的 Hyprland 会话。
+    hypr_shortcuts: bool,
+}
+
+fn detect(wayland: bool, globals: Option<&[String]>, hypr_session: bool) -> Session {
+    let has = |g: &[String], name: &str| g.iter().any(|i| i == name);
+    let backend = pick_backend(wayland, globals);
+    Session {
+        backend,
+        layer_shell: globals.is_some_and(|g| has(g, "zwlr_layer_shell_v1")),
+        // 只有 Hyprland 有这套协议；再认一下环境变量，免得嵌套（别的合成器里跑的 Hyprland）时
+        // 拿 hyprctl 去改错地方。
+        hypr_shortcuts: backend == Backend::Wlr
+            && globals.is_some_and(|g| has(g, "hyprland_global_shortcuts_manager_v1"))
+            && hypr_session,
+    }
+}
+
+fn session() -> &'static Session {
+    static SESSION: OnceLock<Session> = OnceLock::new();
+    SESSION.get_or_init(|| {
         let wayland = wayland_session();
         let globals = wayland.then(global_interfaces).and_then(Result::ok);
-        let layer_shell = globals
-            .as_deref()
-            .is_some_and(|g| g.iter().any(|i| i == "zwlr_layer_shell_v1"));
-        (pick_backend(wayland, globals.as_deref()), layer_shell)
+        let hypr = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some();
+        detect(wayland, globals.as_deref(), hypr)
     })
 }
 
 pub(crate) fn backend() -> Backend {
-    session().0
+    session().backend
+}
+
+/// 能不能把全局快捷键注册到 Hyprland（见 `linux_hypr_shortcuts.rs`）。
+pub(crate) fn hyprland_shortcuts() -> bool {
+    session().hypr_shortcuts
 }
 
 /// 这种会话里做不到的切换方式和效果。
-fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
-    match backend {
+fn limits_for(session: &Session) -> Limits {
+    match session.backend {
         Backend::X11 => Limits::default(),
         // 看不到全局键盘。
         Backend::Wlr => Limits {
             hold_key: true,
             local_hotkey: true,
+            // Hyprland 能把映射的触发键注册成自己的全局快捷键，Sway 没有这个协议。
+            local_mapping: !session.hypr_shortcuts,
             dwell: false,
-            edge_glow: !layer_shell,
+            edge_glow: !session.layer_shell,
             local_input: true,
             // 可以把边缘窗口铺满屏幕接住光标，见 `linux_wlr_input.rs` 的 `apply_summon`。
             commanded_switch: false,
@@ -89,8 +116,9 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
         Backend::Portal => Limits {
             hold_key: true,
             local_hotkey: true,
+            local_mapping: true,
             dwell: true,
-            edge_glow: !layer_shell,
+            edge_glow: !session.layer_shell,
             local_input: true,
             commanded_switch: true,
             foreground_app: true,
@@ -99,8 +127,7 @@ fn limits_for(backend: Backend, layer_shell: bool) -> Limits {
 }
 
 pub(crate) fn limits() -> Limits {
-    let (backend, layer_shell) = session();
-    limits_for(backend, layer_shell)
+    limits_for(session())
 }
 
 pub(crate) fn connect() -> Result<Connection, PlatformError> {
@@ -442,16 +469,59 @@ mod tests {
         assert_eq!(pick_backend(true, None), Backend::Portal);
     }
 
+    fn session(b: Backend, layer_shell: bool, hypr: bool) -> Session {
+        Session {
+            backend: b,
+            layer_shell,
+            hypr_shortcuts: hypr,
+        }
+    }
+
     #[test]
     fn wayland_sessions_report_what_they_cannot_do() {
-        assert_eq!(limits_for(Backend::X11, false), Limits::default());
-        let sway = limits_for(Backend::Wlr, true);
+        assert_eq!(
+            limits_for(&session(Backend::X11, false, false)),
+            Limits::default()
+        );
+        let sway = limits_for(&session(Backend::Wlr, true, false));
         assert!(sway.hold_key && sway.local_hotkey && sway.local_input && sway.foreground_app);
         assert!(!sway.dwell && !sway.edge_glow);
-        let kde = limits_for(Backend::Portal, true);
+        // 只有 Hyprland 能直接注册映射的触发键。
+        assert!(sway.local_mapping);
+        let hypr = limits_for(&session(Backend::Wlr, true, true));
+        assert!(!hypr.local_mapping);
+        assert!(hypr.local_hotkey && hypr.hold_key);
+        let kde = limits_for(&session(Backend::Portal, true, false));
         assert!(kde.hold_key && kde.local_hotkey && kde.dwell && !kde.edge_glow);
+        assert!(kde.local_mapping);
         // GNOME 没有 layer-shell：浮光也没有。
-        assert!(limits_for(Backend::Portal, false).edge_glow);
+        assert!(limits_for(&session(Backend::Portal, false, false)).edge_glow);
+    }
+
+    #[test]
+    fn only_hyprland_sessions_can_register_shortcuts() {
+        let hypr = names(&[
+            "wl_compositor",
+            "zwlr_layer_shell_v1",
+            "zwlr_virtual_pointer_manager_v1",
+            "zwp_virtual_keyboard_manager_v1",
+            "hyprland_global_shortcuts_manager_v1",
+        ]);
+        // 协议在、又是 Hyprland 会话（有 hyprctl）才算。
+        let detected = detect(true, Some(&hypr), true);
+        assert_eq!(detected.backend, Backend::Wlr);
+        assert!(detected.hypr_shortcuts);
+        // 不在 Hyprland 会话里（嵌套的合成器）不算。
+        assert!(!detect(true, Some(&hypr), false).hypr_shortcuts);
+        // Sway 没有这个协议。
+        let sway = names(&[
+            "zwlr_layer_shell_v1",
+            "zwlr_virtual_pointer_manager_v1",
+            "zwp_virtual_keyboard_manager_v1",
+        ]);
+        assert!(!detect(true, Some(&sway), true).hypr_shortcuts);
+        // X11 会话里不算。
+        assert!(!detect(false, Some(&hypr), true).hypr_shortcuts);
     }
 
     fn output(mode: (i32, i32), logical: Option<((i32, i32), (i32, i32))>) -> Output {
