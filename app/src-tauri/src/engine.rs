@@ -414,6 +414,11 @@ struct Inner {
     capture_warned: AtomicBool,
     /// 已经提示过"没能把快捷键映射注册到桌面"（Hyprland）。
     shortcut_warned: AtomicBool,
+    /// `sync_input` 给每份交给桌面的映射注册表编的序号，在 `state` 锁里递增。
+    shortcut_seq: AtomicU64,
+    /// 已经交给桌面的那份注册表的序号。交出去是在 `state` 锁外做的（第一次要连合成器、
+    /// 调 `hyprctl`），两个线程同时同步时靠它丢掉先算出来却后到的那份。
+    shortcut_applied: Mutex<u64>,
     /// 桌面交来映射的触发键、却没发出去时的提示（对方可能刚断开），限制频率。
     shortcut_failures: Mutex<RateLimit>,
     /// `shutdown()` 之后为 true：后台循环退出，不再重连、不再重新安装键鼠捕获。
@@ -1112,6 +1117,8 @@ impl Engine {
                 view_seq: AtomicU64::new(0),
                 capture_warned: AtomicBool::new(false),
                 shortcut_warned: AtomicBool::new(false),
+                shortcut_seq: AtomicU64::new(0),
+                shortcut_applied: Mutex::new(0),
                 shortcut_failures: Mutex::new(RateLimit::new(2, 60_000)),
                 stopped: AtomicBool::new(false),
                 capture_retry_at: Mutex::new(None),
@@ -1563,10 +1570,22 @@ impl Engine {
             hotkeys,
             remote_keys,
         };
-        drop(st);
+        // 控制器的配置在 `state` 锁里换：两个线程同时同步时，后算出来的那份一定后生效。
         self.controller().configure(cfg);
+        let seq = self.inner.shortcut_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        drop(st);
         // 在本机按映射的触发键要靠桌面转交（曲线救国：Wayland 看不到全局键盘）。
+        // 第一次要连合成器、调 `hyprctl`，不能占着 `state` 锁；顺序改由序号保证。
         if self.inner.input && flow_platform::desktop_shortcuts() {
+            let mut applied = self
+                .inner
+                .shortcut_applied
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if seq <= *applied {
+                return;
+            }
+            *applied = seq;
             if let Err(e) = flow_platform::set_local_shortcuts(shortcuts) {
                 if !self.inner.shortcut_warned.swap(true, Ordering::Relaxed) {
                     warn!(error = %e, "没法把快捷键映射注册到桌面");

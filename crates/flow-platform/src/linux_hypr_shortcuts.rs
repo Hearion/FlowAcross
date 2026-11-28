@@ -348,6 +348,10 @@ fn key_number(combo: KeyCombo) -> Option<u16> {
 
 /// 在 Hyprland 里换掉绑定：先删掉上一次的（以及这次要用的，清掉上次崩溃留下的），再按现在的绑。
 /// 返回这次之后应该绑定着的触发键，供下一次撤销、以及退出时清理。
+///
+/// Hyprland 的 `unbind` 要求修饰键、键名、键码都一样才删：这里一律写 `code:<键码>`，所以只会删掉
+/// 同样用 `code:` 写的绑定（我们自己的，或用户在配置里恰好用同一个键码写的），用户按键名写的
+/// 绑定（`CTRL ALT, S`）不受影响——那种情况下按一次，两边的动作都会执行。
 fn apply_binds(style: BindStyle, old: &[String], specs: &[LocalShortcut]) -> Vec<String> {
     // 能绑的（触发键在键码表里查得到），按设置里的顺序。
     let keys: Vec<(String, &LocalShortcut)> = specs
