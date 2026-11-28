@@ -4594,6 +4594,8 @@ impl Engine {
             Some(Remote::Move(..) | Remote::Button(..) | Remote::Wheel(..) | Remote::Key(..))
         ) {
             self.remote_activity();
+            // 对方的键鼠正在操作本机：这段时间本机不从屏幕边切出去（见 `input::TAKEOVER_GUARD`）。
+            self.controller().note_remote_input();
         }
         match action {
             Some(Remote::Move(display, x, y)) => self.inject(|i| i.move_to(&display, x, y)),
@@ -4608,6 +4610,7 @@ impl Engine {
                 if !flow_platform::limits().local_input {
                     self.set_input_at(Some(peer.clone()));
                 }
+                self.controller().remote_input_ended();
                 self.release_controlled(Some(peer));
             }
             Some(Remote::ReleaseKeys) => {
@@ -4708,8 +4711,13 @@ impl Engine {
         }
         // 本机正在控制别的设备时被接管（用户拿起了那台电脑自己的鼠标推过来）：
         // 先释放远端按键、解锁本机光标，再接受对方的控制，否则两边都以为自己是控制方。
-        if self.controller().yield_control() {
-            info!(device = %short(peer), "本机被接管");
+        {
+            let mut ctl = self.controller();
+            if ctl.yield_control() {
+                info!(device = %short(peer), "本机被接管");
+            }
+            // 对方的键鼠进来了：光标正贴着通往它的那条边，这时本机的位移不能把键鼠再切回去。
+            ctl.note_remote_input();
         }
         if self.inner.input
             && flow_platform::permissions().state(Permission::Accessibility)
